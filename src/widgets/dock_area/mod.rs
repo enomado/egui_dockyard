@@ -9,11 +9,11 @@ mod drag_and_drop;
 mod state;
 mod tab_removal;
 
-use crate::{dock_state::DockState, NodeIndex, Style, SurfaceIndex, TabIndex};
 pub use allowed_splits::AllowedSplits;
+use egui::{emath::*, Id, Modifiers};
 use tab_removal::TabRemoval;
 
-use egui::{emath::*, Id, Modifiers};
+use crate::{dock_state::DockState, NodePath, Style, TabIndex, TabPath};
 
 /// Displays a [`DockState`] in `egui`.
 pub struct DockArea<'tree, Tab> {
@@ -38,8 +38,8 @@ pub struct DockArea<'tree, Tab> {
     window_bounds: Option<Rect>,
 
     to_remove: Vec<TabRemoval>,
-    to_detach: Vec<(SurfaceIndex, NodeIndex, TabIndex)>,
-    new_focused: Option<(SurfaceIndex, NodeIndex)>,
+    to_detach: Vec<TabPath>,
+    new_focused: Option<NodePath>,
     tab_hover_rect: Option<(Rect, TabIndex)>,
 }
 

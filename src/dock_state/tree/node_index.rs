@@ -1,5 +1,7 @@
 use std::ops::Range;
 
+use crate::SurfaceIndex;
+
 /// Wrapper around indices to the collection of nodes inside a [`Tree`](crate::Tree).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
@@ -61,13 +63,13 @@ impl NodeIndex {
     /// Returns `true` if current node is the left child of its parent, otherwise `false`.
     #[inline(always)]
     pub const fn is_left(self) -> bool {
-        self.0 % 2 != 0
+        !self.0.is_multiple_of(2)
     }
 
     /// Returns `true` if current node is the right child of its parent, otherwise `false`.
     #[inline(always)]
     pub const fn is_right(self) -> bool {
-        self.0 % 2 == 0
+        self.0.is_multiple_of(2)
     }
 
     #[inline]
@@ -92,5 +94,44 @@ impl NodeIndex {
         let s = (self.0 + 1) * base + (base / 2) - 1;
         let e = (self.0 + 2) * base - 1;
         s..e
+    }
+}
+
+/// A full path to locate a node in an entire dock state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+pub struct NodePath {
+    /// Index of the surface owning the node.
+    pub surface: SurfaceIndex,
+    /// Index of the node in the surface tree.
+    pub node: NodeIndex,
+}
+
+impl NodePath {
+    /// Points to the root node of the main surface.
+    pub const MAIN_ROOT: Self = Self {
+        surface: SurfaceIndex::main(),
+        node: NodeIndex::root(),
+    };
+
+    /// Creates a fully qualified new path to a node.
+    pub const fn new(surface: SurfaceIndex, node: NodeIndex) -> Self {
+        Self { surface, node }
+    }
+
+    /// Returns the path to the node to the left of the current one.
+    pub const fn left_node(self) -> Self {
+        Self {
+            surface: self.surface,
+            node: self.node.left(),
+        }
+    }
+
+    /// Returns the path to the node to the right of the current one.
+    pub const fn right_node(self) -> Self {
+        Self {
+            surface: self.surface,
+            node: self.node.right(),
+        }
     }
 }

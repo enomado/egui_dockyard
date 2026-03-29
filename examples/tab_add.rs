@@ -1,8 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
 use eframe::{egui, NativeOptions};
-
-use egui_dock::{DockArea, DockState, NodeIndex, Style, SurfaceIndex};
+use egui_dock::{DockArea, DockState, NodeIndex, NodePath, Style};
 
 fn main() -> eframe::Result<()> {
     let options = NativeOptions::default();
@@ -14,7 +13,7 @@ fn main() -> eframe::Result<()> {
 }
 
 struct TabViewer<'a> {
-    added_nodes: &'a mut Vec<(SurfaceIndex, NodeIndex)>,
+    added_nodes: &'a mut Vec<NodePath>,
 }
 
 impl egui_dock::TabViewer for TabViewer<'_> {
@@ -28,8 +27,8 @@ impl egui_dock::TabViewer for TabViewer<'_> {
         ui.label(format!("Content of tab {tab}"));
     }
 
-    fn on_add(&mut self, surface: SurfaceIndex, node: NodeIndex) {
-        self.added_nodes.push((surface, node));
+    fn on_add(&mut self, path: NodePath) {
+        self.added_nodes.push(path);
     }
 }
 
@@ -54,24 +53,24 @@ impl Default for MyApp {
 }
 
 impl eframe::App for MyApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let mut added_nodes = Vec::new();
         DockArea::new(&mut self.tree)
             .show_add_buttons(true)
             .style({
-                let mut style = Style::from_egui(ctx.style().as_ref());
+                let mut style = Style::from_egui(ui.style().as_ref());
                 style.tab_bar.fill_tab_bar = true;
                 style
             })
-            .show(
-                ctx,
+            .show_inside(
+                ui,
                 &mut TabViewer {
                     added_nodes: &mut added_nodes,
                 },
             );
 
-        added_nodes.drain(..).for_each(|(surface, node)| {
-            self.tree.set_focused_node_and_surface((surface, node));
+        added_nodes.drain(..).for_each(|path| {
+            self.tree.set_focused_node_and_surface(path);
             self.tree.push_to_focused_leaf(self.counter);
             self.counter += 1;
         });

@@ -1,10 +1,67 @@
 # egui_dock changelog
 
+## egui_dock 0.19.0 - 2026/03/29
+
+### Breaking changes
+
+- Upgraded to egui 0.34. ([#314](https://github.com/anhosh/egui_dock/pull/314))
+- Replaced all `SurfaceIndex`, `NodeIndex`, and `TabIndex` groupings with `NodePath` and `TabPath` in the argument lists
+  of the following functions ([#312](https://github.com/anhosh/egui_dock/pull/312)):
+    - `DockState::set_active_tab`,
+    - `DockState::set_focused_node_and_surface`,
+    - `DockState::move_tab`,
+    - `DockState::detach_tab`,
+    - `DockState::remove_tab`,
+    - `DockState::remove_leaf`,
+    - `DockState::split`,
+    - `DockState::focused_leaf`,
+    - `TabViewer::context_menu`,
+    - `TabViewer::on_add`,
+    - `TabViewer::add_popup`.
+- Changed the return type of some methods ([#312](https://github.com/anhosh/egui_dock/pull/312)):
+    - `DockState::iter_all_nodes` now returns `impl Iterator<Item = (NodePath, &Node<Tab>)>`,
+    - `DockState::iter_all_nodes_mut` now returns `impl Iterator<Item = (NodePath, &mut Node<Tab>)>`,
+    - `DockState::iter_all_tabs` now returns `impl Iterator<Item = (TabPath, &Tab)>`,
+    - `DockState::iter_all_tabs_mut` now returns `impl Iterator<Item = (TabPath, &mut Tab)>`,
+    - `DockState::iter_leaves` now returns `impl Iterator<Item = (NodePath, &LeafNode<Tab>)>`,
+    - `DockState::iter_leaves_mut` now returns `impl Iterator<Item = (NodePath, &mut LeafNode<Tab>)>`,
+    - `DockState::find_tab_from` now returns `Option<TabPath>`,
+    - `DockState::find_tab` now returns `Option<TabPath>`,
+    - `Surface::iter_all_tabs` now returns `impl Iterator<Item = ((NodeIndex, TabIndex), &Tab)>`,
+    - `Surface::iter_all_tabs_mut` now returns `impl Iterator<Item = ((NodeIndex, TabIndex), &mut Tab)>`,
+    - `Tree::set_active_tab` now returns `Result<()>` (`Err` if any of the indices are invalid),
+    - `LeafNode::::set_active_tab` now returns `Result<()>` (`Err` if the tab index is invalid).
+- `impl From<(SurfaceIndex, NodeIndex, TabInsert)> for TabDestination` was replaced with
+  `impl From<(NodePath, TabInsert)> for TabDestination`. ([#312](https://github.com/anhosh/egui_dock/pull/312))
+
+### Added
+
+- `NodePath` and `TabPath` structs, useful for more consistent and terse indexing of nodes and
+  tabs. ([#312](https://github.com/anhosh/egui_dock/pull/312))
+- Indexing `LeafNode` with `TabIndex`. ([#311](https://github.com/anhosh/egui_dock/pull/311/))
+- Indexing `DockState` using `NodePath`. ([#312](https://github.com/anhosh/egui_dock/pull/312))
+- New methods ([#312](https://github.com/anhosh/egui_dock/pull/312)):
+    - `DockState::node(_mut)`: returns a `Node` at a given `NodePath`,
+    - `DockState::leaf(_mut)`: returns a `LeafNode` at a given `NodePath`,
+    - `DockState::iter_surfaces(_mut)_indexed`: returns a `Surface` iterator paired with its `SurfaceIndex`,
+    - `Surface::iter_nodes(_mut)_indexed`: returns a `Node<Tab>` iterator paired with its `NodeIndex`,
+    - `Tree::leaf(_mut)`: returns a `Result<&LeafNode<Tab>>` at a given `NodeIndex`,
+    - `Node::iter_tabs(_mut)_indexed`: returns a `Tab` iterator paried with its `TabIndex`.
+
+### Fixed
+
+- No more panics when a window is shrunk to zero available space. ([#309](https://github.com/anhosh/egui_dock/pull/309))
+- No more panics while trying move a tab to the end of the list within the same leaf. ([#308](https://github.com/anhosh/egui_dock/pull/308))
+
+### Deprecated
+
+- `DockArea::show` - use `DockArea::show_inside` instead. ([#314](https://github.com/anhosh/egui_dock/pull/314))
+
 ## egui_dock 0.18.0 - 2025/10/31
 
 ### Breaking changes
 
-- Upgraded to egui 0.33 ([#293](https://github.com/Adanos020/egui_dock/pull/293))
+- Upgraded to egui 0.33. ([#293](https://github.com/Adanos020/egui_dock/pull/293))
 
 ### Changed
 

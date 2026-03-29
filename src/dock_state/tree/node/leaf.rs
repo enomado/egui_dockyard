@@ -1,6 +1,8 @@
+use std::ops;
+
 use egui::Rect;
 
-use crate::TabIndex;
+use crate::{Error, Result, TabIndex};
 
 /// The inner data of a [``Node::Leaf``](crate::Node), which contains tabs and can be collapsed.
 #[derive(Clone, Debug)]
@@ -40,12 +42,15 @@ impl<Tab> LeafNode<Tab> {
 
     /// Set the active tab of this [`LeafNode`]
     ///
-    /// If ``active_tab`` is out of bounds, it will be ignored and the active tab will not be changed.
+    /// If `active_tab` is out of bounds, an error is returned and the active tab is not changed.
     #[inline]
-    pub fn set_active_tab(&mut self, active_tab: impl Into<TabIndex>) {
+    pub fn set_active_tab(&mut self, active_tab: impl Into<TabIndex>) -> Result {
         let index = active_tab.into();
         if index.0 < self.len() {
             self.active = index;
+            Ok(())
+        } else {
+            Err(Error::InvalidTab)
         }
     }
 
@@ -139,5 +144,19 @@ impl<Tab> LeafNode<Tab> {
         self.tabs
             .get_mut(self.active.0)
             .map(|tab| (self.viewport, tab))
+    }
+}
+
+impl<Tab> ops::Index<TabIndex> for LeafNode<Tab> {
+    type Output = Tab;
+
+    fn index(&self, index: TabIndex) -> &Tab {
+        &self.tabs[index.0]
+    }
+}
+
+impl<Tab> ops::IndexMut<TabIndex> for LeafNode<Tab> {
+    fn index_mut(&mut self, index: TabIndex) -> &mut Tab {
+        &mut self.tabs[index.0]
     }
 }

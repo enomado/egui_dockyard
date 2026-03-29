@@ -64,14 +64,16 @@ impl Default for MyApp {
 }
 
 impl eframe::App for MyApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::SidePanel::left("documents").show(ctx, |ui| {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::Panel::left("documents").show_inside(ui, |ui| {
             for title in self.buffers.buffers.keys() {
                 let tab_location = self.tree.find_tab(title);
                 let is_open = tab_location.is_some();
                 if ui.selectable_label(is_open, title).clicked() {
                     if let Some(tab_location) = tab_location {
-                        self.tree.set_active_tab(tab_location);
+                        self.tree
+                            .set_active_tab(tab_location)
+                            .expect("path returned by find_tab is valid");
                     } else {
                         // Open the file for editing:
                         self.tree.push_to_focused_leaf(title.clone());
@@ -81,7 +83,7 @@ impl eframe::App for MyApp {
         });
 
         DockArea::new(&mut self.tree)
-            .style(Style::from_egui(ctx.style().as_ref()))
-            .show(ctx, &mut self.buffers);
+            .style(Style::from_egui(ui.style().as_ref()))
+            .show_inside(ui, &mut self.buffers);
     }
 }

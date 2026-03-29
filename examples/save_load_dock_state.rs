@@ -1,8 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
+use std::fs;
+
 use eframe::{egui, NativeOptions};
 use egui_dock::{DockArea, DockState, NodeIndex, Style};
-use std::fs;
 
 const DOCK_STATE_FILE: &str = "target/dock_state.json";
 
@@ -76,11 +77,11 @@ impl Default for MyApp {
 }
 
 impl eframe::App for MyApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let mut tab_viewer = TabViewer { modified: false };
         DockArea::new(&mut self.tree)
-            .style(Style::from_egui(ctx.style().as_ref()))
-            .show(ctx, &mut tab_viewer);
+            .style(Style::from_egui(ui.style().as_ref()))
+            .show_inside(ui, &mut tab_viewer);
         if tab_viewer.modified {
             self.save_json();
         }

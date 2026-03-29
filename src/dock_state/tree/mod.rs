@@ -20,15 +20,6 @@ pub mod node;
 /// Wrapper around indices to the collection of nodes inside a [`Tree`].
 pub mod node_index;
 
-pub use node::LeafNode;
-pub use node::Node;
-pub use node::SplitNode;
-pub use node_index::NodeIndex;
-pub use tab_index::TabIndex;
-pub use tab_iter::TabIter;
-
-use egui::ahash::HashSet;
-use egui::Rect;
 use std::{
     cmp::max,
     fmt,
@@ -36,7 +27,16 @@ use std::{
     slice::{Iter, IterMut},
 };
 
-use crate::SurfaceIndex;
+use egui::ahash::HashSet;
+use egui::Rect;
+pub use node::LeafNode;
+pub use node::Node;
+pub use node::SplitNode;
+pub use node_index::{NodeIndex, NodePath};
+pub use tab_index::{TabIndex, TabPath};
+pub use tab_iter::TabIter;
+
+use crate::{Error, Result, SurfaceIndex};
 
 // ----------------------------------------------------------------------------
 
@@ -79,16 +79,16 @@ pub enum TabDestination {
     /// Move to a new window with this rect.
     Window(Rect),
 
-    /// Move to a an existing node with this insertion.
-    Node(SurfaceIndex, NodeIndex, TabInsert),
+    /// Move to an existing node with this insertion.
+    Node(NodePath, TabInsert),
 
     /// Move to an empty surface.
     EmptySurface(SurfaceIndex),
 }
 
-impl From<(SurfaceIndex, NodeIndex, TabInsert)> for TabDestination {
-    fn from(value: (SurfaceIndex, NodeIndex, TabInsert)) -> TabDestination {
-        TabDestination::Node(value.0, value.1, value.2)
+impl From<(NodePath, TabInsert)> for TabDestination {
+    fn from(value: (NodePath, TabInsert)) -> TabDestination {
+        TabDestination::Node(value.0, value.1)
     }
 }
 
@@ -533,6 +533,28 @@ impl<Tab> Tree<Tab> {
         index
     }
 
+    /// Immutably borrows a leaf node at the given path.
+    ///
+    /// Returns `Err` if the path is invalid or the node at the path is not a leaf.
+    pub fn leaf(&self, node: NodeIndex) -> Result<&LeafNode<Tab>> {
+        self.nodes
+            .get(node.0)
+            .ok_or(Error::InvalidNode)?
+            .get_leaf()
+            .ok_or(Error::NonLeafNode)
+    }
+
+    /// Mutably borrows a leaf node at the given index.
+    ///
+    /// Returns `Err` if the index is invalid or if the node is not a leaf.
+    pub fn leaf_mut(&mut self, node: NodeIndex) -> Result<&mut LeafNode<Tab>> {
+        self.nodes
+            .get_mut(node.0)
+            .ok_or(Error::InvalidNode)?
+            .get_leaf_mut()
+            .ok_or(Error::NonLeafNode)
+    }
+
     fn first_leaf(&self, top: NodeIndex) -> Option<NodeIndex> {
         let left = top.left();
         let right = top.right();
@@ -689,15 +711,17 @@ impl<Tab> Tree<Tab> {
     }
 
     /// Sets which is the active tab within a specific node.
+    ///
+    /// # Errors
+    /// If the node is invalid, not a leaf or if the tab index is out of bounds.
     #[inline]
     pub fn set_active_tab(
         &mut self,
         node_index: impl Into<NodeIndex>,
         tab_index: impl Into<TabIndex>,
-    ) {
-        if let Some(Node::Leaf(leaf)) = self.nodes.get_mut(node_index.into().0) {
-            leaf.set_active_tab(tab_index);
-        };
+    ) -> Result {
+        self.leaf_mut(node_index.into())?
+            .set_active_tab(tab_index.into())
     }
 
     /// Pushes `tab` to the currently focused leaf.

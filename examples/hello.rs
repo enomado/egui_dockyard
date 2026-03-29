@@ -5,14 +5,11 @@ use std::collections::HashSet;
 use eframe::NativeOptions;
 use egui::{
     color_picker::{color_edit_button_srgba, Alpha},
-    vec2, CentralPanel, ComboBox, CornerRadius, Frame, Slider, TopBottomPanel, Ui, ViewportBuilder,
-    WidgetText,
+    vec2, ComboBox, CornerRadius, Panel, Slider, Ui, ViewportBuilder, WidgetText,
 };
-
-use egui_dock::tab_viewer::OnCloseResponse;
 use egui_dock::{
-    AllowedSplits, DockArea, DockState, NodeIndex, OverlayType, Style, SurfaceIndex,
-    TabInteractionStyle, TabViewer,
+    tab_viewer::OnCloseResponse, AllowedSplits, DockArea, DockState, NodeIndex, NodePath,
+    OverlayType, Style, SurfaceIndex, TabInteractionStyle, TabViewer,
 };
 
 /// Adds a widget with a label next to it, can be given an extra parameter in order to show a hover text
@@ -104,13 +101,7 @@ impl TabViewer for MyContext {
         }
     }
 
-    fn context_menu(
-        &mut self,
-        ui: &mut Ui,
-        tab: &mut Self::Tab,
-        _surface: SurfaceIndex,
-        _node: NodeIndex,
-    ) {
+    fn context_menu(&mut self, ui: &mut Ui, tab: &mut Self::Tab, _path: NodePath) {
         match tab.as_str() {
             "Simple Demo" => self.simple_demo_menu(ui),
             _ => {
@@ -579,8 +570,8 @@ impl Default for MyApp {
 }
 
 impl eframe::App for MyApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        TopBottomPanel::top("egui_dock::MenuBar").show(ctx, |ui| {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        Panel::top("egui_dock::MenuBar").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("View", |ui| {
                     // allow certain tabs to be toggled
@@ -603,31 +594,26 @@ impl eframe::App for MyApp {
                 });
             })
         });
-        CentralPanel::default()
-            // When displaying a DockArea in another UI, it looks better
-            // to set inner margins to 0.
-            .frame(Frame::central_panel(&ctx.style()).inner_margin(0.))
-            .show(ctx, |ui| {
-                let style = self
-                    .context
-                    .style
-                    .get_or_insert(Style::from_egui(ui.style()))
-                    .clone();
 
-                DockArea::new(&mut self.tree)
-                    .style(style)
-                    .show_close_buttons(self.context.show_close_buttons)
-                    .show_add_buttons(self.context.show_add_buttons)
-                    .draggable_tabs(self.context.draggable_tabs)
-                    .show_tab_name_on_hover(self.context.show_tab_name_on_hover)
-                    .allowed_splits(self.context.allowed_splits)
-                    .show_leaf_close_all_buttons(self.context.show_leaf_close_all)
-                    .show_leaf_collapse_buttons(self.context.show_leaf_collapse)
-                    .show_secondary_button_hint(self.context.show_secondary_button_hint)
-                    .secondary_button_on_modifier(self.context.secondary_button_on_modifier)
-                    .secondary_button_context_menu(self.context.secondary_button_context_menu)
-                    .show_inside(ui, &mut self.context);
-            });
+        let style = self
+            .context
+            .style
+            .get_or_insert(Style::from_egui(ui.style()))
+            .clone();
+
+        DockArea::new(&mut self.tree)
+            .style(style)
+            .show_close_buttons(self.context.show_close_buttons)
+            .show_add_buttons(self.context.show_add_buttons)
+            .draggable_tabs(self.context.draggable_tabs)
+            .show_tab_name_on_hover(self.context.show_tab_name_on_hover)
+            .allowed_splits(self.context.allowed_splits)
+            .show_leaf_close_all_buttons(self.context.show_leaf_close_all)
+            .show_leaf_collapse_buttons(self.context.show_leaf_collapse)
+            .show_secondary_button_hint(self.context.show_secondary_button_hint)
+            .secondary_button_on_modifier(self.context.secondary_button_on_modifier)
+            .secondary_button_context_menu(self.context.secondary_button_context_menu)
+            .show_inside(ui, &mut self.context);
     }
 }
 

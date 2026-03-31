@@ -1,5 +1,9 @@
 # egui_dock changelog
 
+## egui_dock 0.19.1 - 2026/03/31
+
+- Corrected outdated documentation.
+
 ## egui_dock 0.19.0 - 2026/03/29
 
 ### Breaking changes

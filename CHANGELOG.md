@@ -24,6 +24,21 @@
 ### Breaking changes
 
 - Upgraded to egui 0.35. ([#326](https://github.com/anhosh/egui_dock/pull/326))
+## Unreleased
+
+### Added
+
+- `DockArea::show_inside_with_response` returns a `DockAreaResponse` describing
+  what changed during the render pass, exposing a `Vec<DockEvent>` plus
+  `layout_changed()` / `layout_committed()` helpers. `DockEvent` distinguishes
+  a continuous `SeparatorDragging` (one per frame while the user drags a
+  separator) from a finalised `LayoutCommitted` (tab close/move/detach,
+  leaf collapse, window minimise, separator drag end / arrow nudge /
+  double-click reset, focus change). Consumers can now record one undo
+  entry per completed user action instead of one per frame. `DockEvent`
+  and `DockAreaResponse` are `#[non_exhaustive]` so future fine-grained
+  variants can be added without breaking downstream consumers that go
+  through the helpers.
 
 ## egui_dock 0.19.1 - 2026/03/31
 

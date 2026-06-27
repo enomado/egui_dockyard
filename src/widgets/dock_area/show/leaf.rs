@@ -8,6 +8,7 @@ use egui::{
 };
 
 use crate::NodePath;
+use crate::NodePath;
 use crate::dock_area::tab_removal::{ForcedRemoval, TabRemoval};
 use crate::node::LeafNode;
 use crate::tab_viewer::OnCloseResponse;
@@ -19,6 +20,10 @@ use crate::{
     },
     utils::{fade_visuals, rect_set_size_centered, rect_stroke_box},
 };
+
+fn tab_body_id(dock_area_id: Id, path: NodePath, tab_id: Id) -> Id {
+    dock_area_id.with((path.surface, "surface")).with(tab_id)
+}
 
 impl<Tab> DockArea<'_, Tab> {
     pub(super) fn show_leaf(
@@ -1213,7 +1218,7 @@ impl<Tab> DockArea<'_, Tab> {
             // We are forced to use `Ui::new` because other methods (eg: push_id) always mix
             // the provided id with their own which would cause tabs to change id when moved
             // from node to node.
-            let id = self.id.with(tab_viewer.id(tab));
+            let id = tab_body_id(self.id, path, tab_viewer.id(tab));
             ui.ctx().check_for_id_clash(id, body_rect, "a tab with id");
             let ui = &mut Ui::new(
                 ui.ctx().clone(),
@@ -1305,5 +1310,33 @@ impl<Tab> DockArea<'_, Tab> {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tab_body_id;
+    use crate::{NodeIndex, NodePath, SurfaceIndex};
+    use egui::Id;
+
+    #[test]
+    fn tab_body_ids_differ_between_surfaces() {
+        let dock_area_id = Id::new("dock-area");
+        let tab_id = Id::new("same-tab");
+        let node = NodeIndex::root();
+
+        let main = NodePath {
+            surface: SurfaceIndex::main(),
+            node,
+        };
+        let detached = NodePath {
+            surface: SurfaceIndex(1),
+            node,
+        };
+
+        assert_ne!(
+            tab_body_id(dock_area_id, main, tab_id),
+            tab_body_id(dock_area_id, detached, tab_id)
+        );
     }
 }

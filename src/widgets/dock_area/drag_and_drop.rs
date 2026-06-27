@@ -95,7 +95,7 @@ fn button_ui(
     split: Option<Split>,
 ) -> bool {
     let visuals = &style.overlay;
-    let button_stroke = Stroke::new(1.0, visuals.button_color);
+    let button_stroke = Stroke::new(1.0_f32, visuals.button_color);
     let painter = make_overlay_painter(ui);
     painter.rect_stroke(rect, 0.0, visuals.button_border_stroke, StrokeKind::Inside);
     let rect = rect.shrink(rect.width() * 0.1);

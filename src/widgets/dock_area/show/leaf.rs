@@ -520,11 +520,11 @@ impl<Tab> DockArea<'_, Tab> {
 
         ui.painter().line_segment(
             [plus_rect.center_top(), plus_rect.center_bottom()],
-            Stroke::new(1.0, color),
+            Stroke::new(1.0_f32, color),
         );
         ui.painter().line_segment(
             [plus_rect.right_center(), plus_rect.left_center()],
-            Stroke::new(1.0, color),
+            Stroke::new(1.0_f32, color),
         );
 
         // Draw button left border.
@@ -667,11 +667,11 @@ impl<Tab> DockArea<'_, Tab> {
 
             ui.painter().line_segment(
                 [close_all_rect.left_top(), close_all_rect.right_bottom()],
-                Stroke::new(1.0, stroke_color),
+                Stroke::new(1.0_f32, stroke_color),
             );
             ui.painter().line_segment(
                 [close_all_rect.right_top(), close_all_rect.left_bottom()],
-                Stroke::new(1.0, stroke_color),
+                Stroke::new(1.0_f32, stroke_color),
             );
         }
 
@@ -832,15 +832,15 @@ impl<Tab> DockArea<'_, Tab> {
                     .center_top()
                     .lerp(close_all_rect.left_top(), 0.5),
             ],
-            Stroke::new(1.0, stroke_color),
+            Stroke::new(1.0_f32, stroke_color),
         ));
         ui.painter().line_segment(
             [close_all_rect.center_top(), close_all_rect.right_center()],
-            Stroke::new(1.0, stroke_color),
+            Stroke::new(1.0_f32, stroke_color),
         );
         ui.painter().line_segment(
             [close_all_rect.center(), close_all_rect.right_top()],
-            Stroke::new(1.0, stroke_color),
+            Stroke::new(1.0_f32, stroke_color),
         );
     }
 
@@ -994,7 +994,7 @@ impl<Tab> DockArea<'_, Tab> {
         ui.painter().rect_stroke(
             stroke_rect,
             tab_style.corner_radius,
-            Stroke::new(1.0, tab_style.outline_color),
+            Stroke::new(1.0_f32, tab_style.outline_color),
             StrokeKind::Inside,
         );
         if !is_being_dragged {
@@ -1005,7 +1005,7 @@ impl<Tab> DockArea<'_, Tab> {
                     stroke_rect.max.x - f32::max(tab_style.corner_radius.se.into(), 1.5),
                 ),
                 stroke_rect.bottom(),
-                Stroke::new(2.0, tab_style.bg_fill),
+                Stroke::new(2.0_f32, tab_style.bg_fill),
             );
         }
 
@@ -1051,11 +1051,11 @@ impl<Tab> DockArea<'_, Tab> {
             rect_set_size_centered(&mut x_rect, Vec2::splat(Style::TAB_CLOSE_X_SIZE));
             ui.painter().line_segment(
                 [x_rect.left_top(), x_rect.right_bottom()],
-                Stroke::new(1.0, color),
+                Stroke::new(1.0_f32, color),
             );
             ui.painter().line_segment(
                 [x_rect.right_top(), x_rect.left_bottom()],
-                Stroke::new(1.0, color),
+                Stroke::new(1.0_f32, color),
             );
 
             close_response

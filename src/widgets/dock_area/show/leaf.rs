@@ -8,7 +8,6 @@ use egui::{
 };
 
 use crate::NodePath;
-use crate::NodePath;
 use crate::dock_area::tab_removal::{ForcedRemoval, TabRemoval};
 use crate::node::LeafNode;
 use crate::tab_viewer::OnCloseResponse;

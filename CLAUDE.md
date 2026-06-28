@@ -1,1 +1,1 @@
-AI_POLICY.md
+AGENTS.md

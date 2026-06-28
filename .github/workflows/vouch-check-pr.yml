@@ -11,7 +11,7 @@ jobs:
       - uses: actions/create-github-app-token@v3
         id: app-token
         with:
-          app-id: ${{ secrets.VOUCH_ID }}
+          client-id: ${{ secrets.VOUCH_ID }}
           private-key: ${{ secrets.VOUCH_PRIVATE_KEY }}
 
       - uses: mitchellh/vouch/action/check-pr@v1

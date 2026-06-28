@@ -4,8 +4,8 @@
 
 ### Fixed
 
-- "Widget changed layer_id" panic when undocking tabs. ([318](https://github.com/anhosh/egui_dock/pull/318))
-- Translations are no longer serialised. ([319](https://github.com/anhosh/egui_dock/pull/319))
+- "Widget changed layer_id" panic when undocking tabs. ([#318](https://github.com/anhosh/egui_dock/pull/318))
+- Translations are no longer serialised. ([#319](https://github.com/anhosh/egui_dock/pull/319))
 
 ## egui_dock 0.20.0 - 2026/06/27
 

@@ -56,6 +56,13 @@ enum Op {
     Focus {
         leaf: usize,
     },
+    /// The collapse button, spelled the way the tab bar spells it: flip the leaf, then let
+    /// the tree settle the ancestors. Present so that the collapsing counts are exercised
+    /// against a tree that is being reshaped underneath them — without it every count in
+    /// every generated tree is zero, and a property about them proves nothing.
+    ToggleCollapsed {
+        leaf: usize,
+    },
     PushToFocused,
 }
 
@@ -83,6 +90,7 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         ),
         (0usize..8, 0usize..4).prop_map(|(leaf, tab)| Op::SetActive { leaf, tab }),
         (0usize..8).prop_map(|leaf| Op::Focus { leaf }),
+        (0usize..8).prop_map(|leaf| Op::ToggleCollapsed { leaf }),
         Just(Op::PushToFocused),
     ]
 }
@@ -224,6 +232,15 @@ fn apply(dock_state: &mut DockState<u32>, op: Op, next_tab: &mut u32) -> Option<
             vec![]
         }
 
+        Op::ToggleCollapsed { leaf } => {
+            let node = leaves[leaf % leaves.len()];
+            let collapsed = dock_state.main_surface()[node].is_collapsed();
+            dock_state.main_surface_mut()[node].set_collapsed(!collapsed);
+            dock_state.main_surface_mut().node_update_collapsed(node);
+            // Collapsing hides a leaf's tabs; it does not touch which tabs are where.
+            vec![]
+        }
+
         Op::PushToFocused => {
             let tab = *next_tab;
             *next_tab += 1;
@@ -298,6 +315,69 @@ proptest! {
                 ),
             }
         }
+    }
+
+    /// Every collapsing number in the tree is what its subtree says it is.
+    ///
+    /// The counts are *derived* — a split is collapsed exactly when both children are, and
+    /// its row count is what the children stack up to — but they are stored, so every edit
+    /// has to settle them. Historically each edit settled them in its own way, keyed to the
+    /// gesture that happened rather than to the subtree that resulted, and three separate
+    /// paths got it wrong (a removed leaf, a copying sweep, and a partially collapsed tree
+    /// on the ordinary path). This says the same thing once, for whatever sequence of edits
+    /// the generator comes up with.
+    ///
+    /// `validate()` deliberately does not check this: it is the oracle of *structure*, and a
+    /// wrong row count renders a wrong height rather than a wrong tree.
+    #[test]
+    fn collapsed_counts_stay_derived(ops in prop::collection::vec(op_strategy(), 1..24)) {
+        let mut dock_state = DockState::new(vec![0u32, 1, 2]);
+        let mut next_tab = 3u32;
+        let mut collapsed_seen = 0usize;
+
+        for (step, op) in ops.into_iter().enumerate() {
+            if apply(&mut dock_state, op, &mut next_tab).is_none() {
+                continue;
+            }
+            let tree = dock_state.main_surface();
+
+            for id in tree.breadth_first() {
+                let Some(split) = tree[id].get_split() else { continue };
+                let [left, right] = split.children();
+                let expected_count = if tree[id].is_horizontal() {
+                    tree[left].collapsed_leaf_count().max(tree[right].collapsed_leaf_count())
+                } else {
+                    tree[left].collapsed_leaf_count() + tree[right].collapsed_leaf_count()
+                };
+                prop_assert_eq!(
+                    split.collapsed_leaf_count, expected_count,
+                    "split {} carries a row count its children do not add up to, after step {} ({:?})",
+                    id, step, op
+                );
+                prop_assert_eq!(
+                    split.fully_collapsed,
+                    tree[left].is_collapsed() && tree[right].is_collapsed(),
+                    "split {} disagrees with its children about being collapsed, after step {} ({:?})",
+                    id, step, op
+                );
+            }
+
+            // And the tree mirrors its root — this is the number a floating window's height
+            // is read from, and the one the ordinary collapse path used to skip.
+            prop_assert_eq!(
+                tree.collapsed_leaf_count(),
+                tree.root_node().map_or(0, |root| root.collapsed_leaf_count()),
+                "the tree disagrees with its root, after step {} ({:?})", step, op
+            );
+
+            collapsed_seen += usize::from(tree.collapsed_leaf_count() > 0);
+        }
+
+        // Guards against the property passing on a scene where nothing is ever collapsed:
+        // every count would be zero and every assertion above would hold for free. The
+        // sequence is random, so this only demands that *some* run reaches a collapsed tree —
+        // proptest's shrinking would otherwise happily report a green run over 24 no-ops.
+        prop_assume!(collapsed_seen > 0);
     }
 
     /// A node id keeps naming the same node across operations that are not about it.

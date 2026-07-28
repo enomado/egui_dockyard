@@ -29,17 +29,21 @@ pub struct SplitNode {
 
 impl SplitNode {
     /// Creates a new [`SplitNode`] over two existing nodes.
-    pub(crate) const fn new(
-        children: [NodeId; 2],
-        fraction: f32,
-        fully_collapsed: bool,
-        collapsed_leaf_count: i32,
-    ) -> Self {
+    ///
+    /// The collapsing bookkeeping is *not* an argument, and deliberately so: both fields are
+    /// derived from the two children, so the only honest value at construction time — before
+    /// the children are linked up and reachable — is the empty one. Whoever builds the split
+    /// settles them afterwards through
+    /// [`Tree::update_split_collapsed`](crate::Tree), directly or through one of the sweeps
+    /// that call it. Taking them as arguments invited callers to pass the state of whatever
+    /// used to be there, which is bookkeeping tied to a gesture rather than to a subtree —
+    /// the bug class this crate has already paid for twice.
+    pub(crate) const fn new(children: [NodeId; 2], fraction: f32) -> Self {
         Self {
             children,
             fraction,
-            fully_collapsed,
-            collapsed_leaf_count,
+            fully_collapsed: false,
+            collapsed_leaf_count: 0,
         }
     }
 

@@ -12,6 +12,73 @@ Ordered newest first.
 
 ---
 
+## Loading believed the collapsed counts in the file, including for the nodes it had just dropped
+
+**Status upstream:** not submitted. The fix is three lines and one deletion; it is written up
+because the *shape* of the mistake is the interesting part.
+
+**Symptom.** A saved layout loads with the wrong collapsed height: a floating window opens
+reserving rows for panes that are not there, or a fully collapsed dock opens at full height.
+Nothing panics, nothing is visible to `validate` — the same silent drift as the gesture bug
+below, arriving through the reader instead of through an edit.
+
+Two independent ways in, and both are ordinary:
+
+- the reader **repairs** what it reads. An empty leaf below the root is dropped and its split
+  collapses onto the surviving sibling; a split that lost a child in the file is replaced by
+  that child. The counts stated by the file describe the tree *before* those repairs, so after
+  a repair they describe a tree that does not exist;
+- files on disk were written by builds whose sweeps got the counts wrong (the finding below).
+  Trusting the file keeps a fixed bug alive for as long as the file exists — the fix landed in
+  memory and never reached the corpus.
+
+**Root cause.** `Deserialize for Tree` read `collapsed` / `collapsed_leaf_count` at both levels
+and installed them:
+
+```rust
+let mut tree = Tree::default();
+tree.set_collapsed(collapsed);
+tree.set_collapsed_leaf_count(collapsed_leaf_count);
+```
+
+These numbers are derived from `LeafNode::collapsed`, which is also in the file. Reading them at
+all is reading a *claim* about data that is right there — the wire format states a conclusion
+and its premises, and the reader took the conclusion.
+
+The same shape had a second habitat. `SplitNode::new` took `fully_collapsed` and
+`collapsed_leaf_count` as constructor arguments, and both in-memory callers passed the values of
+whatever used to be at that spot — `Tree::split` from the node being split, `copy_filtered` from
+the split it was copying — only for the recompute that follows a few lines later to overwrite
+them. Dead code that reads as a decision, and precisely the decision ("inherit from the gesture")
+that the recompute exists to stop anyone making.
+
+**Fix.** The reader drops the fields entirely — from `TreeIn`, from `NodeIn`, from `LegacySplit`
+— and calls `recompute_collapsed()` once the shape is final, repairs included. Files keep
+carrying the numbers, and the writer keeps emitting them, so nothing on disk changes and older
+builds keep loading what this one writes; they are simply not read.
+
+`SplitNode::new(children, fraction)` lost the two arguments, and with them the third caller's
+excuse for having them. A split is now born with empty bookkeeping — the only honest value
+before its children are linked — and whoever builds it settles the numbers afterwards. The
+constructor is `pub(crate)`, so this breaks nothing outside the crate.
+
+**Evidence.** `stored_collapsed_counts_are_recomputed_rather_than_believed` pins both directions
+(a file that understates the count and one that overstates it),
+`the_pre_arena_reader_recomputes_the_collapsed_counts_too` covers the legacy heap — which is the
+form actually on users' disks — and `a_leaf_the_reader_drops_leaves_no_trace_in_the_counts` is
+the sharp case: a file whose numbers are self-consistent, describing a leaf the reader then
+drops. Removing the `recompute_collapsed()` call fails exactly those three and nothing else.
+
+And a property, so the in-memory half stops depending on someone thinking of the case:
+`collapsed_counts_stay_derived` asserts, after every operation of a random sequence, that every
+split's pair is what its two children say it is and that the tree mirrors its root. The
+generator gained a collapse gesture for it — without one, every count in every generated tree is
+zero and the property passes for free; the test also refuses to count a run in which nothing was
+ever collapsed. Mutation-checked by shortening the ancestor walk in `node_update_collapsed` to
+the immediate parent: the property fails, the structural oracle stays green.
+
+---
+
 ## The main surface was an entry in a vector that everything agreed must never be empty
 
 **Status upstream:** not submitted. This one is a deliberate breaking change to the public API,

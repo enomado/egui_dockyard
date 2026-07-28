@@ -152,12 +152,9 @@ struct TreeIn<Tab> {
     nodes: Vec<LegacyNode<Tab>>,
     #[serde(default = "none")]
     focused_node: Option<LegacyNodeIndex>,
-
-    // Written by both.
-    #[serde(default)]
-    collapsed: bool,
-    #[serde(default)]
-    collapsed_leaf_count: i32,
+    // `collapsed` / `collapsed_leaf_count` are in every file both forms ever wrote, and are
+    // deliberately absent here: they are derived from the leaves, and reading recomputes them.
+    // See `Deserialize for Tree`.
 }
 
 /// `#[serde(default)]` on a generic field would demand `Tab: Default`; this does not.
@@ -178,20 +175,15 @@ enum NodeIn<Tab> {
         #[serde(default)]
         collapsed: bool,
     },
+    // A split stores `fully_collapsed` / `collapsed_leaf_count` on disk as well; they are
+    // unknown fields here on purpose, for the same reason the tree-level pair is — the
+    // numbers follow from `Leaf::collapsed`, which is read.
     Vertical {
         fraction: f32,
-        #[serde(default)]
-        fully_collapsed: bool,
-        #[serde(default)]
-        collapsed_leaf_count: i32,
         children: [Box<NodeIn<Tab>>; 2],
     },
     Horizontal {
         fraction: f32,
-        #[serde(default)]
-        fully_collapsed: bool,
-        #[serde(default)]
-        collapsed_leaf_count: i32,
         children: [Box<NodeIn<Tab>>; 2],
     },
 }
@@ -220,13 +212,11 @@ struct LegacyLeaf<Tab> {
     collapsed: bool,
 }
 
+/// Same as the current form: the collapsing numbers the file carries are ignored and
+/// recomputed, only `fraction` is genuine state.
 #[derive(Deserialize)]
 struct LegacySplit {
     fraction: f32,
-    #[serde(default)]
-    fully_collapsed: bool,
-    #[serde(default)]
-    collapsed_leaf_count: i32,
 }
 
 /// The old positional address: an index into the heap `Vec`.
@@ -240,15 +230,8 @@ impl<Tab> Tree<Tab> {
     }
 
     /// Links `children` under a freshly built split.
-    fn adopt_split(
-        &mut self,
-        vertical: bool,
-        children: [NodeId; 2],
-        fraction: f32,
-        fully_collapsed: bool,
-        collapsed_leaf_count: i32,
-    ) -> NodeId {
-        let split = SplitNode::new(children, fraction, fully_collapsed, collapsed_leaf_count);
+    fn adopt_split(&mut self, vertical: bool, children: [NodeId; 2], fraction: f32) -> NodeId {
+        let split = SplitNode::new(children, fraction);
         let node = if vertical {
             Node::Vertical(split)
         } else {
@@ -287,29 +270,14 @@ impl<Tab> Tree<Tab> {
                 }
                 Some(self.build_leaf(tabs, active, prev_active, scroll, collapsed))
             }
-            NodeIn::Vertical {
-                fraction,
-                fully_collapsed,
-                collapsed_leaf_count,
-                children,
-            }
-            | NodeIn::Horizontal {
-                fraction,
-                fully_collapsed,
-                collapsed_leaf_count,
-                children,
-            } => {
+            NodeIn::Vertical { fraction, children } | NodeIn::Horizontal { fraction, children } => {
                 let [left, right] = children;
                 let left = self.build(*left);
                 let right = self.build(*right);
                 match (left, right) {
-                    (Some(left), Some(right)) => Some(self.adopt_split(
-                        vertical,
-                        [left, right],
-                        fraction,
-                        fully_collapsed,
-                        collapsed_leaf_count,
-                    )),
+                    (Some(left), Some(right)) => {
+                        Some(self.adopt_split(vertical, [left, right], fraction))
+                    }
                     (Some(only), None) | (None, Some(only)) => Some(only),
                     (None, None) => None,
                 }
@@ -368,13 +336,9 @@ impl<Tab> Tree<Tab> {
                 let left = self.build_legacy(nodes, index * 2 + 1, where_it_landed);
                 let right = self.build_legacy(nodes, index * 2 + 2, where_it_landed);
                 match (left, right) {
-                    (Some(left), Some(right)) => self.adopt_split(
-                        vertical,
-                        [left, right],
-                        split.fraction,
-                        split.fully_collapsed,
-                        split.collapsed_leaf_count,
-                    ),
+                    (Some(left), Some(right)) => {
+                        self.adopt_split(vertical, [left, right], split.fraction)
+                    }
                     // A split that lost a child in a stored file is repaired the way the
                     // in-memory tree repairs it: the surviving child takes its place.
                     (Some(only), None) | (None, Some(only)) => only,
@@ -403,13 +367,9 @@ impl<'de, Tab: Deserialize<'de>> Deserialize<'de> for Tree<Tab> {
             focused,
             nodes,
             focused_node,
-            collapsed,
-            collapsed_leaf_count,
         } = TreeIn::deserialize(deserializer)?;
 
         let mut tree = Tree::default();
-        tree.set_collapsed(collapsed);
-        tree.set_collapsed_leaf_count(collapsed_leaf_count);
 
         match root {
             // Current form.
@@ -440,6 +400,20 @@ impl<'de, Tab: Deserialize<'de>> Deserialize<'de> for Tree<Tab> {
                     focused_node.and_then(|index| where_it_landed.get(&index.0).copied());
             }
         }
+
+        // The collapsing bookkeeping is derived, so it is recomputed rather than read, for
+        // two independent reasons:
+        //
+        //  * the reading above *repairs* the shape — an empty leaf below the root is dropped,
+        //    a split left with one child is replaced by it — so the numbers a file states
+        //    describe a tree that this one is not. The stale-count bug that the in-memory
+        //    sweeps were fixed for would simply have arrived through the reader instead;
+        //  * files on disk were written by builds whose sweeps got these numbers wrong, and
+        //    trusting them keeps a fixed bug alive for as long as the file exists.
+        //
+        // Nothing is lost by ignoring them: every one of them follows from `Leaf::collapsed`,
+        // which is read. The writer still emits them, so files stay loadable by older builds.
+        tree.recompute_collapsed();
 
         // Focus is the one field a stored layout can get wrong without the shape being
         // wrong: it may name a node that the file's own repairs dropped, or a split.
@@ -979,6 +953,117 @@ mod tests {
             "window 1 is written at position 2"
         );
         assert_eq!(written["focused_surface"], serde_json::json!(2));
+    }
+
+    /// The collapsing numbers in a file are a *claim*, and loading must not believe it.
+    ///
+    /// Both directions are pinned, because a reader that trusts the file is wrong in both:
+    /// a file that understates the count leaves a collapsed dock rendering at full height,
+    /// one that overstates it leaves an expanded dock reserving rows for nothing. The
+    /// numbers follow from `Leaf::collapsed`, which is the only thing here worth reading.
+    ///
+    /// Why a file can say something else at all: builds before the derived-counts fix wrote
+    /// stale numbers, and those files are on disk now.
+    #[test]
+    fn stored_collapsed_counts_are_recomputed_rather_than_believed() {
+        let json = |leaf_collapsed: bool, claim: i32| {
+            format!(
+                r#"{{
+                    "root": {{ "Vertical": {{
+                        "fraction": 0.5,
+                        "fully_collapsed": false,
+                        "collapsed_leaf_count": {claim},
+                        "children": [
+                            {{ "Leaf": {{ "tabs": ["a"], "active": 0, "collapsed": {leaf_collapsed} }}}},
+                            {{ "Leaf": {{ "tabs": ["b"], "active": 0, "collapsed": {leaf_collapsed} }}}}
+                        ]
+                    }}}},
+                    "focused": null,
+                    "collapsed": false,
+                    "collapsed_leaf_count": {claim}
+                }}"#
+            )
+        };
+
+        // Understated: two collapsed leaves, the file insists there are none.
+        let tree: Tree<String> = serde_json::from_str(&json(true, 0)).unwrap();
+        let root = tree.root().unwrap();
+        assert_eq!(
+            tree[root].collapsed_leaf_count(),
+            2,
+            "a vertical split stacks its children, so two collapsed leaves are two rows"
+        );
+        assert!(tree[root].is_collapsed(), "both children are collapsed");
+        assert_eq!(
+            tree.collapsed_leaf_count(),
+            2,
+            "and the tree mirrors its root — this is the number the window height uses"
+        );
+        assert!(tree.is_collapsed());
+
+        // Overstated: nothing is collapsed, the file claims seven rows.
+        let tree: Tree<String> = serde_json::from_str(&json(false, 7)).unwrap();
+        let root = tree.root().unwrap();
+        assert_eq!(tree[root].collapsed_leaf_count(), 0);
+        assert!(!tree[root].is_collapsed());
+        assert_eq!(tree.collapsed_leaf_count(), 0);
+        assert!(!tree.is_collapsed());
+    }
+
+    /// The pre-arena reader gets the same treatment — and it is the one whose files are
+    /// actually on users' disks, written by exactly the builds that got the counts wrong.
+    #[test]
+    fn the_pre_arena_reader_recomputes_the_collapsed_counts_too() {
+        let legacy = r#"{
+            "nodes": [
+                { "Vertical": { "fraction": 0.5, "fully_collapsed": false, "collapsed_leaf_count": 0 }},
+                { "Leaf": { "tabs": ["a"], "active": 0, "collapsed": true }},
+                { "Leaf": { "tabs": ["b"], "active": 0, "collapsed": true }}
+            ],
+            "focused_node": null,
+            "collapsed": false,
+            "collapsed_leaf_count": 0
+        }"#;
+
+        let tree: Tree<String> = serde_json::from_str(legacy).unwrap();
+        assert_eq!(tree.validate(), Ok(()));
+        assert_eq!(tree.collapsed_leaf_count(), 2);
+        assert!(tree.is_collapsed());
+    }
+
+    /// The sharp case: reading *repairs* the shape, so a count read from the file would
+    /// describe a tree that no longer exists.
+    ///
+    /// Here the file's own numbers are self-consistent — two collapsed leaves under a
+    /// vertical split, two rows — but one of those leaves is empty, and an empty leaf below
+    /// the root is dropped on the way in. Believing the file leaves the surviving single
+    /// leaf claiming the height of two.
+    #[test]
+    fn a_leaf_the_reader_drops_leaves_no_trace_in_the_counts() {
+        let json = r#"{
+            "root": { "Vertical": {
+                "fraction": 0.5,
+                "fully_collapsed": true,
+                "collapsed_leaf_count": 2,
+                "children": [
+                    { "Leaf": { "tabs": [], "active": 0, "collapsed": true }},
+                    { "Leaf": { "tabs": ["a"], "active": 0, "collapsed": true }}
+                ]
+            }},
+            "focused": null,
+            "collapsed": true,
+            "collapsed_leaf_count": 2
+        }"#;
+
+        let tree: Tree<String> = serde_json::from_str(json).unwrap();
+        assert_eq!(tree.validate(), Ok(()));
+        assert!(tree.root_node().unwrap().is_leaf(), "the split collapsed onto its surviving child");
+        assert_eq!(
+            tree.collapsed_leaf_count(),
+            1,
+            "one collapsed leaf survived, so one row — not the two the file described"
+        );
+        assert!(tree.is_collapsed());
     }
 
     /// A file made *only* of empty leaves has nothing to repair onto: the result is an empty

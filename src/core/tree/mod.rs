@@ -546,18 +546,14 @@ impl<Tab> Tree<Tab> {
             Split::Left | Split::Above => [new_id, target],
             Split::Right | Split::Below => [target, new_id],
         };
-        // The split inherits the collapsed state of what used to be there, exactly as the
-        // in-place `Node::split` did before; `node_update_collapsed` below then settles
-        // the counts for the whole chain of ancestors.
-        let inherited = SplitNode::new(
-            children,
-            fraction,
-            self[target].is_collapsed(),
-            self[target].collapsed_leaf_count(),
-        );
+        // The new split starts with empty collapsing bookkeeping; `node_update_collapsed`
+        // below settles it, and the whole chain of ancestors with it, once the children are
+        // linked. Inheriting it from `target` would be writing down a value that is about to
+        // be overwritten anyway — and the wrong one, since the split now holds `new` too.
+        let fresh = SplitNode::new(children, fraction);
         let split_node = match split {
-            Split::Left | Split::Right => Node::Horizontal(inherited),
-            Split::Above | Split::Below => Node::Vertical(inherited),
+            Split::Left | Split::Right => Node::Horizontal(fresh),
+            Split::Above | Split::Below => Node::Vertical(fresh),
         };
         let split_id = self.nodes.insert(NodeEntry {
             parent: grandparent,
@@ -778,12 +774,11 @@ impl<Tab> Tree<Tab> {
                     (Some(only), None) | (None, Some(only)) => return Some(only),
                     (None, None) => return None,
                     (Some(left), Some(right)) => {
-                        let node = SplitNode::new(
-                            [left, right],
-                            split.fraction,
-                            split.fully_collapsed,
-                            split.collapsed_leaf_count,
-                        );
+                        // Only `fraction` is carried across: it is a decision of the user's.
+                        // The collapsing counts describe the subtree that *was* here, and the
+                        // sweep may have just dropped leaves out of it — `recompute_collapsed`
+                        // in the caller settles them from the shape that actually got built.
+                        let node = SplitNode::new([left, right], split.fraction);
                         let node = if self[id].is_vertical() {
                             Node::Vertical(node)
                         } else {

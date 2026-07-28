@@ -75,8 +75,12 @@ impl<Tab> DockArea<'_, Tab> {
                         ),
                     }
                 };
-                self.dock_state.move_tab(source, destination);
-                self.events.push(DockEvent::LayoutCommitted);
+                // A drop that resolves to the tab's current slot changes nothing; only a
+                // move that reports a real mutation counts as a finalised event (same rule
+                // as the focus push at the end of this pass).
+                if self.dock_state.move_tab(source, destination) {
+                    self.events.push(DockEvent::LayoutCommitted);
+                }
             }
         }
 

@@ -12,6 +12,74 @@ Ordered newest first.
 
 ---
 
+## A tab dropped back where it came from reported a layout change
+
+**Status upstream:** not submitted. Same event and the same class of lie as the separator-drag
+finding below, arriving through a different gesture — and this one was found by a user, not by a
+test.
+
+**Symptom.** Pick a tab up, change your mind, drop it back where it was. For that frame
+`DockAreaResponse::layout_committed()` is `true` while the dock is byte-for-byte what it was.
+A consumer that turns the event into an undo entry and a save to disk records an entry that
+undoes nothing. Ours asserts that a commit and a changed layout arrive together, so instead of
+quietly growing a junk undo stack it panicked, naming the class exactly: *"`layout_committed`
+fired but the snapshot fingerprint is unchanged — some `LayoutCommitted` call site does not
+reflect a real mutation."*
+
+**Root cause.** Two, stacked, both of the shape "the event and the mutation are decided in
+different places and nothing connects them".
+
+The outer one: the drop handler pushed the event for every release that resolved to a
+destination.
+
+```rust
+self.dock_state.move_tab(source, destination);
+self.events.push(DockEvent::LayoutCommitted);   // unconditional
+```
+
+`move_tab` returned `()`, so the call site could not have known better — and `move_tab` bails
+out of exactly this case (*"moving a single tab inside its own node is a no-op"*) without
+touching a thing.
+
+The inner one, for a node with more tabs: a drop onto one's own index went through the generic
+remove-then-insert path. That path preserves the tab *order* and nothing else — the tab is handed
+a fresh `TabId`, and the focus history (`prev_active`) is rewritten around the round trip. So the
+gesture sometimes did change the persisted state, in a way no user asked for and depending on
+what the focus history happened to hold. "Same order" is not "same state" once elements have
+identity and something is derived from it.
+
+**Fix.** `move_tab` answers the question the caller actually has:
+
+```rust
+#[must_use]
+pub fn move_tab(&mut self, src: TabPath, dst_tab: impl Into<TabDestination>) -> bool
+```
+
+`true` means the layout changed; the drop handler emits `LayoutCommitted` only then, which is the
+rule the focus push at the end of the same pass already followed. A drop that resolves to the
+slot the tab already occupies — its own tab title, or `Append` while it is already last — leaves
+the tab list alone entirely and only activates the tab. That activation is itself a no-op when
+the tab is already active, and a real change (reported as such) when it is not.
+
+**Evidence.** Four model-level tests: `dropping_the_only_tab_of_a_node_onto_itself_changes_nothing`
+(the reported gesture, over all three destinations the overlay can offer),
+`dropping_a_tab_back_onto_its_own_slot_changes_nothing` (order, active tab *and* focus history
+all survive), `dropping_the_last_tab_onto_its_own_node_changes_nothing` (the `Append` shape, with
+the tab before it as the negative case), and
+`dropping_an_inactive_tab_onto_its_own_slot_only_moves_focus` (focus moving still counts).
+
+The event itself is judged one level up, in the deterministic simulation
+(`tests/dst.rs::a_tab_dropped_where_it_came_from_commits_nothing`): real frames, a real drag,
+a release over the centre button of the leaf the tab already lives in, then "the trace is
+unchanged **and** no commit was reported". Model-level tests structurally cannot catch this one —
+the lie lived between `move_tab` and the event, not inside either.
+
+Mutations, all three run: making `stays_put` always false fails the two identity tests; making
+the single-tab bail-out return `true` fails the reported-gesture test; restoring the unconditional
+`events.push` fails the simulation test and nothing else.
+
+---
+
 ## Collapsing a pane was two calls, and the public API let you make only the first
 
 **Status upstream:** not submitted. No bug is being fixed here — the two collapsed-count bugs

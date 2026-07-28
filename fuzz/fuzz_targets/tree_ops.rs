@@ -239,7 +239,10 @@ fn apply(state: &mut DockState<u32>, op: Op, next_tab: &mut u32) -> bool {
                 4 => TabInsert::Split(Split::Below),
                 _ => TabInsert::Insert(TabIndex(0)),
             };
-            state.move_tab(src, (dst_path, insert));
+            // Whether the move changed anything is up to the generated operands (a generated
+            // move can land on the slot the tab is already in); the invariants checked after
+            // every op do not depend on it.
+            let _ = state.move_tab(src, (dst_path, insert));
         }
 
         Op::SetActive { leaf, tab } => {

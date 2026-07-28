@@ -136,6 +136,10 @@ struct Sim {
     /// What the dock actually did, counted per outcome. An outcome that stays at zero was never
     /// exercised, however green the run looks — so this is asserted, not printed.
     effective: [usize; OUTCOMES],
+    /// Whether any frame since the last [`Sim::take_committed`] reported a finalised layout
+    /// change. Accumulated rather than read per frame because one gesture spans several frames
+    /// and only one of them carries the event.
+    committed: bool,
 }
 
 /// What a step actually did to the dock — measured after the fact, not assumed from its name.
@@ -189,6 +193,7 @@ impl Sim {
             next_tab: 1,
             style: Style::default(),
             effective: [0; OUTCOMES],
+            committed: false,
         };
         // One frame before anything else: gestures aim with geometry, and geometry does not
         // exist until a pass has run.
@@ -216,13 +221,22 @@ impl Sim {
 
         let state = &mut self.state;
         let style = &self.style;
+        let mut committed = false;
         let _ = self.ctx.run_ui(input, |ctx| {
             CentralPanel::default().show(ctx, |ui| {
-                DockArea::new(state)
+                let response = DockArea::new(state)
                     .style(style.clone())
-                    .show_inside(ui, &mut Viewer);
+                    .show_inside_with_response(ui, &mut Viewer);
+                committed |= response.layout_committed();
             });
         });
+        self.committed |= committed;
+    }
+
+    /// Whether the dock reported a finalised layout change since this was last called, and
+    /// resets the flag.
+    fn take_committed(&mut self) -> bool {
+        std::mem::take(&mut self.committed)
     }
 
     /// Geometry left behind by the last frame.
@@ -784,6 +798,48 @@ fn dropping_a_tab_on_a_split_button_splits_the_leaf() {
         sim.layout_trace().contains("V("),
         "and the split should be vertical, since the drop was below the centre: {}",
         sim.layout_trace()
+    );
+    assert_eq!(sim.state.validate(), Ok(()));
+}
+
+/// The gesture with no name in the dock's vocabulary: pick a tab up, change your mind, and let
+/// it go where it came from.
+///
+/// Nothing moves — and the dock has to *say* that nothing moved. A consumer that turns
+/// `layout_committed()` into an undo entry and a save to disk has no other source of knowledge
+/// about the frame: the event is all it gets. This is the property the model-level tests cannot
+/// judge, because the lie lives between `move_tab` and the event rather than inside either — the
+/// drop handler used to announce a commit for every release that resolved to a destination, and
+/// `move_tab` bails out of a drop onto one's own node without touching a thing.
+#[test]
+fn a_tab_dropped_where_it_came_from_commits_nothing() {
+    let mut sim = Sim::new();
+    let leaf = sim.live_leaves()[0];
+    let home = sim.tab_rect(leaf, 0).expect("a tab to grab").center();
+    // The centre button over the leaf the tab already lives in: "append it to this node", which
+    // for the node it is already in means nothing at all. Aimed with the same arithmetic the
+    // other scripted drops use, so it cannot quietly drift into meaning something else.
+    let back_home = sim
+        .aim_point(leaf, Aim::Append)
+        .expect("the centre button of the leaf");
+
+    // Focus first, as its own gesture: pressing a tab can move focus, and that *is* a real
+    // change. What is under test is the drag that follows it.
+    sim.click(home);
+    let before = sim.trace();
+    sim.take_committed();
+
+    sim.drag(home, back_home);
+
+    assert_eq!(
+        sim.trace(),
+        before,
+        "the tab went back where it was, so the dock is unchanged"
+    );
+    assert!(
+        !sim.take_committed(),
+        "and an unchanged dock may not report a finalised layout change: {}",
+        sim.trace()
     );
     assert_eq!(sim.state.validate(), Ok(()));
 }

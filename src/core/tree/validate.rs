@@ -661,7 +661,7 @@ mod tests {
         let source = dock_state[window].root().unwrap();
         let target = dock_state[SurfaceIndex::main()].root().unwrap();
 
-        dock_state.move_tab(
+        assert!(dock_state.move_tab(
             TabPath::new(window, source, TabIndex(0)),
             (
                 NodePath {
@@ -670,7 +670,7 @@ mod tests {
                 },
                 TabInsert::Split(Split::Left),
             ),
-        );
+        ));
 
         assert_eq!(dock_state.validate(), Ok(()));
         assert_eq!(dock_state.main_surface().num_tabs(), 1);

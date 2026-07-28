@@ -325,16 +325,51 @@ impl<Tab> DockState<Tab> {
 
     /// Moves a tab from a node to another node.
     /// You need to specify with [`TabDestination`] how the tab should be moved.
-    pub fn move_tab(&mut self, src: TabPath, dst_tab: impl Into<TabDestination>) {
+    ///
+    /// Returns whether the layout actually changed. Dropping a tab back where it already
+    /// is, is a perfectly ordinary gesture (the user picks a tab up and changes their
+    /// mind) that resolves to nothing at all, and the caller has to be able to tell that
+    /// apart from a real move: firing a "layout committed" event for it would announce a
+    /// mutation that never happened — an empty undo entry downstream.
+    #[must_use]
+    pub fn move_tab(&mut self, src: TabPath, dst_tab: impl Into<TabDestination>) -> bool {
         match dst_tab.into() {
             TabDestination::Window(position) => {
                 self.detach_tab(src, position);
-                return;
+                return true;
             }
             TabDestination::Node(dst, dst_tab) => {
                 // Moving a single tab inside its own node is a no-op
                 if src.node_path() == dst && self[src.node_path()].tabs_count() == 1 {
-                    return;
+                    return false;
+                }
+
+                // Dropping a tab onto the slot it already occupies (its own tab title, or
+                // the body of its own node while it is already the last tab). The tab list
+                // is left exactly as it is instead of going through a remove + re-insert
+                // round trip: that trip is order-preserving but not state-preserving — it
+                // hands the tab a fresh `TabId` and rewrites the focus history — so it
+                // would report a mutation where the user sees none. All that is left to do
+                // is focus the tab, which is itself a no-op when it is already active.
+                if src.node_path() == dst {
+                    let leaf = self[dst]
+                        .get_leaf()
+                        .expect("a tab can only be dragged out of a leaf");
+                    let stays_put = match &dst_tab {
+                        TabInsert::Insert(index) => *index == src.tab,
+                        TabInsert::Append => src.tab.0 + 1 == leaf.len(),
+                        // Splitting a node off itself genuinely moves the tab: it ends up
+                        // alone in a new leaf next to the ones it left behind.
+                        TabInsert::Split(_) => false,
+                    };
+                    if stays_put {
+                        let already_active = leaf.active_id() == leaf.tab_id_at(src.tab);
+                        self[dst]
+                            .get_leaf_mut()
+                            .unwrap()
+                            .activate_tab_remembering(src.tab);
+                        return !already_active;
+                    }
                 }
 
                 // Call `Node::remove_tab` to avoid auto remove of the node by `Tree::remove_tab` from Tree.
@@ -380,6 +415,7 @@ impl<Tab> DockState<Tab> {
             self[src.surface].remove_leaf(src.node);
         }
         self.close_window_if_emptied(src.surface);
+        true
     }
 
     /// Takes a tab out of its current surface and puts it in a new window.
@@ -937,7 +973,7 @@ mod test {
         );
 
         let source = state.find_tab(&1).unwrap();
-        state.move_tab(source, TabDestination::EmptySurface(SurfaceIndex::main()));
+        assert!(state.move_tab(source, TabDestination::EmptySurface(SurfaceIndex::main())));
 
         assert_eq!(tabs_of(&state, SurfaceIndex::main()), vec![1]);
         assert!(
@@ -948,6 +984,136 @@ mod test {
             state.surfaces_count(),
             1,
             "and being the last surface, its slot is popped rather than kept as a hole"
+        );
+        assert_eq!(state.validate(), Ok(()));
+    }
+
+    /// Picking a tab up and dropping it back where it was is a gesture that must leave the
+    /// dock untouched — and must say so, because the caller turns the answer into a
+    /// "layout committed" event (an undo entry, a save to disk).
+    ///
+    /// The naive implementation gets the *order* right and everything else wrong: a remove
+    /// followed by an insert at the same index reallocates the tab's identity and rewrites
+    /// the focus history, so callers watching the state for changes would see a mutation
+    /// the user never made.
+    #[test]
+    fn dropping_a_tab_back_onto_its_own_slot_changes_nothing() {
+        let mut state = DockState::new(vec![0u32, 1, 2]);
+        let main = SurfaceIndex::main();
+        let node = state.main_surface().root().unwrap();
+        let path = NodePath::new(main, node);
+        state
+            .main_surface_mut()
+            .set_active_tab(node, TabIndex(1))
+            .unwrap();
+        let prev_active = state[path].get_leaf().unwrap().prev_active_id();
+
+        // Hovering one's own tab title resolves to `Insert` at one's own index.
+        let changed = state.move_tab(
+            TabPath::new(main, node, TabIndex(1)),
+            (path, TabInsert::Insert(TabIndex(1))),
+        );
+
+        assert!(!changed, "the tab landed where it already was");
+        assert_eq!(tabs_of(&state, main), vec![0, 1, 2]);
+        let leaf = state[path].get_leaf().unwrap();
+        assert_eq!(leaf.active_index(), Some(TabIndex(1)));
+        assert_eq!(
+            leaf.prev_active_id(),
+            prev_active,
+            "the focus history is state too: a no-op drop may not rewrite it"
+        );
+        assert_eq!(state.validate(), Ok(()));
+    }
+
+    /// The gesture this rule was written for: a leaf holding a single tab, picked up and
+    /// dropped back onto its own node — every destination the overlay can offer there means
+    /// "leave it alone". `move_tab` has always bailed out of it; what is new is that the
+    /// caller can hear that, instead of announcing a commit for a frame that changed nothing.
+    #[test]
+    fn dropping_the_only_tab_of_a_node_onto_itself_changes_nothing() {
+        let mut state = DockState::new(vec![0u32]);
+        let main = SurfaceIndex::main();
+        let node = state.main_surface().root().unwrap();
+        let path = NodePath::new(main, node);
+
+        for insert in [
+            TabInsert::Insert(TabIndex(0)),
+            TabInsert::Append,
+            TabInsert::Split(Split::Left),
+        ] {
+            let changed = state.move_tab(TabPath::new(main, node, TabIndex(0)), (path, insert));
+
+            assert!(
+                !changed,
+                "the lone tab of a node has nowhere to go inside it"
+            );
+            assert_eq!(tabs_of(&state, main), vec![0]);
+            assert_eq!(
+                state.main_surface().len(),
+                1,
+                "and no leaf was split off next to it"
+            );
+        }
+        assert_eq!(state.validate(), Ok(()));
+    }
+
+    /// Same gesture over the node body, which resolves to `Append` — a no-op only for the
+    /// tab that is already last.
+    #[test]
+    fn dropping_the_last_tab_onto_its_own_node_changes_nothing() {
+        let mut state = DockState::new(vec![0u32, 1, 2]);
+        let main = SurfaceIndex::main();
+        let node = state.main_surface().root().unwrap();
+        let path = NodePath::new(main, node);
+        // The dragged tab is the active one — grabbing a tab activates it first.
+        state
+            .main_surface_mut()
+            .set_active_tab(node, TabIndex(2))
+            .unwrap();
+
+        let changed = state.move_tab(
+            TabPath::new(main, node, TabIndex(2)),
+            (path, TabInsert::Append),
+        );
+
+        assert!(!changed, "appending the last tab appends it where it is");
+        assert_eq!(tabs_of(&state, main), vec![0, 1, 2]);
+
+        // The tab before it, on the other hand, really does travel to the end.
+        let changed = state.move_tab(
+            TabPath::new(main, node, TabIndex(1)),
+            (path, TabInsert::Append),
+        );
+
+        assert!(changed);
+        assert_eq!(tabs_of(&state, main), vec![0, 2, 1]);
+        assert_eq!(state.validate(), Ok(()));
+    }
+
+    /// A drop onto one's own slot still *focuses* the tab, and focus moving is a real
+    /// change — the layout that gets saved is a different one.
+    #[test]
+    fn dropping_an_inactive_tab_onto_its_own_slot_only_moves_focus() {
+        let mut state = DockState::new(vec![0u32, 1, 2]);
+        let main = SurfaceIndex::main();
+        let node = state.main_surface().root().unwrap();
+        let path = NodePath::new(main, node);
+        assert_eq!(
+            state[path].get_leaf().unwrap().active_index(),
+            Some(TabIndex(0))
+        );
+
+        let changed = state.move_tab(
+            TabPath::new(main, node, TabIndex(2)),
+            (path, TabInsert::Insert(TabIndex(2))),
+        );
+
+        assert!(changed, "focus moved onto the dropped tab");
+        assert_eq!(tabs_of(&state, main), vec![0, 1, 2], "nothing else moved");
+        assert_eq!(
+            state[path].get_leaf().unwrap().active_index(),
+            Some(TabIndex(2))
         );
         assert_eq!(state.validate(), Ok(()));
     }

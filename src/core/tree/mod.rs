@@ -596,10 +596,13 @@ impl<Tab> Tree<Tab> {
         );
 
         let Some(parent) = self.parent(node) else {
-            // Removing the root leaf empties the tree; focus must go with it.
+            // Removing the root leaf empties the tree; focus must go with it, and so must
+            // the collapsed height — a tree with no leaves has no collapsed rows.
             self.nodes.clear();
             self.root = None;
             self.focused_node = None;
+            self.set_collapsed(false);
+            self.set_collapsed_leaf_count(0);
             return;
         };
 
@@ -633,6 +636,12 @@ impl<Tab> Tree<Tab> {
             // repair — the heap version had to re-point focus at every level it shifted.
             self.focused_node = self.first_leaf(sibling);
         }
+
+        // The chain above the promoted sibling has one leaf fewer than it counted, and the
+        // dropped one may have been the last uncollapsed leaf under some ancestor. Both
+        // are read every frame as a height (`collapsed_leaf_count * tab_bar.height`), so a
+        // stale number here is a layout that quietly drifts, not a panic.
+        self.node_update_collapsed(sibling);
     }
 
     /// The first leaf inside the subtree rooted at `top` (including `top` itself).
@@ -721,8 +730,10 @@ impl<Tab> Tree<Tab> {
             nodes: Arena::default(),
             root: None,
             focused_node: None,
-            collapsed: self.collapsed,
-            collapsed_leaf_count: self.collapsed_leaf_count,
+            // Settled by `recompute_collapsed` below, once the shape is known: copying
+            // these across would describe the tree we started from, not the one built.
+            collapsed: false,
+            collapsed_leaf_count: 0,
         };
         new_tree.root = self.root.and_then(|root| {
             let mut focus = None;
@@ -730,6 +741,7 @@ impl<Tab> Tree<Tab> {
             new_tree.focused_node = focus;
             copied
         });
+        new_tree.recompute_collapsed();
         new_tree
     }
 
@@ -861,44 +873,71 @@ impl<Tab> Tree<Tab> {
         self.collapsed_leaf_count
     }
 
-    /// Updates the collapsed state of the node's ancestors, and of the tree itself.
-    pub(crate) fn node_update_collapsed(&mut self, node: NodeId) {
-        let collapsed = self[node].is_collapsed();
+    /// Recomputes the collapsing bookkeeping of one split from its two children.
+    ///
+    /// Everything a split stores about collapsing is *derived*: it is collapsed exactly
+    /// when both its children are, and its collapsed-leaf count is however many collapsed
+    /// rows its children stack up to. The only decision in the whole scheme is
+    /// [`LeafNode::collapsed`], which the user makes; every number above it follows.
+    ///
+    /// # Panics
+    ///
+    /// If `split` is not a live split of this tree.
+    fn update_split_collapsed(&mut self, split: NodeId) {
+        let [left, right] = self
+            .children(split)
+            .expect("update_split_collapsed on a node that is not a split");
+        let left_count = self[left].collapsed_leaf_count();
+        let right_count = self[right].collapsed_leaf_count();
+        // A horizontal split stacks its children side by side, so the collapsed rows
+        // overlap; a vertical one stacks them, so they add up.
+        let count = if self[split].is_horizontal() {
+            max(left_count, right_count)
+        } else {
+            left_count + right_count
+        };
+        let both_collapsed = self[left].is_collapsed() && self[right].is_collapsed();
+        self[split].set_collapsed_leaf_count(count);
+        self[split].set_collapsed(both_collapsed);
+    }
 
+    /// Mirrors the root's bookkeeping onto the tree itself, which is where the window
+    /// surface reads the collapsed height from.
+    fn sync_collapsed_from_root(&mut self) {
+        let collapsed = self.root_node().is_some_and(Node::is_collapsed);
+        let count = self.root_node().map_or(0, Node::collapsed_leaf_count);
+        self.set_collapsed(collapsed);
+        self.set_collapsed_leaf_count(count);
+    }
+
+    /// Updates the collapsed state of the node's ancestors, and of the tree itself.
+    ///
+    /// Call after anything that changes what the ancestors of `node` contain — collapsing
+    /// a leaf, but also removing one: the counts describe a subtree, not the gesture that
+    /// last touched it.
+    pub(crate) fn node_update_collapsed(&mut self, node: NodeId) {
         let mut current = self.parent(node);
         while let Some(parent) = current {
             current = self.parent(parent);
+            self.update_split_collapsed(parent);
+        }
+        self.sync_collapsed_from_root();
+    }
 
-            let [left, right] = self.children(parent).expect("a parent is always a split");
-            let left_count = self[left].collapsed_leaf_count();
-            let right_count = self[right].collapsed_leaf_count();
-            let both_collapsed = self[left].is_collapsed() && self[right].is_collapsed();
-            let horizontal = self[parent].is_horizontal();
-
-            if !collapsed {
-                self[parent].set_collapsed(false);
-            }
-            // A horizontal split stacks its children side by side, so the collapsed rows
-            // overlap; a vertical one stacks them, so they add up.
-            self[parent].set_collapsed_leaf_count(if horizontal {
-                max(left_count, right_count)
-            } else {
-                left_count + right_count
-            });
-            if collapsed && both_collapsed {
-                self[parent].set_collapsed(true);
+    /// Recomputes the collapsing bookkeeping of every split, children before parents.
+    ///
+    /// For the bulk edits that rebuild the tree instead of editing it: a copied split
+    /// carries the count of the subtree it *had*, so leaves the sweep dropped are still
+    /// inside that number.
+    fn recompute_collapsed(&mut self) {
+        // `breadth_first` lists parents before children, so its reverse settles a split
+        // only after both its children are final.
+        for id in self.breadth_first().into_iter().rev() {
+            if self[id].is_parent() {
+                self.update_split_collapsed(id);
             }
         }
-
-        let root_collapsed = self.root_node().is_some_and(Node::is_collapsed);
-        let root_count = self.root_node().map_or(0, Node::collapsed_leaf_count);
-        if !collapsed {
-            self.set_collapsed(false);
-            self.set_collapsed_leaf_count(root_count);
-        } else if root_collapsed {
-            self.set_collapsed(true);
-            self.set_collapsed_leaf_count(root_count);
-        }
+        self.sync_collapsed_from_root();
     }
 
     // ------------------------------------------------------------------------
@@ -1042,5 +1081,103 @@ mod test {
         }
         assert!(position(left) > position(tree.root().unwrap()));
         assert!(position(deep) > position(right));
+    }
+
+    // ------------------------------------------------------------------------
+    // Collapsing bookkeeping
+    //
+    // None of this is a structural invariant, so `validate` cannot see it: the counts are
+    // a *height* the renderer reads every frame (`collapsed_leaf_count * tab_bar.height`).
+    // A stale one is a layout that drifts silently, which is why it needs its own tests.
+    // ------------------------------------------------------------------------
+
+    /// Collapses a leaf the way the tab bar's button does.
+    fn collapse(tree: &mut Tree<Tab>, leaf: NodeId) {
+        tree[leaf].set_collapsed(true);
+        tree.node_update_collapsed(leaf);
+    }
+
+    /// A stack of three leaves, the lower two collapsed: `V(top, V(mid, low))`.
+    fn stack_with_two_collapsed() -> (Tree<Tab>, [NodeId; 3]) {
+        let mut tree = Tree::new(vec![Tab(0)]);
+        let root = tree.root().unwrap();
+        let [top, mid] = tree.split_below(root, 0.5, vec![Tab(1)]);
+        let [mid, low] = tree.split_below(mid, 0.5, vec![Tab(2)]);
+        collapse(&mut tree, mid);
+        collapse(&mut tree, low);
+        (tree, [top, mid, low])
+    }
+
+    /// Removing a collapsed leaf must take its row out of every ancestor's count.
+    ///
+    /// Inherited from the heap version and kept through the arena refactor on purpose, so
+    /// that the refactor stayed a parity change; this is the behavioural fix.
+    #[test]
+    fn removing_a_collapsed_leaf_updates_ancestor_counts() {
+        let (mut tree, [_, mid, low]) = stack_with_two_collapsed();
+        assert_eq!(
+            tree.collapsed_leaf_count(),
+            2,
+            "two collapsed rows to start"
+        );
+
+        tree.remove_leaf(low);
+
+        assert_eq!(
+            tree[tree.parent(mid).unwrap()].collapsed_leaf_count(),
+            1,
+            "the removed row is still counted by the ancestor"
+        );
+        assert_eq!(tree.collapsed_leaf_count(), 1);
+        assert_eq!(tree.validate(), Ok(()));
+    }
+
+    /// Emptying the tree takes the collapsed height with it — a tree with no leaves has
+    /// no collapsed rows to reserve space for.
+    #[test]
+    fn removing_the_last_leaf_clears_the_collapsed_height() {
+        let mut tree = Tree::new(vec![Tab(0)]);
+        let root = tree.root().unwrap();
+        collapse(&mut tree, root);
+        assert_eq!(tree.collapsed_leaf_count(), 1);
+
+        tree.remove_leaf(root);
+
+        assert!(tree.is_empty());
+        assert_eq!(tree.collapsed_leaf_count(), 0);
+        assert!(!tree.is_collapsed());
+    }
+
+    /// The tree-level count must follow the root even while the root itself is *not*
+    /// collapsed — a partially collapsed dock is the normal case, not the corner one.
+    #[test]
+    fn a_partially_collapsed_tree_still_reports_its_rows() {
+        let mut tree = Tree::new(vec![Tab(0)]);
+        let root = tree.root().unwrap();
+        let [top, bottom] = tree.split_below(root, 0.5, vec![Tab(1)]);
+
+        collapse(&mut tree, bottom);
+
+        assert!(!tree[tree.parent(top).unwrap()].is_collapsed());
+        assert_eq!(
+            tree.collapsed_leaf_count(),
+            1,
+            "one collapsed leaf, one collapsed row"
+        );
+    }
+
+    /// The copying sweeps rebuild the tree, so a split they copy carries the count of the
+    /// subtree it *had* — including the leaves the sweep just dropped.
+    #[test]
+    fn a_copying_sweep_recounts_the_rows_it_dropped() {
+        let (tree, [_, _, low]) = stack_with_two_collapsed();
+        let dropped = tree[low].iter_tabs().next().copied().unwrap();
+
+        let filtered = tree.filter_tabs(|tab| *tab != dropped);
+
+        assert_eq!(filtered.collapsed_leaf_count(), 1);
+        let root = filtered.root().unwrap();
+        assert_eq!(filtered[root].collapsed_leaf_count(), 1);
+        assert_eq!(filtered.validate(), Ok(()));
     }
 }

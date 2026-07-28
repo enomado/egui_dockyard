@@ -12,6 +12,60 @@ Ordered newest first.
 
 ---
 
+## Collapsed rows were counted by the gesture, not by the tree
+
+**Status upstream:** not submitted.
+
+**Symptom.** A dock with collapsed panes reserves the wrong amount of vertical space, and stays
+wrong until something else happens to collapse. Three ways in:
+
+- collapse two stacked panes and close one — the ancestors above still reserve two rows;
+- collapse a pane while another one stays open — the *tree-level* count is never updated at all,
+  because the update was skipped unless the root itself came out fully collapsed. A floating
+  window sizes its collapsed height from exactly that number (`window_surface.rs`), so it is
+  wrong from the first collapse, not after some later edit;
+- `map_tabs` / `filter_tabs` copy each split's count verbatim, so a sweep that drops a collapsed
+  leaf leaves the leaf counted in the copy.
+
+Nothing panics and nothing is visible to `DockState::validate`: these are heights, not structure.
+The layout just drifts.
+
+**Root cause.** `SplitNode::{fully_collapsed, collapsed_leaf_count}` and their tree-level twins
+are *derived*. A split is collapsed exactly when both its children are, and its count is however
+many collapsed rows its children stack up to — `max` across a horizontal split, `+` down a
+vertical one. The only decision in the scheme is `LeafNode::collapsed`, which the user makes.
+
+But the numbers were maintained by a single function wired to a single caller — the collapse
+button — and written as conditional *repairs* keyed on the node the gesture touched:
+`if !collapsed { clear the ancestor } … else if both children collapsed { set it }`, and at the
+end a tree-level update guarded by `if !collapsed || root_collapsed`. Two consequences follow
+directly from that shape. Any edit that changes a subtree without being a collapse — `remove_leaf`
+and the copying sweeps — updated nothing, because there was no gesture to key on. And the
+intended path itself dropped the tree-level number for every partially collapsed dock, which is
+the normal case.
+
+**Fix.** Recompute, do not repair. `update_split_collapsed(split)` derives one split from its two
+children unconditionally; `node_update_collapsed(node)` runs it up the ancestor chain;
+`recompute_collapsed()` runs it over the whole tree, children before parents, for the sweeps that
+rebuild rather than edit; `sync_collapsed_from_root()` mirrors the root onto the tree in every
+case, collapsed or not. `remove_leaf` now calls the ancestor walk — and clears the height outright
+when it empties the tree, since a tree with no leaves has no collapsed rows — and
+`filter_map_tabs` calls the whole-tree one.
+
+**Evidence.** Regression tests next to the code:
+`removing_a_collapsed_leaf_updates_ancestor_counts`,
+`removing_the_last_leaf_clears_the_collapsed_height`,
+`a_partially_collapsed_tree_still_reports_its_rows`,
+`a_copying_sweep_recounts_the_rows_it_dropped`.
+
+Mutation-checked, one mutation per test: dropping the `node_update_collapsed` call from
+`remove_leaf`, dropping the `recompute_collapsed` call from `filter_map_tabs`, dropping the
+tree-level reset on the emptied tree, and restoring the old `if collapsed` guard on the
+tree-level sync. The last one fails three tests, including the *setup* assertion of the first —
+which is the finding stated as a test: the count was already wrong before anything was removed.
+
+---
+
 ## Surfaces are addressed by position too, and every sweep repaired them differently
 
 **Status upstream:** not submitted.

@@ -937,3 +937,65 @@ fn dragging_a_tab_onto_another_leaf_moves_it() {
     );
     assert_eq!(sim.state.validate(), Ok(()));
 }
+
+/// The geometry map must name the live nodes and nothing else.
+///
+/// `DockLayout` is keyed by identity and is walked once per frame by `retain_live` for exactly
+/// one reason: an entry whose node is gone is garbage that would otherwise accumulate for the
+/// lifetime of the context. Nothing checked that until now — the walk was there on the strength
+/// of a comment. This runs real frames and, after every step, compares the size of the map with
+/// the number of nodes the dock actually has: the layout pass writes a rectangle for every node
+/// it renders, so equality is the honest statement of "no leftovers, and nothing missing".
+///
+/// Coverage is asserted too, and it is the point: a scenario in which nodes are only ever created
+/// would pass with `retain_live` deleted outright. The sweep has to have killed nodes, and the
+/// map has to have shrunk because of it.
+#[test]
+fn the_geometry_map_forgets_the_nodes_that_are_gone() {
+    let mut deaths = 0usize;
+    let mut shrinks = 0usize;
+    let mut peak = 0usize;
+
+    for seed in 0..8 {
+        let steps = scenario(seed, STEPS);
+        let mut sim = Sim::new();
+        let mut prev_nodes = sim.state.iter_all_nodes().count();
+        let mut prev_entries = sim.layout().len();
+
+        for (index, step) in steps.iter().enumerate() {
+            sim.apply(*step);
+
+            let nodes = sim.state.iter_all_nodes().count();
+            let entries = sim.layout().len();
+            assert_eq!(
+                entries,
+                nodes,
+                "seed {seed}, step {index} ({step:?}): the geometry map holds {entries} entries \
+                 while the dock has {nodes} nodes — the map is either keeping rectangles of nodes \
+                 that are gone or missing nodes that were laid out.\n{}",
+                sim.trace()
+            );
+
+            deaths += prev_nodes.saturating_sub(nodes);
+            shrinks += prev_entries.saturating_sub(entries);
+            peak = peak.max(entries);
+            prev_nodes = nodes;
+            prev_entries = entries;
+        }
+    }
+
+    println!("map coverage: peak {peak} entries, {deaths} nodes died, map shrank {shrinks} times");
+    assert!(
+        deaths > 0,
+        "no node died across the sweep — the map was never asked to forget anything, so this \
+         test is green for free"
+    );
+    assert!(
+        shrinks > 0,
+        "the map never shrank although {deaths} nodes died — it is not forgetting them"
+    );
+    assert!(
+        peak > 3,
+        "the dock never grew past {peak} entries; a scene this small proves little"
+    );
+}

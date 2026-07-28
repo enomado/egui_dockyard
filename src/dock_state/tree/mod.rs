@@ -20,6 +20,9 @@ pub mod node;
 /// Wrapper around indices to the collection of nodes inside a [`Tree`].
 pub mod node_index;
 
+/// Read-only structural oracle: are a tree's invariants intact?
+pub mod validate;
+
 use std::{
     cmp::max,
     collections::HashSet,
@@ -35,6 +38,7 @@ pub use node::SplitNode;
 pub use node_index::{NodeIndex, NodePath};
 pub use tab_index::{TabIndex, TabPath};
 pub use tab_iter::TabIter;
+pub use validate::{SurfaceViolation, TreeViolation};
 
 use crate::{Error, Result, SurfaceIndex};
 
@@ -614,6 +618,11 @@ impl<Tab> Tree<Tab> {
         assert!(self[node].is_leaf());
 
         let Some(parent) = node.parent() else {
+            // Removing the root leaf empties the tree. Focus must go with it: every other exit
+            // from this function repairs `focused_node`, and leaving it dangling here means
+            // `focused_leaf()` keeps returning an index into a `Vec` that no longer has any
+            // elements — indexing the tree with it panics.
+            self.focused_node = None;
             self.nodes.clear();
             return;
         };

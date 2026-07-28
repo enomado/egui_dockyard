@@ -15,7 +15,7 @@ pub trait TabViewer {
 
     /// Content inside the context menu shown when the tab is right-clicked.
     ///
-    /// `_path` specifies which [`Surface`](crate::Surface) and [`Node`](crate::Node)
+    /// `_path` specifies which [`SurfaceIndex`](crate::SurfaceIndex) and [`Node`](crate::Node)
     /// that this particular context menu belongs to.
     fn context_menu(&mut self, _ui: &mut Ui, _tab: &mut Self::Tab, _path: NodePath) {}
 
@@ -62,7 +62,7 @@ pub trait TabViewer {
 
     /// This is called when the add button is pressed.
     ///
-    /// `_path` specifies which [`Surface`](crate::Surface) and on which
+    /// `_path` specifies which [`SurfaceIndex`](crate::SurfaceIndex) and on which
     /// [`Node`](crate::Node) this particular add button was pressed.
     fn on_add(&mut self, _path: NodePath) {}
 

@@ -458,52 +458,147 @@ impl<'de, Tab: Deserialize<'de>> Deserialize<'de> for Tree<Tab> {
 // ----------------------------------------------------------------------------
 // The dock around the trees
 //
-// A `DockState` is a vector of surfaces plus an index into it, and both halves can arrive
-// broken from a file: the index may name a surface that is not there (or a hole), and the
-// vector may not carry a main surface at all. Neither is a state the running dock tolerates —
-// indexing a surface, `main_surface()` and `focused_leaf()` all resolve those without
-// checking — so reading is hand-written and repairs them, the same way tree reading above
-// repairs a split that lost a child.
+// On disk a dock is a flat vector of surfaces with the main one at position 0, plus a numeric
+// index into that vector. In memory it is no longer shaped like that at all: the main surface
+// is its own field and windows live in their own vector, so that "there is a main surface" and
+// "the main surface is not a window" stop being things anyone has to check.
+//
+// That difference is the whole reason both directions are written by hand. The stored form is
+// kept exactly as it was — the corpus of saved layouts has to keep loading, and files written
+// now have to keep loading in older builds — so this module is the one place that knows the
+// translation, and `SurfaceIndex` itself no longer carries a number at all.
+//
+// A file can also simply be wrong: focus naming a surface that is not there, a hole where the
+// main surface should be, a window stored at position 0. Reading repairs all three, the same
+// way tree reading above repairs a split that lost a child.
+
+/// The stored form of a surface: position 0 is the main one, later positions are windows,
+/// and `Empty` is a hole left by a closed window.
+///
+/// Deliberately a separate type from anything in the model. It is the *format*, and it must
+/// not follow the model when the model changes shape.
+#[derive(Deserialize)]
+#[serde(bound(deserialize = "Tab: Deserialize<'de>"))]
+enum WireSurface<Tab> {
+    Empty,
+    Main(Tree<Tab>),
+    Window(Tree<Tab>, crate::WindowState),
+}
+
+/// The same, borrowed, for writing — so saving a layout does not clone every tree.
+///
+/// Serde renders this exactly as [`WireSurface`]: same variant names, same arities.
+#[derive(Serialize)]
+#[serde(bound(serialize = "Tab: Serialize"))]
+enum WireSurfaceRef<'a, Tab> {
+    Empty,
+    Main(&'a Tree<Tab>),
+    Window(&'a Tree<Tab>, &'a crate::WindowState),
+}
+
+/// The stored form of a surface index: a position in the flat vector above.
+///
+/// A newtype, because that is what `SurfaceIndex` used to be and RON writes it as `(0)`.
+#[derive(Serialize, Deserialize, Clone, Copy)]
+struct WireSurfaceIndex(usize);
+
+impl WireSurfaceIndex {
+    /// The stored position of `index`: main is 0, window *n* is *n + 1*.
+    fn of(index: crate::SurfaceIndex) -> Self {
+        match index {
+            crate::SurfaceIndex::Main => Self(0),
+            crate::SurfaceIndex::Window(window) => Self(window.0 + 1),
+        }
+    }
+
+    /// What a stored position names.
+    fn resolve(self) -> crate::SurfaceIndex {
+        match self.0 {
+            0 => crate::SurfaceIndex::Main,
+            position => crate::SurfaceIndex::window(position - 1),
+        }
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(bound(deserialize = "Tab: Deserialize<'de>"))]
 struct DockIn<Tab> {
-    surfaces: Vec<crate::Surface<Tab>>,
+    surfaces: Vec<WireSurface<Tab>>,
     #[serde(default = "none")]
-    focused_surface: Option<crate::SurfaceIndex>,
+    focused_surface: Option<WireSurfaceIndex>,
+}
+
+#[derive(Serialize)]
+#[serde(bound(serialize = "Tab: Serialize"))]
+struct DockOut<'a, Tab> {
+    surfaces: Vec<WireSurfaceRef<'a, Tab>>,
+    focused_surface: Option<WireSurfaceIndex>,
+}
+
+impl<Tab: Serialize> Serialize for crate::DockState<Tab> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Translations are not state a layout carries; they were `#[serde(skip)]` under the
+        // derived impl and are simply absent here, which renders the same.
+        let mut surfaces = Vec::with_capacity(self.surfaces_count());
+        for (_, surface) in self.iter_surfaces_indexed() {
+            surfaces.push(match surface {
+                crate::SurfaceRef::Empty => WireSurfaceRef::Empty,
+                crate::SurfaceRef::Main(tree) => WireSurfaceRef::Main(tree),
+                crate::SurfaceRef::Window(tree, state) => WireSurfaceRef::Window(tree, state),
+            });
+        }
+        DockOut {
+            surfaces,
+            focused_surface: self.focused_surface.map(WireSurfaceIndex::of),
+        }
+        .serialize(serializer)
+    }
 }
 
 impl<'de, Tab: Deserialize<'de>> Deserialize<'de> for crate::DockState<Tab> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let DockIn {
-            mut surfaces,
+            surfaces,
             focused_surface,
         } = DockIn::deserialize(deserializer)?;
 
-        // The main surface is the one that must be there. An empty *tree* is a legitimate
-        // empty dock; an absent surface is not, it is a panic on the next frame.
-        match surfaces.first() {
-            None => surfaces.push(crate::Surface::Main(Tree::default())),
-            Some(crate::Surface::Empty) => surfaces[0] = crate::Surface::Main(Tree::default()),
-            Some(_) => {}
-        }
+        let mut stored = surfaces.into_iter();
 
-        // Focus into a surface that the file does not actually contain is dropped, exactly as
-        // a focus route that leads nowhere is dropped inside a tree: "nothing is focused" is a
-        // state the dock already has.
-        let focused_surface = focused_surface.filter(|surface| {
-            surfaces
-                .get(surface.0)
-                .is_some_and(|surface| !surface.is_empty())
-        });
+        // Position 0 is the main surface. A file that has nothing there, or a hole, or — this
+        // was reachable under the old model — a *window* there, all resolve to "the main
+        // surface holds this tree, or an empty one". None of them can shift another surface's
+        // position, so no index a file carries is invalidated by the repair.
+        let main = match stored.next() {
+            None | Some(WireSurface::Empty) => Tree::default(),
+            Some(WireSurface::Main(tree)) => tree,
+            Some(WireSurface::Window(tree, _)) => tree,
+        };
 
-        // Translations are `#[serde(skip)]` on the way out and are not state a layout carries;
-        // a freshly read dock gets the defaults, as it did under the derived impl.
-        Ok(crate::DockState {
-            surfaces,
-            focused_surface,
+        // A `Main` stored at a window position was expressible in the old model and is not in
+        // this one. Its tree is kept as a window rather than dropped: losing tabs silently is
+        // worse than a window that arrives without a remembered position.
+        let windows = stored
+            .map(|surface| match surface {
+                WireSurface::Empty => None,
+                WireSurface::Window(tree, state) => Some((tree, state)),
+                WireSurface::Main(tree) => Some((tree, crate::WindowState::default())),
+            })
+            .collect();
+
+        let mut state = crate::DockState {
+            main,
+            windows,
+            // Focus into a surface that the file does not actually contain is dropped by
+            // `normalize_surfaces` below, exactly as a focus route that leads nowhere is
+            // dropped inside a tree: "nothing is focused" is a state the dock already has.
+            focused_surface: focused_surface.map(WireSurfaceIndex::resolve),
+            // Translations are not state a layout carries; a freshly read dock gets the
+            // defaults, as it did under the derived impl.
             translations: crate::Translations::default(),
-        })
+        };
+        state.normalize_surfaces();
+
+        Ok(state)
     }
 }
 
@@ -815,6 +910,75 @@ mod tests {
             Some(window),
             "focus stayed in the window it was in"
         );
+    }
+
+    /// The stored numbering is frozen, and it is no longer the numbering the dock uses.
+    ///
+    /// In memory the main surface is a field and windows count from zero; on disk everything is
+    /// one flat vector with main at position 0. Old files have to keep loading and new files
+    /// have to keep the same positions, so this pins both directions at once — including a
+    /// hole, which is the case where an off-by-one would silently move a window rather than
+    /// fail loudly.
+    #[test]
+    fn stored_positions_survive_the_move_of_main_out_of_the_vector() {
+        // `"focused": []` is the route to the root — the window's own leaf is focused, so that
+        // `focused_leaf()` below can report which surface focus landed in.
+        let leaf = |tab: &str, focused: &str| {
+            format!(
+                r#"{{ "root": {{ "Leaf": {{ "tabs": ["{tab}"], "active": 0 }}}}, "focused": {focused} }}"#
+            )
+        };
+        let window_state = r#"{ "next_position": null, "next_size": null,
+                                "expanded_height": null, "new": false, "minimized": false }"#;
+        let json = format!(
+            r#"{{ "surfaces": [
+                    {{ "Main": {} }},
+                    "Empty",
+                    {{ "Window": [{}, {}] }}
+                 ],
+                 "focused_surface": 2 }}"#,
+            leaf("main", "null"),
+            leaf("second", "[]"),
+            window_state
+        );
+
+        let dock_state: DockState<String> = serde_json::from_str(&json).unwrap();
+        assert_eq!(dock_state.validate(), Ok(()));
+
+        // Position 2 on disk is window 1 in memory; position 1 is the hole between them.
+        assert_eq!(dock_state.main_surface().num_tabs(), 1);
+        assert!(
+            !dock_state.is_surface_valid(SurfaceIndex::window(0)),
+            "the hole stayed a hole"
+        );
+        assert_eq!(
+            dock_state[SurfaceIndex::window(1)]
+                .tabs()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["second".to_string()]
+        );
+        assert_eq!(
+            dock_state.focused_leaf().map(|path| path.surface),
+            Some(SurfaceIndex::window(1)),
+            "focus followed the window, not the raw number"
+        );
+
+        // And back out at the very same positions, hole included.
+        let written: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&dock_state).unwrap()).unwrap();
+        let surfaces = written["surfaces"].as_array().unwrap();
+        assert_eq!(surfaces.len(), 3);
+        assert!(
+            surfaces[0].get("Main").is_some(),
+            "main is written at position 0"
+        );
+        assert_eq!(surfaces[1], serde_json::json!("Empty"));
+        assert!(
+            surfaces[2].get("Window").is_some(),
+            "window 1 is written at position 2"
+        );
+        assert_eq!(written["focused_surface"], serde_json::json!(2));
     }
 
     /// A file made *only* of empty leaves has nothing to repair onto: the result is an empty

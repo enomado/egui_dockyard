@@ -12,6 +12,79 @@ Ordered newest first.
 
 ---
 
+## The main surface was an entry in a vector that everything agreed must never be empty
+
+**Status upstream:** not submitted. This one is a deliberate breaking change to the public API,
+so it is offered as a design note rather than a patch.
+
+**Symptom.** Not a single bug — a family of them, all already fixed here, all of the same shape:
+
+- `retain_tabs` could leave the dock with no main surface, because the sweep nulled out any
+  surface whose tree it emptied and surface 0 was just another surface to it;
+- a stored layout could carry no main surface, or a hole where it should be, and a derived
+  `Deserialize` handed that straight back;
+- `remove_surface(SurfaceIndex::main())` was a panic guarded by an `assert!`, i.e. by a comment
+  the compiler happens to check at runtime.
+
+**Root cause.** `DockState` held `surfaces: Vec<Surface<Tab>>` and `SurfaceIndex` was a position
+in it, with 0 meaning "the main one". Nothing in either type said the main surface exists — so
+the fact was stated three separate times, in three mechanisms:
+
+* **maintained** by `ensure_tree(SurfaceIndex::main())` inside `normalize_surfaces`;
+* **checked** by a `MainSurfaceMissing` rule in `DockState::validate`;
+* **assumed**, without asking, by `Index<SurfaceIndex>`, `main_surface()` and focus resolution.
+
+Three statements of one invariant is the same smell the tree had before it moved to an arena:
+every new operation has to remember all three, and forgetting one is a silent bug rather than a
+compile error.
+
+**Fix.** The main surface became a field, and windows got their own address space:
+
+```rust
+pub struct DockState<Tab> {
+    main: Tree<Tab>,
+    windows: Vec<Option<(Tree<Tab>, WindowState)>>,
+    focused_surface: Option<SurfaceIndex>,
+    ...
+}
+pub enum SurfaceIndex { Main, Window(WindowIndex) }
+```
+
+All three mechanisms are gone, and nothing replaced them. `remove_window` takes a `WindowIndex`,
+so the main surface is not something it declines to remove — it is not something it can be
+asked about. The `assert!`, the `ensure_tree` call and the oracle rule were all deleted, and so
+was the test that used to corrupt a dock into the shape the rule watched for: it does not
+compile any more, which is a stronger statement than a passing test.
+
+Because `Surface<Tab>` no longer exists anywhere in memory, iteration hands out `SurfaceRef<'a>`
+/ `SurfaceMut<'a>` *by value* — views that carry the borrows of whatever they name. That is the
+price of the change, and the only reason it is a breaking one.
+
+**The stored format did not move.** On disk a dock is still a flat vector with main at position
+0 and a numeric `focused_surface`; `WindowIndex(n)` is stored at position *n + 1*. The
+translation lives in one place (the hand-written `Serialize`/`Deserialize`), old files load
+unchanged, and files written now still load in older builds. A file that says something the
+model cannot represent — a window at position 0, a `Main` at a window position — is repaired on
+the way in without shifting any other surface's position.
+
+The egui `Id` that a floating window is drawn under is likewise frozen at the string the old
+positional index produced. It is not a debug string: egui remembers window geometry under it
+across restarts, so letting it follow the type would have scattered every user's floating
+windows once.
+
+**Evidence.** The whole suite came through unchanged — including the fuzz targets, which drive
+window creation, closing and the copying sweeps (537k runs of `tree_ops`, 229k of
+`tree_persist`, both clean), and the deterministic frame simulator. New regression test
+`stored_positions_survive_the_move_of_main_out_of_the_vector` pins the wire numbering in both
+directions, hole included; mutation-checked with an off-by-one in the position mapping, which
+fails it and the round-trip test together.
+
+The property that had to *survive* the rewrite — closed windows leave holes rather than
+renumbering their neighbours — is mutation-checked separately: making `remove_window` compact
+the vector fails `map_tabs_keeps_window_indices`.
+
+---
+
 ## Collapsed rows were counted by the gesture, not by the tree
 
 **Status upstream:** not submitted.

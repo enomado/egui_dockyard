@@ -28,7 +28,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use egui_dock::{DockState, Node, Surface};
+use egui_dock::{DockState, Node, SurfaceIndex, SurfaceRef};
 
 type Tab = ron::Value;
 
@@ -41,19 +41,26 @@ type Tab = ron::Value;
 fn shape(state: &DockState<Tab>) -> String {
     use std::fmt::Write;
 
+    // Surfaces are named by the position they occupy in the *stored* form — main is 0 — because
+    // that is the numbering a file carries, and a file is what this target is about.
+    let position = |index: SurfaceIndex| match index {
+        SurfaceIndex::Main => 0,
+        SurfaceIndex::Window(window) => window.0 + 1,
+    };
+
     let mut out = String::new();
     for (index, surface) in state.iter_surfaces_indexed() {
         let tree = match surface {
-            Surface::Empty => {
-                let _ = writeln!(out, "surface {} empty", index.0);
+            SurfaceRef::Empty => {
+                let _ = writeln!(out, "surface {} empty", position(index));
                 continue;
             }
-            Surface::Main(tree) => {
-                let _ = writeln!(out, "surface {} main", index.0);
+            SurfaceRef::Main(tree) => {
+                let _ = writeln!(out, "surface {} main", position(index));
                 tree
             }
-            Surface::Window(tree, _) => {
-                let _ = writeln!(out, "surface {} window", index.0);
+            SurfaceRef::Window(tree, _) => {
+                let _ = writeln!(out, "surface {} window", position(index));
                 tree
             }
         };

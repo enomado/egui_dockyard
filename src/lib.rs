@@ -7,7 +7,7 @@
 //! ## Basic usage
 //!
 //! The library is centered around the [`DockState`].
-//! It contains a series of [`Surface`]s which all have their own [`Tree`].
+//! It contains a main surface plus any number of floating windows, which all have their own [`Tree`].
 //! Each [`Tree`] stores a hierarchy of [`Node`]s which contain the splits and tabs.
 //!
 //! [`DockState`] is generic (`DockState<Tab>`) so you can use any data to represent a tab.
@@ -115,7 +115,7 @@
 //!
 //! ## Surfaces
 //!
-//! A [`Surface`] is an abstraction for any tab hierarchy. There are two kinds of
+//! A *surface* is an abstraction for any tab hierarchy. There are two kinds of
 //! non-empty surfaces: `Main` and `Window`.
 //!
 //! There can only be one `Main` surface. It's the one surface that is rendered inside the
@@ -149,7 +149,7 @@
 //!
 //! ## Trees
 //!
-//! In each [`Surface`] there is a [`Tree`] which actually stores the tabs. As the name suggests,
+//! In each surface there is a [`Tree`] which actually stores the tabs. As the name suggests,
 //! tabs and splits are represented with a binary tree.
 //!
 //! The [`Tree`] API allows you to programatically manipulate the dock layout.

@@ -1,6 +1,6 @@
 use crate::core::geom::{Point, Size};
 
-/// The state of a [`Surface::Window`](crate::Surface::Window).
+/// The state of a floating window surface — see [`SurfaceRef::Window`](crate::SurfaceRef::Window).
 ///
 /// Doubles as a handle for the surface, allowing the user to set its size and position.
 ///

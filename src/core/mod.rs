@@ -18,8 +18,8 @@ pub mod translations;
 /// Window states which tells floating tabs how to be displayed inside their window,
 pub mod window_state;
 
-pub use surface::Surface;
-pub use surface_index::SurfaceIndex;
+pub use surface::{SurfaceMut, SurfaceRef};
+pub use surface_index::{SurfaceIndex, WindowIndex};
 use tree::node::LeafNode;
 pub use window_state::WindowState;
 
@@ -41,18 +41,34 @@ use crate::{
 ///
 /// `DockState` may be serialized to record the placement of all surfaces.
 ///
-/// This does not include serialization of translations.
-/// Reading is hand-written (see [`crate::core::tree::persist`]): a stored dock can name a
-/// focused surface that is not there, or carry no main surface at all, and a derived
-/// `Deserialize` would hand that straight back as a state whose next frame panics.
+/// This does not include serialization of translations. Both directions are hand-written
+/// (see [`crate::core::tree::persist`]). On the way out, because the stored form is a flat
+/// vector of surfaces with the main one at index 0, which is deliberately *not* how the dock
+/// holds them any more. On the way in, because a stored dock can name a focused surface that
+/// is not there, and a derived `Deserialize` would hand that straight back as a state whose
+/// next frame panics.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct DockState<Tab> {
-    surfaces: Vec<Surface<Tab>>,
+    /// The surface the dock is drawn into.
+    ///
+    /// It is a field rather than an entry in `windows` because it always exists: it cannot be
+    /// closed, cannot be a hole, and cannot be mistaken for a window. Everything that used to
+    /// guard that — the `assert` in `remove_surface`, the `ensure_tree` repair, the
+    /// `MainSurfaceMissing` rule of the oracle — was three statements of one fact that the
+    /// type now carries. An *empty* main surface (a tree with no root) is still legal; that is
+    /// an empty dock, not a missing one.
+    main: Tree<Tab>,
+
+    /// Floating windows, addressed by [`WindowIndex`].
+    ///
+    /// A `None` is a hole left by a closed window, and holes stay: the index is a position, so
+    /// compacting the vector renumbers every window after the one that went away. Only
+    /// trailing holes are dropped — see [`normalize_surfaces`](Self::normalize_surfaces).
+    windows: Vec<Option<(Tree<Tab>, WindowState)>>,
+
     focused_surface: Option<SurfaceIndex>, // Part of the tree which is in focus.
 
     /// Contains translations of text shown in [`DockArea`](crate::DockArea).
-    #[cfg_attr(feature = "serde", serde(skip))]
     pub translations: Translations,
 }
 
@@ -61,11 +77,12 @@ impl<Tab> ops::Index<SurfaceIndex> for DockState<Tab> {
 
     #[inline(always)]
     fn index(&self, index: SurfaceIndex) -> &Self::Output {
-        match self.surfaces[index.0].node_tree() {
-            Some(tree) => tree,
-            None => {
-                panic!("There did not exist a tree at surface index {}", index.0);
-            }
+        match index {
+            SurfaceIndex::Main => &self.main,
+            SurfaceIndex::Window(window) => match self.windows.get(window.0) {
+                Some(Some((tree, _))) => tree,
+                _ => panic!("there is no window {}", window.0),
+            },
         }
     }
 }
@@ -73,11 +90,12 @@ impl<Tab> ops::Index<SurfaceIndex> for DockState<Tab> {
 impl<Tab> ops::IndexMut<SurfaceIndex> for DockState<Tab> {
     #[inline(always)]
     fn index_mut(&mut self, index: SurfaceIndex) -> &mut Self::Output {
-        match self.surfaces[index.0].node_tree_mut() {
-            Some(tree) => tree,
-            None => {
-                panic!("There did not exist a tree at surface index {}", index.0);
-            }
+        match index {
+            SurfaceIndex::Main => &mut self.main,
+            SurfaceIndex::Window(window) => match self.windows.get_mut(window.0) {
+                Some(Some((tree, _))) => tree,
+                _ => panic!("there is no window {}", window.0),
+            },
         }
     }
 }
@@ -87,30 +105,14 @@ impl<Tab> ops::Index<NodePath> for DockState<Tab> {
 
     #[inline(always)]
     fn index(&self, index: NodePath) -> &Self::Output {
-        match self.surfaces[index.surface.0].node_tree() {
-            Some(tree) => &tree[index.node],
-            None => {
-                panic!(
-                    "There did not exist a tree at surface index {}",
-                    index.surface.0
-                );
-            }
-        }
+        &self[index.surface][index.node]
     }
 }
 
 impl<Tab> ops::IndexMut<NodePath> for DockState<Tab> {
     #[inline(always)]
     fn index_mut(&mut self, index: NodePath) -> &mut Self::Output {
-        match self.surfaces[index.surface.0].node_tree_mut() {
-            Some(tree) => &mut tree[index.node],
-            None => {
-                panic!(
-                    "There did not exist a tree at surface index {}",
-                    index.surface.0
-                );
-            }
-        }
+        &mut self[index.surface][index.node]
     }
 }
 
@@ -118,7 +120,8 @@ impl<Tab> DockState<Tab> {
     /// Create a new tree with given tabs at the main surface's root node.
     pub fn new(tabs: Vec<Tab>) -> Self {
         Self {
-            surfaces: vec![Surface::Main(Tree::new(tabs))],
+            main: Tree::new(tabs),
+            windows: Vec::new(),
             focused_surface: None,
             translations: Translations::english(),
         }
@@ -132,17 +135,17 @@ impl<Tab> DockState<Tab> {
 
     /// Get an immutable borrow to the tree at the main surface.
     pub fn main_surface(&self) -> &Tree<Tab> {
-        &self[SurfaceIndex::main()]
+        &self.main
     }
 
     /// Get a mutable borrow to the tree at the main surface.
     pub fn main_surface_mut(&mut self) -> &mut Tree<Tab> {
-        &mut self[SurfaceIndex::main()]
+        &mut self.main
     }
 
     /// Get the [`WindowState`] which corresponds to a [`SurfaceIndex`].
     ///
-    /// Returns `None` if the surface is [`Empty`](Surface::Empty), [`Main`](Surface::Main), or doesn't exist.
+    /// Returns `None` if the surface is the main one, or a window that is not there.
     ///
     /// This can be used to modify properties of a window, e.g. size and position.
     ///
@@ -159,20 +162,19 @@ impl<Tab> DockState<Tab> {
     /// window_state.set_size(Size::new(100.0, 100.0));
     /// ```
     pub fn get_window_state_mut(&mut self, surface: SurfaceIndex) -> Option<&mut WindowState> {
-        match &mut self.surfaces[surface.0] {
-            Surface::Window(_, state) => Some(state),
-            _ => None,
-        }
+        let window = surface.as_window()?;
+        self.windows
+            .get_mut(window.0)?
+            .as_mut()
+            .map(|(_, state)| state)
     }
 
     /// Get the [`WindowState`] which corresponds to a [`SurfaceIndex`].
     ///
-    /// Returns `None` if the surface is an [`Empty`](Surface::Empty), [`Main`](Surface::Main), or doesn't exist.
-    pub fn get_window_state(&mut self, surface: SurfaceIndex) -> Option<&WindowState> {
-        match &self.surfaces[surface.0] {
-            Surface::Window(_, state) => Some(state),
-            _ => None,
-        }
+    /// Returns `None` if the surface is the main one, or a window that is not there.
+    pub fn get_window_state(&self, surface: SurfaceIndex) -> Option<&WindowState> {
+        let window = surface.as_window()?;
+        self.windows.get(window.0)?.as_ref().map(|(_, state)| state)
     }
 
     /// Returns the active `Tab` inside the focused leaf node or `None` if no node is in focus.
@@ -187,53 +189,74 @@ impl<Tab> DockState<Tab> {
             .and_then(|surface| self[surface].find_active_focused())
     }
 
-    /// Get a mutable borrow to the raw surface from a surface index.
+    /// A borrowed view of the surface at `surface`, or `None` if it names a window slot past
+    /// the end of the vector.
+    ///
+    /// An unoccupied slot answers `Some(SurfaceRef::Empty)`: the slot exists, the window does
+    /// not. The main surface always answers.
     #[inline]
-    pub fn get_surface_mut(&mut self, surface: SurfaceIndex) -> Option<&mut Surface<Tab>> {
-        self.surfaces.get_mut(surface.0)
+    pub fn get_surface(&self, surface: SurfaceIndex) -> Option<SurfaceRef<'_, Tab>> {
+        match surface {
+            SurfaceIndex::Main => Some(SurfaceRef::Main(&self.main)),
+            SurfaceIndex::Window(window) => match self.windows.get(window.0)? {
+                Some((tree, state)) => Some(SurfaceRef::Window(tree, state)),
+                None => Some(SurfaceRef::Empty),
+            },
+        }
     }
 
-    /// Get an immutable borrow to the raw surface from a surface index.
+    /// A mutably borrowed view of the surface at `surface`. See [`get_surface`](Self::get_surface).
     #[inline]
-    pub fn get_surface(&self, surface: SurfaceIndex) -> Option<&Surface<Tab>> {
-        self.surfaces.get(surface.0)
+    pub fn get_surface_mut(&mut self, surface: SurfaceIndex) -> Option<SurfaceMut<'_, Tab>> {
+        match surface {
+            SurfaceIndex::Main => Some(SurfaceMut::Main(&mut self.main)),
+            SurfaceIndex::Window(window) => match self.windows.get_mut(window.0)? {
+                Some((tree, state)) => Some(SurfaceMut::Window(tree, state)),
+                None => Some(SurfaceMut::Empty),
+            },
+        }
     }
 
-    /// Returns true if the specified surface exists and isn't [`Empty`](Surface::Empty).
+    /// Returns true if the specified surface holds a tree.
+    ///
+    /// Always true for the main surface; for a window, true while the window is open.
     #[inline]
     pub fn is_surface_valid(&self, surface_index: SurfaceIndex) -> bool {
-        self.surfaces
-            .get(surface_index.0)
-            .is_some_and(|surface| !surface.is_empty())
+        match surface_index {
+            SurfaceIndex::Main => true,
+            SurfaceIndex::Window(window) => self.windows.get(window.0).is_some_and(Option::is_some),
+        }
     }
 
-    /// Returns a list of all valid [`SurfaceIndex`]es.
+    /// Returns a list of all valid [`SurfaceIndex`]es, main first.
     #[inline]
     pub(crate) fn valid_surface_indices(&self) -> Box<[SurfaceIndex]> {
-        (0..self.surfaces.len())
-            .filter_map(|index| {
-                let index = SurfaceIndex(index);
-                self.is_surface_valid(index).then_some(index)
-            })
+        std::iter::once(SurfaceIndex::Main)
+            .chain(
+                self.windows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, window)| window.is_some())
+                    .map(|(index, _)| SurfaceIndex::window(index)),
+            )
             .collect()
     }
 
-    /// Remove a surface based on its [`SurfaceIndex`]
+    /// Closes the window in slot `window`, returning its tree and state.
     ///
-    /// Returns the removed surface or `None` if it didn't exist.
+    /// Returns `None` if that slot held no window. The slot itself stays — see
+    /// [`normalize_surfaces`](Self::normalize_surfaces) for why windows are never renumbered.
     ///
-    /// Panics if you try to remove the main surface: `SurfaceIndex::main()`.
-    pub fn remove_surface(&mut self, surface_index: SurfaceIndex) -> Option<Surface<Tab>> {
-        assert!(!surface_index.is_main());
-        (surface_index.0 < self.surfaces.len()).then(|| {
-            self.focused_surface = Some(SurfaceIndex::main());
-            if surface_index.0 == self.surfaces.len() - 1 {
-                self.surfaces.pop().unwrap()
-            } else {
-                let dest = &mut self.surfaces[surface_index.0];
-                std::mem::replace(dest, Surface::Empty)
-            }
-        })
+    /// The main surface is not a window and so cannot be given to this method at all; that
+    /// used to be an `assert!(!surface_index.is_main())`.
+    pub fn remove_window(&mut self, window: WindowIndex) -> Option<(Tree<Tab>, WindowState)> {
+        let removed = self.windows.get_mut(window.0)?.take()?;
+        self.focused_surface = Some(SurfaceIndex::Main);
+        // A trailing hole shifts nothing that survived, so it is dropped rather than kept.
+        while self.windows.last().is_some_and(Option::is_none) {
+            self.windows.pop();
+        }
+        Some(removed)
     }
 
     /// Sets which is the active tab at a specific `path`.
@@ -254,8 +277,7 @@ impl<Tab> DockState<Tab> {
     ///
     /// This is the same as `&self[path]` but returns an error instead of panicking.
     pub fn node(&self, path: NodePath) -> Result<&Node<Tab>> {
-        self.surfaces
-            .get(path.surface.0)
+        self.get_surface(path.surface)
             .ok_or(Error::InvalidSurface)?
             .node_tree()
             .ok_or(Error::EmptySurface)?
@@ -266,10 +288,9 @@ impl<Tab> DockState<Tab> {
     ///
     /// This is the same as `&mut self[path]` but returns an error instead of panicking.
     pub fn node_mut(&mut self, path: NodePath) -> Result<&mut Node<Tab>> {
-        self.surfaces
-            .get_mut(path.surface.0)
+        self.get_surface_mut(path.surface)
             .ok_or(Error::InvalidSurface)?
-            .node_tree_mut()
+            .into_node_tree_mut()
             .ok_or(Error::EmptySurface)?
             .node_mut(path.node)
     }
@@ -334,7 +355,7 @@ impl<Tab> DockState<Tab> {
             TabDestination::EmptySurface(dst_surface) => {
                 // Which "empty" this is matters: the destination must be a surface that
                 // *holds a tree with no root* — not a hole in the surface vector
-                // (`Surface::Empty`), which the index below panics on rather than filling.
+                // (an unoccupied window slot), which the index below panics on rather than filling.
                 // The UI only ever produces this destination for the first kind, under the
                 // very same condition (`show_root_surface_inside` offers the whole area as a
                 // drop target exactly when `main_surface().is_empty()`), so the assert is a
@@ -357,9 +378,7 @@ impl<Tab> DockState<Tab> {
         if self[src.node_path()].is_leaf() && self[src.node_path()].tabs_count() == 0 {
             self[src.surface].remove_leaf(src.node);
         }
-        if self[src.surface].is_empty() && !src.surface.is_main() {
-            self.remove_surface(src.surface);
-        }
+        self.close_window_if_emptied(src.surface);
     }
 
     /// Takes a tab out of its current surface and puts it in a new window.
@@ -387,10 +406,21 @@ impl<Tab> DockState<Tab> {
         if self[src.node_path()].is_leaf() && self[src.node_path()].tabs_count() == 0 {
             self[src.surface].remove_leaf(src.node);
         }
-        if self[src.surface].is_empty() && !src.surface.is_main() {
-            self.remove_surface(src.surface);
-        }
+        self.close_window_if_emptied(src.surface);
         surface_index
+    }
+
+    /// Closes `surface` if it is a window that has run out of content.
+    ///
+    /// The main surface is never closed, and the match below is the whole reason why: it is
+    /// not a case this function has to remember to skip, it is a variant it cannot receive.
+    fn close_window_if_emptied(&mut self, surface: SurfaceIndex) {
+        if let SurfaceIndex::Window(window) = surface
+            && self.is_surface_valid(surface)
+            && self[surface].is_empty()
+        {
+            self.remove_window(window);
+        }
     }
 
     /// Returns the currently focused leaf if there is one.
@@ -407,18 +437,14 @@ impl<Tab> DockState<Tab> {
     /// This method will yield the removed tab, or `None` if it doesn't exist.
     pub fn remove_tab(&mut self, path: TabPath) -> Option<Tab> {
         let removed_tab = self[path.surface].remove_tab((path.node, path.tab));
-        if !path.surface.is_main() && self[path.surface].is_empty() {
-            self.remove_surface(path.surface);
-        }
+        self.close_window_if_emptied(path.surface);
         removed_tab
     }
 
     /// Removes a leaf at the specified `path`.
     pub fn remove_leaf(&mut self, path: NodePath) {
         self[path.surface].remove_leaf(path.node);
-        if !path.surface.is_main() && self[path.surface].is_empty() {
-            self.remove_surface(path.surface);
-        }
+        self.close_window_if_emptied(path.surface);
     }
 
     /// Creates two new nodes by splitting a given `parent` node and assigns them as its children. The first (old) node
@@ -446,96 +472,93 @@ impl<Tab> DockState<Tab> {
     ///
     /// Returns the [`SurfaceIndex`] of the new window, which will remain constant through the windows lifetime.
     pub fn add_window(&mut self, tabs: Vec<Tab>) -> SurfaceIndex {
-        let surface = Surface::Window(Tree::new(tabs), WindowState::new());
-        let index = self.find_empty_surface_index();
-        if index.0 < self.surfaces.len() {
-            self.surfaces[index.0] = surface;
-        } else {
-            self.surfaces.push(surface);
+        let window = (Tree::new(tabs), WindowState::new());
+        // Reuse a hole left by a closed window before growing: holes are never compacted
+        // away, so without this the vector would only ever get longer.
+        match self.windows.iter().position(Option::is_none) {
+            Some(slot) => {
+                self.windows[slot] = Some(window);
+                SurfaceIndex::window(slot)
+            }
+            None => {
+                self.windows.push(Some(window));
+                SurfaceIndex::window(self.windows.len() - 1)
+            }
         }
-        index
     }
 
     /// Finds the first empty surface index which may be used.
     ///
-    /// **WARNING**: in cases where one isn't found, `SurfaceIndex(self.surfaces.len())` is used.
-    /// therefore it's not inherently safe to index the [`DockState`] with this index, as it may panic.
-    fn find_empty_surface_index(&self) -> SurfaceIndex {
-        // Find the first possible empty surface to insert our window into.
-        // Starts at 1 as 0 is always the main surface.
-        for i in 1..self.surfaces.len() {
-            if self.surfaces[i].is_empty() {
-                return SurfaceIndex(i);
-            }
-        }
-        SurfaceIndex(self.surfaces.len())
-    }
-
-    /// Ensures that the surface at `index` contains a [`Tree`]
-    ///
-    /// If the surface is [`Empty`](Surface::Empty), builds a [`Surface::Main`]
-    /// for the main surface or a [`Surface::Window`] for other surfaces.
-    ///
-    /// # Panics
-    /// If `index` is not a valid `SurfaceIndex`
-    fn ensure_tree(&mut self, index: SurfaceIndex) {
-        if matches!(self.surfaces[index.0], Surface::Empty) {
-            self.surfaces[index.0] = if index == SurfaceIndex::main() {
-                Surface::Main(Tree::new(vec![]))
-            } else {
-                Surface::Window(Tree::new(vec![]), WindowState::default())
-            }
-        }
-    }
-
     /// Pushes `tab` to the currently focused leaf.
     ///
     /// If no leaf is focused it will be pushed to the first available leaf.
     ///
     /// If no leaf is available then a new leaf will be created.
+    ///
+    /// There is no "make sure the surface has a tree" step any more: the main surface always
+    /// has one, and a focus that names a closed window is dropped by
+    /// [`normalize_surfaces`](Self::normalize_surfaces) rather than resurrected here.
     pub fn push_to_focused_leaf(&mut self, tab: Tab) {
-        let surface_index = self.focused_surface.unwrap_or(SurfaceIndex::main());
-        self.ensure_tree(surface_index);
+        let surface_index = match self.focused_surface {
+            Some(surface) if self.is_surface_valid(surface) => surface,
+            _ => SurfaceIndex::Main,
+        };
         self[surface_index].push_to_focused_leaf(tab)
     }
 
-    /// Push a tab to the first available `Leaf` or create a new leaf if an `Empty` node is encountered.
+    /// Push a tab to the first available `Leaf` or create a new leaf if the main surface is empty.
     pub fn push_to_first_leaf(&mut self, tab: Tab) {
-        self.ensure_tree(SurfaceIndex::main());
-        self[SurfaceIndex::main()].push_to_first_leaf(tab);
+        self.main.push_to_first_leaf(tab);
     }
 
-    /// Returns the current number of surfaces.
+    /// Returns the number of window slots, holes included, plus one for the main surface.
+    ///
+    /// This counts *slots*, not open windows: it is the length the stored form has, and the
+    /// range over which a [`WindowIndex`] can still name something.
     pub fn surfaces_count(&self) -> usize {
-        self.surfaces.len()
+        self.windows.len() + 1
     }
 
-    /// Returns an [`Iterator`] over all surfaces.
-    pub fn iter_surfaces(&self) -> impl Iterator<Item = &Surface<Tab>> {
-        self.surfaces.iter()
+    /// Returns an [`Iterator`] over all surfaces, main first.
+    pub fn iter_surfaces(&self) -> impl Iterator<Item = SurfaceRef<'_, Tab>> {
+        self.iter_surfaces_indexed().map(|(_, surface)| surface)
     }
 
-    /// Returns an [`Iterator`] over all surfaces with their corresponding [`SurfaceIndex`].
-    pub fn iter_surfaces_indexed(&self) -> impl Iterator<Item = (SurfaceIndex, &Surface<Tab>)> {
-        self.surfaces
-            .iter()
-            .enumerate()
-            .map(|(index, surface)| (SurfaceIndex(index), surface))
+    /// Returns an [`Iterator`] over all surfaces with their corresponding [`SurfaceIndex`],
+    /// main first, holes included as [`SurfaceRef::Empty`].
+    pub fn iter_surfaces_indexed(
+        &self,
+    ) -> impl Iterator<Item = (SurfaceIndex, SurfaceRef<'_, Tab>)> {
+        std::iter::once((SurfaceIndex::Main, SurfaceRef::Main(&self.main))).chain(
+            self.windows.iter().enumerate().map(|(index, window)| {
+                let surface = match window {
+                    Some((tree, state)) => SurfaceRef::Window(tree, state),
+                    None => SurfaceRef::Empty,
+                };
+                (SurfaceIndex::window(index), surface)
+            }),
+        )
     }
 
-    /// Returns a mutable [`Iterator`] over all surfaces.
-    pub fn iter_surfaces_mut(&mut self) -> impl Iterator<Item = &mut Surface<Tab>> {
-        self.surfaces.iter_mut()
+    /// Returns a mutable [`Iterator`] over all surfaces, main first.
+    pub fn iter_surfaces_mut(&mut self) -> impl Iterator<Item = SurfaceMut<'_, Tab>> {
+        self.iter_surfaces_mut_indexed().map(|(_, surface)| surface)
     }
 
-    /// Returns a mutable [`Iterator`] over all surfaces with their corresponding [`SurfaceIndex`].
+    /// Returns a mutable [`Iterator`] over all surfaces with their corresponding
+    /// [`SurfaceIndex`], main first, holes included as [`SurfaceMut::Empty`].
     pub fn iter_surfaces_mut_indexed(
         &mut self,
-    ) -> impl Iterator<Item = (SurfaceIndex, &mut Surface<Tab>)> {
-        self.surfaces
-            .iter_mut()
-            .enumerate()
-            .map(|(index, surface)| (SurfaceIndex(index), surface))
+    ) -> impl Iterator<Item = (SurfaceIndex, SurfaceMut<'_, Tab>)> {
+        std::iter::once((SurfaceIndex::Main, SurfaceMut::Main(&mut self.main))).chain(
+            self.windows.iter_mut().enumerate().map(|(index, window)| {
+                let surface = match window {
+                    Some((tree, state)) => SurfaceMut::Window(tree, state),
+                    None => SurfaceMut::Empty,
+                };
+                (SurfaceIndex::window(index), surface)
+            }),
+        )
     }
 
     /// Returns an [`Iterator`] of **all** underlying nodes in the dock state,
@@ -561,7 +584,7 @@ impl<Tab> DockState<Tab> {
         self.iter_surfaces_mut_indexed()
             .flat_map(|(surface_index, surface)| {
                 surface
-                    .iter_nodes_mut_indexed()
+                    .into_iter_nodes_mut_indexed()
                     .map(move |(node_index, node)| {
                         (
                             NodePath {
@@ -593,7 +616,7 @@ impl<Tab> DockState<Tab> {
         self.iter_surfaces_mut_indexed()
             .flat_map(|(surface_index, surface)| {
                 surface
-                    .iter_all_tabs_mut()
+                    .into_iter_all_tabs_mut()
                     .map(move |((node_index, tab_index), tab)| {
                         (TabPath::new(surface_index, node_index, tab_index), tab)
                     })
@@ -615,10 +638,7 @@ impl<Tab> DockState<Tab> {
     /// Returns an [`Iterator`] of **all** underlying nodes in the dock state and all subsequent trees.
     #[deprecated = "Use `iter_all_nodes` instead"]
     pub fn iter_nodes(&self) -> impl Iterator<Item = &Node<Tab>> {
-        self.surfaces
-            .iter()
-            .filter_map(|surface| surface.node_tree())
-            .flat_map(|nodes| nodes.iter())
+        self.iter_all_nodes().map(|(_, node)| node)
     }
 
     /// Returns an immutable [`Iterator`] of all [``LeafNode``]s in the dock state.
@@ -635,24 +655,23 @@ impl<Tab> DockState<Tab> {
 
     /// Restores the bookkeeping that spans surfaces after a sweep emptied some of them.
     ///
-    /// Any operation that can null out surfaces has to run this, and it is deliberately one
-    /// function: the three rules below are not independent, and each of them has already been
-    /// a bug once (see `FINDINGS.md`).
+    /// Any operation that can close windows has to run this, and it is deliberately one
+    /// function: the rules below are not independent, and each of them has already been a bug
+    /// once (see `FINDINGS.md`).
     ///
-    /// * **holes stay holes.** `SurfaceIndex` is a position in the vector, so compacting it
-    ///   renumbers every surface after the one that went away — `focused_surface` and any index
+    /// * **holes stay holes.** [`WindowIndex`] is a position in the vector, so compacting it
+    ///   renumbers every window after the one that went away — `focused_surface` and any index
     ///   a caller was holding then name a different window. Only *trailing* holes are popped,
     ///   and those can shift nothing that survived.
-    /// * **the main surface always holds a tree.** Indexing, [`main_surface`](Self::main_surface)
-    ///   and focus resolution all assume it without asking. Emptying every tab leaves an empty
-    ///   dock, not a dock with no main surface.
     /// * **focus points somewhere real.** It may have been inside a window that is now gone.
+    ///
+    /// The third rule this function used to carry — "the main surface always holds a tree" —
+    /// is gone, because it is now the type: [`main`](Self::main) is a `Tree`, not a slot that
+    /// might be empty.
     fn normalize_surfaces(&mut self) {
-        while self.surfaces.len() > 1 && self.surfaces.last().is_some_and(Surface::is_empty) {
-            self.surfaces.pop();
+        while self.windows.last().is_some_and(Option::is_none) {
+            self.windows.pop();
         }
-
-        self.ensure_tree(SurfaceIndex::main());
 
         if !self
             .focused_surface
@@ -664,8 +683,8 @@ impl<Tab> DockState<Tab> {
 
     /// Returns a new [`DockState`] while mapping and filtering the tab type.
     ///
-    /// Any remaining empty [`Node`]s are removed, and a [`Surface`] left without tabs becomes
-    /// [`Empty`](Surface::Empty) — a hole in place, not a gap: see
+    /// Any remaining empty [`Node`]s are removed, and a window left without tabs becomes
+    /// a hole in place, not a gap: see
     /// [`normalize_surfaces`](Self::normalize_surfaces) for why the vector is not compacted.
     ///
     /// ```
@@ -681,16 +700,27 @@ impl<Tab> DockState<Tab> {
         F: FnMut(&Tab) -> Option<NewTab>,
     {
         let DockState {
-            surfaces,
+            main,
+            windows,
             focused_surface,
             translations,
         } = self;
-        let surfaces = surfaces
+        // Main goes first so a stateful `function` sees the tabs in the same order the flat
+        // vector of surfaces used to present them.
+        let main = main.filter_map_tabs(&mut function);
+        // A window that loses all its tabs becomes a hole in place; the main surface stays
+        // the main surface with an empty tree, which is an empty dock.
+        let windows = windows
             .iter()
-            .map(|surface| surface.filter_map_tabs(&mut function))
+            .map(|window| {
+                let (tree, state) = window.as_ref()?;
+                let tree = tree.filter_map_tabs(&mut function);
+                (!tree.is_empty()).then(|| (tree, state.clone()))
+            })
             .collect();
         let mut mapped = DockState {
-            surfaces,
+            main,
+            windows,
             focused_surface: *focused_surface,
             translations: translations.clone(),
         };
@@ -717,8 +747,8 @@ impl<Tab> DockState<Tab> {
 
     /// Returns a new [`DockState`] while filtering the tab type.
     ///
-    /// Any remaining empty [`Node`]s are removed, and a [`Surface`] left without tabs becomes
-    /// [`Empty`](Surface::Empty) in place — see [`filter_map_tabs`](Self::filter_map_tabs).
+    /// Any remaining empty [`Node`]s are removed, and a window left without tabs becomes a
+    /// hole in place — see [`filter_map_tabs`](Self::filter_map_tabs).
     ///
     /// ```
     /// # use egui_dock::{DockState, Node};
@@ -738,8 +768,8 @@ impl<Tab> DockState<Tab> {
 
     /// Removes all tabs for which `predicate` returns `false`.
     ///
-    /// Any remaining empty [`Node`]s are also removed, and a [`Surface`] left without tabs
-    /// becomes [`Empty`](Surface::Empty) in place — see
+    /// Any remaining empty [`Node`]s are also removed, and a window left without tabs becomes
+    /// a hole in place — see
     /// [`normalize_surfaces`](Self::normalize_surfaces).
     ///
     /// ```
@@ -754,13 +784,18 @@ impl<Tab> DockState<Tab> {
     where
         F: FnMut(&mut Tab) -> bool,
     {
-        for surface in &mut self.surfaces {
-            surface.retain_tabs(&mut predicate);
+        self.main.retain_tabs(&mut predicate);
+        for window in &mut self.windows {
+            let Some((tree, _)) = window else { continue };
+            tree.retain_tabs(&mut predicate);
+            if tree.is_empty() {
+                // A window with nothing in it is closed, leaving a hole where it was.
+                *window = None;
+            }
         }
 
-        // `Surface::retain_tabs` nulls out a surface whose tree it emptied, but it can neither
-        // see the vector it sits in nor know that surface 0 is special. Both — plus focus that
-        // may have been inside a window that is now gone — are settled one level up.
+        // Trailing holes and a focus that may have been inside a window that is now gone are
+        // settled one level up, where the whole vector is visible.
         self.normalize_surfaces();
     }
 
@@ -773,9 +808,6 @@ impl<Tab> DockState<Tab> {
     /// In case there are several hits, only the first is returned.
     pub fn find_tab_from(&self, predicate: impl Fn(&Tab) -> bool) -> Option<TabPath> {
         for &surface_index in self.valid_surface_indices().iter() {
-            if self.surfaces[surface_index.0].is_empty() {
-                continue;
-            }
             if let Some((node_index, tab_index)) = self[surface_index].find_tab_from(&predicate) {
                 return Some(TabPath::new(surface_index, node_index, tab_index));
             }
@@ -826,17 +858,17 @@ mod test {
             .collect()
     }
 
-    /// A hole in the surface vector must survive `map_tabs`, which renames nothing.
+    /// A hole in the window vector must survive `map_tabs`, which renames nothing.
     ///
-    /// `remove_surface` leaves `Surface::Empty` behind rather than compacting, because
-    /// `SurfaceIndex` is a *position*. A map that drops those holes renumbers every window
-    /// after them — the same bug that was fixed in `retain_tabs`, one function over.
+    /// `remove_window` leaves a hole behind rather than compacting, because [`WindowIndex`]
+    /// is a *position*. A map that drops those holes renumbers every window after them — the
+    /// same bug that was fixed in `retain_tabs`, one function over.
     #[test]
     fn map_tabs_keeps_window_indices() {
         let mut state = DockState::new(vec![0u32]);
         let hole = state.add_window(vec![1]);
         let kept = state.add_window(vec![2]);
-        state.remove_surface(hole);
+        state.remove_window(hole.as_window().unwrap());
 
         let mapped = state.map_tabs(|tab| tab.to_string());
 
@@ -858,7 +890,9 @@ mod test {
         let filtered = state.filter_tabs(|tab| *tab != 1);
 
         assert!(
-            filtered.get_surface(dropped).is_some_and(Surface::is_empty),
+            filtered
+                .get_surface(dropped)
+                .is_some_and(|surface| surface.is_empty()),
             "the emptied window must leave a hole, not a gap"
         );
         assert_eq!(tabs_of(&filtered, kept), vec![2]);
@@ -921,7 +955,7 @@ mod test {
     ///
     /// The two sweeps leave the main surface in *different* shapes of empty: `retain_tabs`
     /// rebuilds it as a tree with an empty root leaf (its surface was nulled, so `ensure_tree`
-    /// runs), while `filter_tabs` leaves a tree with no root at all (`Surface::Main` is never
+    /// runs), while `filter_tabs` leaves a tree with no root at all (the main surface is never
     /// nulled, so nothing rebuilds it). Both are legal empty docks — this pins that the
     /// difference stays invisible to the next push.
     #[test]

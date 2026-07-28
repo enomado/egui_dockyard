@@ -4,7 +4,7 @@ use egui::{
 };
 
 use crate::{
-    DockArea, NodePath, Style, SurfaceIndex, TabViewer,
+    DockArea, NodePath, Style, SurfaceIndex, TabViewer, WindowIndex,
     dock_area::{events::DockEvent, state::State, tab_removal::TabRemoval},
     utils::{fade_visuals, rect_set_size_centered},
 };
@@ -13,16 +13,21 @@ impl<Tab> DockArea<'_, Tab> {
     pub(super) fn show_window_surface(
         &mut self,
         ui: &Ui,
-        surf_index: SurfaceIndex,
+        window: WindowIndex,
         tab_viewer: &mut impl TabViewer<Tab = Tab>,
         state: &mut State,
         fade_style: Option<(&Style, f32, SurfaceIndex)>,
     ) {
-        // Construct egui window
-        let id = format!("window {surf_index:?}").into();
+        let surf_index = SurfaceIndex::Window(window);
+        // This id is not a debug string, it is *format*: egui remembers a window's position
+        // and size under it, and that memory is persisted across restarts. It is therefore
+        // frozen at the shape the old positional `SurfaceIndex` printed — the same numbering
+        // a saved layout uses, main being 0 — so that changing how the dock addresses windows
+        // internally does not scatter everyone's floating windows across the screen.
+        let id = format!("window SurfaceIndex({})", window.0 + 1).into();
         let bounds = self.window_bounds.unwrap();
         let open = true;
-        let window = crate::dock_area::window_ui::create_window(
+        let egui_window = crate::dock_area::window_ui::create_window(
             self.dock_state.get_window_state_mut(surf_index).unwrap(),
             id,
             bounds,
@@ -82,18 +87,18 @@ impl<Tab> DockArea<'_, Tab> {
             .is_minimized();
         if minimized {
             let height = tab_bar_height;
-            window
+            egui_window
                 .resizable([true, false])
                 .max_height(height)
                 .min_height(height)
         } else if self.dock_state[surf_index].is_collapsed() {
             let height = self.dock_state[surf_index].collapsed_leaf_count() as f32 * tab_bar_height;
-            window
+            egui_window
                 .resizable([true, false])
                 .max_height(height)
                 .min_height(height)
         } else {
-            window
+            egui_window
         }
         .frame(frame)
         .show(ui.ctx(), |ui| {
@@ -115,7 +120,7 @@ impl<Tab> DockArea<'_, Tab> {
         });
 
         if !open {
-            self.to_remove.push(TabRemoval::Window(surf_index));
+            self.to_remove.push(TabRemoval::Window(window));
         }
     }
 

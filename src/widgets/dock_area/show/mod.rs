@@ -145,9 +145,9 @@ impl<Tab> DockArea<'_, Tab> {
                         self.events.push(DockEvent::LayoutCommitted);
                     }
                 }
-                TabRemoval::Window(surface) => {
+                TabRemoval::Window(window) => {
                     let mut all_tabs_are_closable = true;
-                    for node in self.dock_state[surface].iter_mut() {
+                    for node in self.dock_state[SurfaceIndex::Window(window)].iter_mut() {
                         for tab in node.iter_tabs_mut() {
                             if !(tab_viewer.is_closeable(tab)
                                 && matches!(tab_viewer.on_close(tab), OnCloseResponse::Close))
@@ -157,7 +157,7 @@ impl<Tab> DockArea<'_, Tab> {
                         }
                     }
                     if all_tabs_are_closable {
-                        self.dock_state.remove_surface(surface);
+                        self.dock_state.remove_window(window);
                         self.events.push(DockEvent::LayoutCommitted);
                     }
                 }
@@ -298,10 +298,11 @@ impl<Tab> DockArea<'_, Tab> {
         state: &mut State,
         fade_style: Option<(&Style, f32, SurfaceIndex)>,
     ) {
-        if surf_index.is_main() {
-            self.show_root_surface_inside(ui, tab_viewer, state);
-        } else {
-            self.show_window_surface(ui, surf_index, tab_viewer, state, fade_style);
+        match surf_index {
+            SurfaceIndex::Main => self.show_root_surface_inside(ui, tab_viewer, state),
+            SurfaceIndex::Window(window) => {
+                self.show_window_surface(ui, window, tab_viewer, state, fade_style)
+            }
         }
     }
 

@@ -666,7 +666,12 @@ impl<Tab> DockArea<'_, Tab> {
         } else {
             // Close all tabs in this leaf
             if !disabled {
-                if !path.surface.is_main() && self.secondary_button_context_menu {
+                // "Close the window" is offered only where there is a window to close, and
+                // `as_window` is what says so — the main surface simply has no `WindowIndex`
+                // to put in the request.
+                if let Some(window) = path.surface.as_window()
+                    && self.secondary_button_context_menu
+                {
                     response.context_menu(|ui| {
                         ui.add_enabled_ui(!close_window_disabled, |ui| {
                             if ui
@@ -680,7 +685,7 @@ impl<Tab> DockArea<'_, Tab> {
                                 )
                                 .clicked()
                             {
-                                self.to_remove.push(TabRemoval::Window(path.surface));
+                                self.to_remove.push(TabRemoval::Window(window));
                             }
                         });
                     });
@@ -699,8 +704,12 @@ impl<Tab> DockArea<'_, Tab> {
 
             if response.clicked() {
                 if on_secondary_button {
-                    if !close_window_disabled {
-                        self.to_remove.push(TabRemoval::Window(path.surface));
+                    // `on_secondary_button` is false on the main surface, so this always
+                    // names a window; asking for it by type keeps that from being a comment.
+                    if let Some(window) = path.surface.as_window()
+                        && !close_window_disabled
+                    {
+                        self.to_remove.push(TabRemoval::Window(window));
                     }
                 } else if !disabled {
                     self.to_remove.push(TabRemoval::Node(path));
@@ -1383,7 +1392,7 @@ mod tests {
             node,
         };
         let detached = NodePath {
-            surface: SurfaceIndex(1),
+            surface: SurfaceIndex::window(0),
             node,
         };
 

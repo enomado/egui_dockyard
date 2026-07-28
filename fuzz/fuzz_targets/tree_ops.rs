@@ -29,7 +29,7 @@ use libfuzzer_sys::fuzz_target;
 
 use egui_dock::core::geom::{Point, Rect, Size};
 use egui_dock::{
-    DockState, Node, NodePath, Split, SurfaceIndex, TabIndex, TabInsert, TabPath,
+    DockState, Node, NodePath, Split, SurfaceIndex, TabIndex, TabInsert, TabPath, WindowIndex,
 };
 
 /// One operation applied to the dock state.
@@ -149,11 +149,12 @@ fn total_tabs(state: &DockState<u32>) -> usize {
 }
 
 /// Surfaces that exist and are not the main one — the ones that may legally be removed.
-fn removable_surfaces(state: &DockState<u32>) -> Vec<SurfaceIndex> {
+fn removable_surfaces(state: &DockState<u32>) -> Vec<WindowIndex> {
     state
         .iter_surfaces_indexed()
-        .filter(|(index, surface)| !index.is_main() && !surface.is_empty())
-        .map(|(index, _)| index)
+        // The main surface filters itself out: it has no `WindowIndex` to offer, so it cannot
+        // even be a candidate for closing.
+        .filter_map(|(index, surface)| (!surface.is_empty()).then(|| index.as_window()).flatten())
         .collect()
 }
 
@@ -287,7 +288,7 @@ fn apply(state: &mut DockState<u32>, op: Op, next_tab: &mut u32) -> bool {
             if candidates.is_empty() {
                 return false;
             }
-            state.remove_surface(candidates[usize::from(surface) % candidates.len()]);
+            state.remove_window(candidates[usize::from(surface) % candidates.len()]);
         }
 
         Op::RetainOdd => state.retain_tabs(|tab| *tab % 2 == 1),

@@ -456,10 +456,10 @@ impl Sim {
         let mut out = String::new();
         for (index, surface) in self.state.iter_surfaces_indexed() {
             let Some(tree) = surface.node_tree() else {
-                let _ = write!(out, "s{}:hole ", index.0);
+                let _ = write!(out, "s{}:hole ", surface_label(index));
                 continue;
             };
-            let _ = write!(out, "s{}:", index.0);
+            let _ = write!(out, "s{}:", surface_label(index));
             match tree.root() {
                 Some(root) => shape_of(tree, root, &mut out),
                 None => out.push_str("()"),
@@ -479,7 +479,7 @@ impl Sim {
             .and_then(|leaf| leaf.active_index());
         format!(
             "focus:{:?} active:{:?}",
-            focused.map(|path| path.surface.0),
+            focused.map(|path| surface_label(path.surface)),
             active
         )
     }
@@ -496,6 +496,17 @@ struct Snapshot {
     leaves: usize,
     layout: String,
     focus: String,
+}
+
+/// A short, stable number for a surface in traces.
+///
+/// `SurfaceIndex` is an enum and prints as one; traces are read by a human staring at a
+/// shrunk counterexample, so they use the flat numbering the stored form uses — main is 0.
+fn surface_label(index: SurfaceIndex) -> usize {
+    match index {
+        SurfaceIndex::Main => 0,
+        SurfaceIndex::Window(window) => window.0 + 1,
+    }
 }
 
 /// The layout of one subtree: split orientations, nesting, and the tabs of each leaf in order.

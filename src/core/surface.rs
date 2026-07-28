@@ -1,165 +1,145 @@
-use std::ops::{Index, IndexMut};
-
 use crate::{Node, NodeId, TabIndex, Tree, WindowState};
 
-/// A [`Surface`] is the highest level component in a [`DockState`](crate::DockState). [`Surface`]s represent an area
-/// in which nodes are placed.
+/// A borrowed view of one surface of a [`DockState`](crate::DockState).
 ///
-/// Typically, you're only using one surface, which is the main surface. However, if you drag
-/// a tab out in a way which creates a window, you also create a new surface in which nodes can appear.
-#[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
-pub enum Surface<Tab> {
-    /// An empty surface, with nothing inside (practically, a null surface).
+/// This is a *view*, not a stored value: the main surface and the windows live in separate
+/// fields of the dock, so there is no `Surface` object anywhere to hand out a reference to.
+/// Iterating surfaces therefore yields this by value, and the borrows it carries are the
+/// borrows of whatever it names.
+#[derive(Debug, Clone, Copy)]
+pub enum SurfaceRef<'a, Tab> {
+    /// A window slot that no window occupies — a hole left by a closed window, kept so the
+    /// windows after it keep their [`WindowIndex`](crate::WindowIndex).
     Empty,
 
-    /// The main surface of a [`DockState`](crate::DockState), only one should exist at surface index 0 at any one time.
-    Main(Tree<Tab>),
+    /// The main surface.
+    Main(&'a Tree<Tab>),
 
-    /// A windowed surface with a state.
-    Window(Tree<Tab>, WindowState),
+    /// A floating window: its tree, and where the window sits.
+    Window(&'a Tree<Tab>, &'a WindowState),
 }
 
-impl<Tab> Index<NodeId> for Surface<Tab> {
-    type Output = Node<Tab>;
+/// A mutably borrowed view of one surface. See [`SurfaceRef`].
+#[derive(Debug)]
+pub enum SurfaceMut<'a, Tab> {
+    /// An unoccupied window slot.
+    Empty,
 
-    fn index(&self, index: NodeId) -> &Self::Output {
-        match self {
-            Surface::Empty => panic!("indexed on empty surface"),
-            Surface::Main(tree) | Surface::Window(tree, _) => &tree[index],
-        }
-    }
-}
-impl<Tab> IndexMut<NodeId> for Surface<Tab> {
-    fn index_mut(&mut self, index: NodeId) -> &mut Self::Output {
-        match self {
-            Surface::Empty => panic!("indexed on empty surface"),
-            Surface::Main(tree) | Surface::Window(tree, _) => &mut tree[index],
-        }
-    }
+    /// The main surface.
+    Main(&'a mut Tree<Tab>),
+
+    /// A floating window: its tree, and where the window sits.
+    Window(&'a mut Tree<Tab>, &'a mut WindowState),
 }
 
-impl<Tab> Surface<Tab> {
-    /// Is this surface [`Empty`](Self::Empty) (in practice null)?
+impl<'a, Tab> SurfaceRef<'a, Tab> {
+    /// Is this an unoccupied window slot?
+    ///
+    /// Note this is about the *slot*, not about content: a surface holding a tree with no
+    /// tabs is a legitimate empty dock and answers `false`.
     pub const fn is_empty(&self) -> bool {
         matches!(self, Self::Empty)
     }
 
-    /// Get access to the node tree of this surface.
-    pub fn node_tree(&self) -> Option<&Tree<Tab>> {
-        match self {
-            Surface::Empty => None,
-            Surface::Main(tree) => Some(tree),
-            Surface::Window(tree, _) => Some(tree),
+    /// The tree of this surface, or `None` if the slot is unoccupied.
+    ///
+    /// The borrow returned is the one this view carries, not one of the view itself, so it
+    /// outlives the (usually temporary) `SurfaceRef`.
+    pub const fn node_tree(&self) -> Option<&'a Tree<Tab>> {
+        match *self {
+            Self::Empty => None,
+            Self::Main(tree) | Self::Window(tree, _) => Some(tree),
         }
     }
 
-    /// Get mutable access to the node tree of this surface.
-    pub fn node_tree_mut(&mut self) -> Option<&mut Tree<Tab>> {
-        match self {
-            Surface::Empty => None,
-            Surface::Main(tree) => Some(tree),
-            Surface::Window(tree, _) => Some(tree),
+    /// The window state of this surface, or `None` if it is not a window.
+    pub const fn window_state(&self) -> Option<&'a WindowState> {
+        match *self {
+            Self::Empty | Self::Main(_) => None,
+            Self::Window(_, state) => Some(state),
         }
     }
 
     /// Returns an [`Iterator`] of nodes in this surface's tree.
     ///
-    /// If the surface is [`Empty`](Self::Empty), then the returned [`Iterator`] will be empty.
-    pub fn iter_nodes(&self) -> impl Iterator<Item = &Node<Tab>> {
+    /// If the slot is unoccupied, the returned [`Iterator`] is empty.
+    ///
+    /// Takes `self` by value (the view is [`Copy`]) so that the iterator borrows the tree and
+    /// not the — usually temporary — view standing in front of it.
+    pub fn iter_nodes(self) -> impl Iterator<Item = &'a Node<Tab>> {
         self.node_tree().into_iter().flat_map(Tree::iter)
     }
 
     /// Returns an [`Iterator`] of nodes in this surface's tree with their [`NodeId`].
-    pub fn iter_nodes_indexed(&self) -> impl Iterator<Item = (NodeId, &Node<Tab>)> {
+    pub fn iter_nodes_indexed(self) -> impl Iterator<Item = (NodeId, &'a Node<Tab>)> {
         self.node_tree().into_iter().flat_map(Tree::iter_indexed)
     }
 
-    /// Returns a mutable [`Iterator`] of nodes in this surface's tree.
-    ///
-    /// If the surface is [`Empty`](Self::Empty), then the returned [`Iterator`] will be empty.
-    pub fn iter_nodes_mut(&mut self) -> impl Iterator<Item = &mut Node<Tab>> {
-        self.node_tree_mut().into_iter().flat_map(Tree::iter_mut)
-    }
-
-    /// Returns a mutable [`Iterator`] of nodes in this surface's tree with their [`NodeId`].
-    pub fn iter_nodes_mut_indexed(&mut self) -> impl Iterator<Item = (NodeId, &mut Node<Tab>)> {
-        self.node_tree_mut()
-            .into_iter()
-            .flat_map(Tree::iter_mut_indexed)
-    }
-
-    /// Returns an [`Iterator`] of **all** tabs in this surface's tree
-    /// and their corresponding paths within the surface.
-    pub fn iter_all_tabs(&self) -> impl Iterator<Item = ((NodeId, TabIndex), &Tab)> {
+    /// Returns an [`Iterator`] of **all** tabs in this surface's tree and their paths
+    /// within the surface.
+    pub fn iter_all_tabs(self) -> impl Iterator<Item = ((NodeId, TabIndex), &'a Tab)> {
         self.iter_nodes_indexed().flat_map(|(node_index, node)| {
             node.iter_tabs_indexed()
                 .map(move |(tab_index, tab)| ((node_index, tab_index), tab))
         })
     }
+}
 
-    /// Returns a mutable [`Iterator`] of **all** tabs in this surface's tree
-    /// and their corresponding paths within the surface.
-    pub fn iter_all_tabs_mut(&mut self) -> impl Iterator<Item = ((NodeId, TabIndex), &mut Tab)> {
-        self.iter_nodes_mut_indexed()
+impl<'a, Tab> SurfaceMut<'a, Tab> {
+    /// Is this an unoccupied window slot? See [`SurfaceRef::is_empty`].
+    pub const fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
+    /// The tree of this surface, consuming the view so the borrow it carries survives.
+    pub fn into_node_tree_mut(self) -> Option<&'a mut Tree<Tab>> {
+        match self {
+            Self::Empty => None,
+            Self::Main(tree) | Self::Window(tree, _) => Some(tree),
+        }
+    }
+
+    /// The tree of this surface, or `None` if the slot is unoccupied.
+    pub fn node_tree(&self) -> Option<&Tree<Tab>> {
+        match self {
+            Self::Empty => None,
+            Self::Main(tree) | Self::Window(tree, _) => Some(tree),
+        }
+    }
+
+    /// Mutable access to the tree of this surface, or `None` if the slot is unoccupied.
+    pub fn node_tree_mut(&mut self) -> Option<&mut Tree<Tab>> {
+        match self {
+            Self::Empty => None,
+            Self::Main(tree) | Self::Window(tree, _) => Some(tree),
+        }
+    }
+
+    /// Mutable access to the window state, or `None` if this is not a window.
+    pub fn window_state_mut(&mut self) -> Option<&mut WindowState> {
+        match self {
+            Self::Empty | Self::Main(_) => None,
+            Self::Window(_, state) => Some(state),
+        }
+    }
+
+    /// Returns a mutable [`Iterator`] of nodes in this surface's tree with their [`NodeId`].
+    ///
+    /// Consumes the view: the borrows it hands out are the ones it carries, and a `&mut`
+    /// cannot be handed out twice.
+    pub fn into_iter_nodes_mut_indexed(self) -> impl Iterator<Item = (NodeId, &'a mut Node<Tab>)> {
+        self.into_node_tree_mut()
+            .into_iter()
+            .flat_map(Tree::iter_mut_indexed)
+    }
+
+    /// Returns a mutable [`Iterator`] of **all** tabs in this surface's tree and their paths
+    /// within the surface. Consumes the view, as [`into_iter_nodes_mut_indexed`](Self::into_iter_nodes_mut_indexed) does.
+    pub fn into_iter_all_tabs_mut(self) -> impl Iterator<Item = ((NodeId, TabIndex), &'a mut Tab)> {
+        self.into_iter_nodes_mut_indexed()
             .flat_map(|(node_index, node)| {
                 node.iter_tabs_mut_indexed()
                     .map(move |(tab_index, tab)| ((node_index, tab_index), tab))
             })
-    }
-
-    /// Returns a new [`Surface`] while mapping and filtering the tab type.
-    /// Any remaining empty [`Node`]s and are removed, and if this [`Surface`] remains empty,
-    /// it'll change to [`Surface::Empty`].
-    pub fn filter_map_tabs<F, NewTab>(&self, function: F) -> Surface<NewTab>
-    where
-        F: FnMut(&Tab) -> Option<NewTab>,
-    {
-        match self {
-            Surface::Empty => Surface::Empty,
-            Surface::Main(tree) => Surface::Main(tree.filter_map_tabs(function)),
-            Surface::Window(tree, window_state) => {
-                let tree = tree.filter_map_tabs(function);
-                if tree.is_empty() {
-                    Surface::Empty
-                } else {
-                    Surface::Window(tree, window_state.clone())
-                }
-            }
-        }
-    }
-
-    /// Returns a new [`Surface`] while mapping the tab type.
-    pub fn map_tabs<F, NewTab>(&self, mut function: F) -> Surface<NewTab>
-    where
-        F: FnMut(&Tab) -> NewTab,
-    {
-        self.filter_map_tabs(move |tab| Some(function(tab)))
-    }
-
-    /// Returns a new [`Surface`] while filtering the tab type.
-    /// Any remaining empty [`Node`]s and are removed, and if this [`Surface`] remains empty,
-    /// it'll change to [`Surface::Empty`].
-    pub fn filter_tabs<F>(&self, mut predicate: F) -> Surface<Tab>
-    where
-        F: FnMut(&Tab) -> bool,
-        Tab: Clone,
-    {
-        self.filter_map_tabs(move |tab| predicate(tab).then(|| tab.clone()))
-    }
-
-    /// Removes all tabs for which `predicate` returns `false`.
-    /// Any remaining empty [`Node`]s and are also removed, and if this [`Surface`] remains empty,
-    /// it'll change to [`Surface::Empty`].
-    pub fn retain_tabs<F>(&mut self, predicate: F)
-    where
-        F: FnMut(&mut Tab) -> bool,
-    {
-        if let Surface::Main(tree) | Surface::Window(tree, _) = self {
-            tree.retain_tabs(predicate);
-            if tree.is_empty() {
-                *self = Surface::Empty;
-            }
-        }
     }
 }

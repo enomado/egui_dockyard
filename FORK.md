@@ -27,18 +27,19 @@ rather say so plainly than pretend otherwise. So we keep our own line instead.
 
 ## What is patched here
 
-Four patches on top of upstream `main`. Each is a self-contained commit; details and rationale
-live in the commit messages.
+| Patch | State upstream |
+|---|---|
+| **Restore the previously-active tab.** `active` is a positional index, so removing the active tab falls back to `active - 1` — the neighbour, not the tab you were looking at. Tracks the previous activation through a single chokepoint; `#[serde(default)]`, so old serialized layouts still load. | PR [#325](https://github.com/anhosh/egui_dock/pull/325), open |
+| **`DockEvent` stream + `show_inside_with_response`.** Without it, a consumer that persists layouts or drives undo has to diff a snapshot every frame and cannot tell an ongoing interaction from a finished one. Distinguishes continuous `SeparatorDragging` from finalized `LayoutCommitted`. | PR [#323](https://github.com/anhosh/egui_dock/pull/323), closed |
+| **No phantom scroll bar in tab bodies.** Inside the frame carrying `tab_body.inner_margin`, expanding `min_rect` to `available_rect_before_wrap()` pushes the frame past the viewport by a pixel or two, and the `ScrollArea` draws a bar with ~1px of travel. | not submitted |
+| **No `LayoutCommitted` for separator drags that changed nothing.** A drag entirely swallowed by the clamp used to report a commit with nothing committed. | not submitted |
+| **Focus does not outlive the leaf it points at.** Removing the *root* leaf empties the tree through an early return that left `focused_node` dangling, so `focused_leaf()` answered with an index into an empty `Vec`. | not submitted |
+| **A structural oracle and property tests** (`Tree::validate`, `src/proptests.rs`) — test-only, `proptest` is a dev-dependency. This is what found the focus bug above. | not submitted |
 
-| # | Patch | State upstream |
-|---|---|---|
-| 1 | **Restore the previously-active tab.** `active` is a positional index, so removing the active tab falls back to `active - 1` — the neighbour, not the tab you were looking at. Tracks the previous activation through a single chokepoint; `#[serde(default)]`, so old serialized layouts still load. | PR [#325](https://github.com/anhosh/egui_dock/pull/325), open |
-| 2 | **`DockEvent` stream + `show_inside_with_response`.** Without it, a consumer that persists layouts or drives undo has to diff a snapshot every frame and cannot tell an ongoing interaction from a finished one. Distinguishes continuous `SeparatorDragging` from finalized `LayoutCommitted`. | PR [#323](https://github.com/anhosh/egui_dock/pull/323), closed |
-| 3 | **No phantom scroll bar in tab bodies.** Inside the frame carrying `tab_body.inner_margin`, expanding `min_rect` to `available_rect_before_wrap()` pushes the frame past the viewport by a pixel or two, and the `ScrollArea` draws a bar with ~1px of travel. | not submitted |
-| 4 | **No `LayoutCommitted` for separator drags that changed nothing.** A drag entirely swallowed by the clamp used to report a commit with nothing committed. | not submitted |
-
-Bugs are described in prose, reproduction included, at the top of each commit — if you are
-reimplementing any of them independently, that is the useful part.
+**Full write-ups live in [FINDINGS.md](FINDINGS.md)**: symptom, root cause, the fix, and the
+evidence that the fix does what it claims. That file is the useful part if you are reimplementing
+any of this independently — it is written to be read without the fork, and every fix we make here
+gets appended to it.
 
 ## AI-friendly
 

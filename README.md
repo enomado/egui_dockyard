@@ -16,8 +16,8 @@ Originally created by [@lain-dono](https://github.com/lain-dono), this library p
 Contributions are welcome here, on the terms described in [FORK.md](FORK.md) — read that first,
 since it supersedes the upstream rules below for this fork.
 
-The upstream [contribution guide](CONTRIBUTING.md) and [AI usage policy](AI_POLICY.md) are kept
-in the tree as they are useful context and apply if you take your work to upstream instead.
+The upstream [contribution guide](CONTRIBUTING.md) is kept in the tree as useful context and
+applies if you take your work to upstream instead.
 
 This library is a collaborative project developed with direct involvement of its users.
 

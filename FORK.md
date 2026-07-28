@@ -15,7 +15,8 @@ user-named layouts persisted to disk. Over time we accumulated patches for bugs 
 that size, and we need them in our builds regardless of when — or whether — they land upstream.
 
 Two of those patches went up as pull requests. One is still open; one was closed under the
-project's [AI usage policy](AI_POLICY.md), which requires that a human contributor be able to
+project's [AI usage policy](https://github.com/anhosh/egui_dock/blob/main/AI_POLICY.md), which
+requires that a human contributor be able to
 explain every line of a diff without AI assistance. Since then the project has also added a
 [vouch](https://github.com/mitchellh/vouch) gate: pull requests and issues from users the
 maintainer has not vouched for are closed automatically.
@@ -88,4 +89,4 @@ cargo clippy --all-targets
 cargo fmt --check
 ```
 
-See [AGENTS.md](AGENTS.md) for the example programs.
+See [examples/README.md](examples/README.md) for the example programs.

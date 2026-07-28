@@ -26,7 +26,9 @@ For more details, read vouch's [FAQ](https://github.com/mitchellh/vouch/blob/mai
 
 ## AI usage
 
-Please refer to the [AI usage policy](AI_POLICY.md).
+Please refer to upstream's
+[AI usage policy](https://github.com/anhosh/egui_dock/blob/main/AI_POLICY.md). It does not govern
+this fork — see [FORK.md](FORK.md).
 
 ## Issues
 

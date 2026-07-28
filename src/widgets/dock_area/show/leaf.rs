@@ -1283,8 +1283,16 @@ impl<Tab> DockArea<'_, Tab> {
                         if fade_factor != 1.0 {
                             fade_visuals(ui.visuals_mut(), fade_factor);
                         }
-                        let available_rect = ui.available_rect_before_wrap();
-                        ui.expand_to_include_rect(available_rect);
+                        // NOTE: deliberately no `ui.expand_to_include_rect(available_rect)` here.
+                        // At this point `available_rect` is the viewport minus the top/left
+                        // `inner_margin` (the Frame already moved the cursor), so expanding to it
+                        // and then letting the Frame add the bottom/right margin on top made the
+                        // content exceed the viewport by 1-2px — every tab body rendered a
+                        // "phantom" scroll bar with ~1px of travel.
+                        // Without the expand, `min_rect` is the actual content, so the scroll bar
+                        // shows up only on real overflow. `ui.available_size()` inside
+                        // `tab_viewer.ui()` is unchanged, so canvases that allocate the available
+                        // size still fill the body as before.
                         tab_viewer.ui(ui, tab);
                     });
             });

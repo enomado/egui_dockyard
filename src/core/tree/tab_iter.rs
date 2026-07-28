@@ -1,18 +1,23 @@
-﻿use crate::Tree;
+use crate::{NodeId, TabIndex, Tree};
 
-/// Iterates over all tabs in a [`Tree`].
+/// Iterates over all tabs in a [`Tree`], node by node in breadth-first order.
 pub struct TabIter<'a, Tab> {
     tree: &'a Tree<Tab>,
-    node_idx: usize,
-    tab_idx: usize,
+    /// The nodes left to walk. Snapshotted up front: the tree cannot change while this
+    /// iterator borrows it, and taking the order once keeps `next` cheap.
+    nodes: std::vec::IntoIter<NodeId>,
+    current: Option<NodeId>,
+    tab_index: usize,
 }
 
 impl<'a, Tab> TabIter<'a, Tab> {
     pub(super) fn new(tree: &'a Tree<Tab>) -> Self {
+        let mut nodes = tree.breadth_first().into_iter();
         Self {
+            current: nodes.next(),
+            nodes,
             tree,
-            node_idx: 0,
-            tab_idx: 0,
+            tab_index: 0,
         }
     }
 }
@@ -22,20 +27,21 @@ impl<'a, Tab> Iterator for TabIter<'a, Tab> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            match self.tree.nodes.get(self.node_idx)?.tabs() {
-                Some(tabs) => match tabs.get(self.tab_idx) {
+            let node = self.current?;
+            match self.tree[node].get_leaf() {
+                Some(leaf) => match leaf.tab_at(TabIndex(self.tab_index)) {
                     Some(tab) => {
-                        self.tab_idx += 1;
+                        self.tab_index += 1;
                         return Some(tab);
                     }
                     None => {
-                        self.node_idx += 1;
-                        self.tab_idx = 0;
+                        self.current = self.nodes.next();
+                        self.tab_index = 0;
                     }
                 },
                 None => {
-                    self.node_idx += 1;
-                    self.tab_idx = 0;
+                    self.current = self.nodes.next();
+                    self.tab_index = 0;
                 }
             }
         }

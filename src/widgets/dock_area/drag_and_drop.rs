@@ -7,8 +7,7 @@ use egui::{
 };
 
 use crate::{
-    AllowedSplits, NodeIndex, NodePath, Split, Style, SurfaceIndex, TabDestination, TabInsert,
-    TabPath,
+    AllowedSplits, NodeId, NodePath, Split, Style, SurfaceIndex, TabDestination, TabInsert, TabPath,
 };
 
 #[derive(Debug, Clone)]
@@ -48,7 +47,7 @@ impl TreeComponent {
         }
     }
 
-    pub(super) fn node_address(&self) -> (SurfaceIndex, Option<NodeIndex>) {
+    pub(super) fn node_address(&self) -> (SurfaceIndex, Option<NodeId>) {
         match *self {
             TreeComponent::Surface(surface) => (surface, None),
             TreeComponent::Node(dst) => (dst.surface, Some(dst.node)),

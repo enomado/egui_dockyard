@@ -20,14 +20,15 @@
 
 use std::path::{Path, PathBuf};
 
-/// Lower bound on the files the gate must see. The core is 15 files today; if a refactor
+/// Lower bound on the files the gate must see. The core is 17 files today; if a refactor
 /// legitimately shrinks it below this, lower the bound *deliberately* — do not delete the
 /// assertion, or "0 violations" starts meaning "0 files scanned".
-const MIN_FILES_SCANNED: usize = 12;
+const MIN_FILES_SCANNED: usize = 15;
 
 /// Lower bound on non-comment code lines scanned, for the same reason: a comment-stripper
-/// bug that blanks every file would otherwise read as a clean bill of health.
-const MIN_CODE_LINES_SCANNED: usize = 1000;
+/// bug that blanks every file would otherwise read as a clean bill of health. The core is
+/// around 2500 such lines today.
+const MIN_CODE_LINES_SCANNED: usize = 2000;
 
 fn core_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src/core")

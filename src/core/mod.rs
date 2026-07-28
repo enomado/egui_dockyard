@@ -26,8 +26,7 @@ pub use window_state::WindowState;
 use crate::core::geom::{Rect, Size};
 
 use crate::{
-    Node, NodeIndex, NodePath, Split, TabDestination, TabIndex, TabInsert, TabPath, Translations,
-    Tree,
+    Node, NodeId, NodePath, Split, TabDestination, TabIndex, TabInsert, TabPath, Translations, Tree,
 };
 
 /// The heart of `egui_dock`.
@@ -257,9 +256,7 @@ impl<Tab> DockState<Tab> {
             .ok_or(Error::InvalidSurface)?
             .node_tree()
             .ok_or(Error::EmptySurface)?
-            .nodes
-            .get(path.node.0)
-            .ok_or(Error::InvalidNode)
+            .node(path.node)
     }
 
     /// Mutably borrows a node at the given `path`.
@@ -271,9 +268,7 @@ impl<Tab> DockState<Tab> {
             .ok_or(Error::InvalidSurface)?
             .node_tree_mut()
             .ok_or(Error::EmptySurface)?
-            .nodes
-            .get_mut(path.node.0)
-            .ok_or(Error::InvalidNode)
+            .node_mut(path.node)
     }
 
     /// Immutably borrows a leaf node at the given `path`.
@@ -421,7 +416,7 @@ impl<Tab> DockState<Tab> {
         split: Split,
         fraction: f32,
         new: Node<Tab>,
-    ) -> [NodeIndex; 2] {
+    ) -> [NodeId; 2] {
         let index = self[parent_path.surface].split(parent_path.node, split, fraction, new);
         self.focused_surface = Some(parent_path.surface);
         index
@@ -714,7 +709,7 @@ impl<Tab> DockState<Tab> {
     ///
     /// Returns the full path to that tab if it was found.
     ///
-    /// The returned [`NodeIndex`] will always point to a [`Node::Leaf`].
+    /// The returned [`NodeId`] will always name a [`Node::Leaf`].
     ///
     /// In case there are several hits, only the first is returned.
     pub fn find_tab_from(&self, predicate: impl Fn(&Tab) -> bool) -> Option<TabPath> {
@@ -738,7 +733,7 @@ where
     ///
     /// Returns in which node and where in that node the tab is.
     ///
-    /// The returned [`NodeIndex`] will always point to a [`Node::Leaf`].
+    /// The returned [`NodeId`] will always name a [`Node::Leaf`].
     ///
     /// In case there are several hits, only the first is returned.
     ///
@@ -751,10 +746,10 @@ where
     ///
     /// Returns which node and where in that node the tab is.
     ///
-    /// The returned [`NodeIndex`] will always point to a [`Node::Leaf`].
+    /// The returned [`NodeId`] will always name a [`Node::Leaf`].
     ///
     /// In case there are several hits, only the first is returned.
-    pub fn find_main_surface_tab(&self, needle_tab: &Tab) -> Option<(NodeIndex, TabIndex)> {
+    pub fn find_main_surface_tab(&self, needle_tab: &Tab) -> Option<(NodeId, TabIndex)> {
         self[SurfaceIndex::main()].find_tab(needle_tab)
     }
 }

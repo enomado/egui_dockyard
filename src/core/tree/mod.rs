@@ -2,11 +2,18 @@
 //!
 //! # Implementation details
 //!
-//! The binary tree is stored in a [`Vec`] indexed by [`NodeIndex`].
-//! The root is always at index *0*.
-//! For a given node *n*:
-//!  - left child of *n* will be at index *n * 2 + 1*.
-//!  - right child of *n* will be at index *n * 2 + 2*.
+//! Nodes live in a generational arena ([`arena`]) and are addressed by [`NodeId`]. The
+//! shape is carried by explicit links: every node knows its parent, every split knows its
+//! two children. Nothing is addressed by position, so a structural edit renames nothing
+//! and an id taken before the edit still names the same node afterwards.
+//!
+//! The previous representation was an implicit binary heap in a `Vec` (children of *n* at
+//! *2n + 1* and *2n + 2*, holes filled with `Node::Empty`). It made every address
+//! positional — which is the shared root of the `move_tab` out-of-bounds fix, the
+//! `prev_active` fix, and of layouts that stored hundreds of empty slots.
+
+/// Generational slot storage for nodes.
+mod arena;
 
 /// Iterates over all tabs in a [`Tree`].
 pub mod tab_iter;
@@ -17,30 +24,35 @@ pub mod tab_index;
 /// Represents an abstract node of a [`Tree`].
 pub mod node;
 
-/// Wrapper around indices to the collection of nodes inside a [`Tree`].
-pub mod node_index;
+/// Stable identity of a node inside a [`Tree`].
+pub mod node_id;
+
+/// Reading and writing the persisted shape of a [`Tree`].
+#[cfg(feature = "serde")]
+pub mod persist;
 
 /// Read-only structural oracle: are a tree's invariants intact?
 pub mod validate;
 
 use std::{
     cmp::max,
-    collections::HashSet,
+    collections::VecDeque,
     fmt,
     ops::{Index, IndexMut},
-    slice::{Iter, IterMut},
 };
 
 pub use node::LeafNode;
 pub use node::Node;
 pub use node::SplitNode;
-pub use node_index::{NodeIndex, NodePath};
+pub use node::TabId;
+pub use node_id::{NodeId, NodePath, Side};
 pub use tab_index::{TabIndex, TabPath};
 pub use tab_iter::TabIter;
 pub use validate::{SurfaceViolation, TreeViolation};
 
 use crate::core::geom::Rect;
 use crate::{Error, Result, SurfaceIndex};
+use arena::{Arena, NodeEntry};
 
 // ----------------------------------------------------------------------------
 
@@ -111,28 +123,19 @@ impl TabDestination {
 
 /// Binary tree representing the relationships between [`Node`]s.
 ///
-/// # Implementation details
-///
-/// The binary tree is stored in a [`Vec`] indexed by [`NodeIndex`].
-/// The root is always at index *0*.
-/// For a given node *n*:
-///  - left child of *n* will be at index *n * 2 + 1*.
-///  - right child of *n* will be at index *n * 2 + 2*.
-///
-/// For "Horizontal" nodes:
-///  - left child contains Left node.
-///  - right child contains Right node.
-///
-/// For "Vertical" nodes:
-///  - left child contains Top node.
-///  - right child contains Bottom node.
+/// Nodes are addressed by [`NodeId`], which is stable across every structural operation.
+/// For "Horizontal" nodes the first child is the left one and the second the right one;
+/// for "Vertical" nodes the first is the top one and the second the bottom one.
 #[derive(Clone)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct Tree<Tab> {
-    // Binary tree vector
-    pub(super) nodes: Vec<Node<Tab>>,
-    focused_node: Option<NodeIndex>,
-    // Whether all subnodes of the tree is collapsed
+    nodes: Arena<Tab>,
+
+    /// The node everything hangs off, or `None` for an empty tree.
+    root: Option<NodeId>,
+
+    focused_node: Option<NodeId>,
+
+    /// Whether all subnodes of the tree are collapsed.
     collapsed: bool,
     collapsed_leaf_count: i32,
 }
@@ -146,7 +149,8 @@ impl<Tab> fmt::Debug for Tree<Tab> {
 impl<Tab> Default for Tree<Tab> {
     fn default() -> Self {
         Self {
-            nodes: Vec::new(),
+            nodes: Arena::default(),
+            root: None,
             focused_node: None,
             collapsed: false,
             collapsed_leaf_count: 0,
@@ -154,86 +158,161 @@ impl<Tab> Default for Tree<Tab> {
     }
 }
 
-impl<Tab> Index<NodeIndex> for Tree<Tab> {
+impl<Tab> Index<NodeId> for Tree<Tab> {
     type Output = Node<Tab>;
 
-    #[inline(always)]
-    fn index(&self, index: NodeIndex) -> &Self::Output {
-        &self.nodes[index.0]
+    #[inline]
+    #[track_caller]
+    fn index(&self, id: NodeId) -> &Self::Output {
+        &self
+            .nodes
+            .get(id)
+            .unwrap_or_else(|| panic!("no node {id} in this tree"))
+            .node
     }
 }
 
-impl<Tab> IndexMut<NodeIndex> for Tree<Tab> {
-    #[inline(always)]
-    fn index_mut(&mut self, index: NodeIndex) -> &mut Self::Output {
-        &mut self.nodes[index.0]
+impl<Tab> IndexMut<NodeId> for Tree<Tab> {
+    #[inline]
+    #[track_caller]
+    fn index_mut(&mut self, id: NodeId) -> &mut Self::Output {
+        &mut self
+            .nodes
+            .get_mut(id)
+            .unwrap_or_else(|| panic!("no node {id} in this tree"))
+            .node
     }
 }
 
 impl<Tab> Tree<Tab> {
     /// Creates a new [`Tree`] with given `Vec` of `Tab`s in its root node.
-    #[inline(always)]
     pub fn new(tabs: Vec<Tab>) -> Self {
-        let root = Node::leaf_with(tabs);
-        Self {
-            nodes: vec![root],
-            focused_node: None,
-            collapsed: false,
-            collapsed_leaf_count: 0,
-        }
+        let mut tree = Self::default();
+        tree.root = Some(tree.nodes.insert(NodeEntry {
+            parent: None,
+            node: Node::leaf_with(tabs),
+        }));
+        tree
     }
 
-    /// Returns the active `Tab` inside the first leaf node, or `None` if no leaf exists
-    /// in the [`Tree`].
-    ///
-    /// Used to return the viewport rectangle alongside the tab; geometry now lives in
-    /// [`DockLayout`](crate::layout::DockLayout).
+    /// The root node of the tree, or `None` if the tree holds no nodes at all.
     #[inline]
-    pub fn find_active(&mut self) -> Option<&mut Tab> {
-        self.nodes.iter_mut().find_map(|node| match node {
-            Node::Leaf(leaf) => leaf.tabs.get_mut(leaf.active.0),
-            _ => None,
-        })
+    pub fn root(&self) -> Option<NodeId> {
+        self.root
     }
 
-    /// Returns the number of nodes in the [`Tree`].
+    /// Whether `id` still names a live node of this tree.
+    #[inline]
+    pub fn contains(&self, id: NodeId) -> bool {
+        self.nodes.contains(id)
+    }
+
+    /// The split `id` hangs off, or `None` if `id` is the root (or not in this tree).
+    #[inline]
+    pub fn parent(&self, id: NodeId) -> Option<NodeId> {
+        self.nodes.get(id).and_then(|entry| entry.parent)
+    }
+
+    /// The two children of `id`, or `None` if it is a leaf (or not in this tree).
+    #[inline]
+    pub fn children(&self, id: NodeId) -> Option<[NodeId; 2]> {
+        self.node(id).ok()?.get_split().map(SplitNode::children)
+    }
+
+    /// Immutably borrows the node `id` names.
+    pub fn node(&self, id: NodeId) -> Result<&Node<Tab>> {
+        self.nodes
+            .get(id)
+            .map(|entry| &entry.node)
+            .ok_or(Error::InvalidNode)
+    }
+
+    /// Mutably borrows the node `id` names.
+    pub fn node_mut(&mut self, id: NodeId) -> Result<&mut Node<Tab>> {
+        self.nodes
+            .get_mut(id)
+            .map(|entry| &mut entry.node)
+            .ok_or(Error::InvalidNode)
+    }
+
+    /// Immutably borrows a leaf node.
     ///
-    /// This includes [`Empty`](Node::Empty) nodes.
-    #[inline(always)]
+    /// Returns `Err` if the id is stale or the node is not a leaf.
+    pub fn leaf(&self, node: NodeId) -> Result<&LeafNode<Tab>> {
+        self.node(node)?.get_leaf().ok_or(Error::NonLeafNode)
+    }
+
+    /// Mutably borrows a leaf node.
+    ///
+    /// Returns `Err` if the id is stale or the node is not a leaf.
+    pub fn leaf_mut(&mut self, node: NodeId) -> Result<&mut LeafNode<Tab>> {
+        self.node_mut(node)?
+            .get_leaf_mut()
+            .ok_or(Error::NonLeafNode)
+    }
+
+    /// Returns the number of live nodes in the [`Tree`].
+    #[inline]
     pub fn len(&self) -> usize {
         self.nodes.len()
     }
 
-    /// Returns `true` if the number of nodes in the tree is 0, otherwise `false`.
-    #[inline(always)]
+    /// Returns `true` if the tree holds no nodes at all.
+    #[inline]
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
+        self.root.is_none()
     }
 
-    /// Returns an [`Iterator`] of the underlying collection of nodes.
+    /// Returns an [`Iterator`] of the nodes of this tree, in unspecified order.
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = &Node<Tab>> {
+        self.nodes.iter().map(|(_, entry)| &entry.node)
+    }
+
+    /// Returns a mutable [`Iterator`] of the nodes of this tree, in unspecified order.
+    #[inline]
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Node<Tab>> {
+        self.nodes.iter_mut().map(|(_, entry)| &mut entry.node)
+    }
+
+    /// Returns an [`Iterator`] of the nodes of this tree with their ids, in unspecified order.
+    #[inline]
+    pub fn iter_indexed(&self) -> impl Iterator<Item = (NodeId, &Node<Tab>)> {
+        self.nodes.iter().map(|(id, entry)| (id, &entry.node))
+    }
+
+    /// Returns a mutable [`Iterator`] of the nodes of this tree with their ids, in
+    /// unspecified order.
+    #[inline]
+    pub fn iter_mut_indexed(&mut self) -> impl Iterator<Item = (NodeId, &mut Node<Tab>)> {
+        self.nodes
+            .iter_mut()
+            .map(|(id, entry)| (id, &mut entry.node))
+    }
+
+    /// Every node of the tree, parents before their children.
     ///
-    /// This includes [`Empty`](Node::Empty) nodes.
-    #[inline(always)]
-    pub fn iter(&self) -> Iter<'_, Node<Tab>> {
-        self.nodes.iter()
-    }
-
-    /// Returns [`IterMut`] of the underlying collection of nodes.
+    /// The layout pass depends on that order: a node's rectangle is cut out of its
+    /// parent's, so the parent must have been laid out first. The old implicit heap got
+    /// this for free (a parent's index is always smaller); with an arena it has to be
+    /// stated, which is what this method is for.
     ///
-    /// This includes [`Empty`](Node::Empty) nodes.
-    #[inline(always)]
-    pub fn iter_mut(&mut self) -> IterMut<'_, Node<Tab>> {
-        self.nodes.iter_mut()
+    /// Returns an owned list on purpose: callers walk it while mutating the tree.
+    pub fn breadth_first(&self) -> Vec<NodeId> {
+        let mut order = Vec::with_capacity(self.len());
+        let mut queue = VecDeque::new();
+        queue.extend(self.root);
+        while let Some(id) = queue.pop_front() {
+            order.push(id);
+            if let Some(children) = self.children(id) {
+                queue.extend(children);
+            }
+        }
+        order
     }
 
-    /// Returns an [`Iterator`] of [`NodeIndex`] ordered in a breadth first manner.
-    #[inline(always)]
-    pub(crate) fn breadth_first_index_iter(&self) -> impl Iterator<Item = NodeIndex> + use<Tab> {
-        (0..self.nodes.len()).map(NodeIndex)
-    }
-
-    /// Returns an iterator over all tabs in arbitrary order.
-    #[inline(always)]
+    /// Returns an iterator over all tabs in the tree.
+    #[inline]
     pub fn tabs(&self) -> TabIter<'_, Tab> {
         TabIter::new(self)
     }
@@ -243,11 +322,12 @@ impl<Tab> Tree<Tab> {
     /// # Examples
     ///
     /// ```rust
-    /// # use egui_dock::{DockState, NodeIndex, TabIndex};
+    /// # use egui_dock::{DockState, Split};
     /// let mut dock_state = DockState::new(vec!["node 1", "node 2", "node 3"]);
     /// assert_eq!(dock_state.main_surface().num_tabs(), 3);
     ///
-    /// let [a, b] = dock_state.main_surface_mut().split_left(NodeIndex::root(), 0.5, vec!["tab 4", "tab 5"]);
+    /// let root = dock_state.main_surface().root().unwrap();
+    /// let [a, _b] = dock_state.main_surface_mut().split_left(root, 0.5, vec!["tab 4", "tab 5"]);
     /// assert_eq!(dock_state.main_surface().num_tabs(), 5);
     ///
     /// dock_state.main_surface_mut().remove_leaf(a);
@@ -255,16 +335,10 @@ impl<Tab> Tree<Tab> {
     /// ```
     #[inline]
     pub fn num_tabs(&self) -> usize {
-        let mut count = 0;
-        for node in self.nodes.iter() {
-            if let Node::Leaf(leaf) = node {
-                count += leaf.tabs.len();
-            }
-        }
-        count
+        self.iter().map(Node::tabs_count).sum()
     }
 
-    /// Acquire a immutable borrow to the [`Node`] at the root of the tree.
+    /// Acquire an immutable borrow to the [`Node`] at the root of the tree.
     /// Returns [`None`] if the tree is empty.
     ///
     /// # Examples
@@ -274,10 +348,10 @@ impl<Tab> Tree<Tab> {
     /// let mut dock_state = DockState::new(vec!["single tab"]);
     /// let root_node = dock_state.main_surface().root_node().unwrap();
     ///
-    /// assert_eq!(root_node.tabs(), Some(["single tab"].as_slice()));
+    /// assert_eq!(root_node.iter_tabs().collect::<Vec<_>>(), vec![&"single tab"]);
     /// ```
     pub fn root_node(&self) -> Option<&Node<Tab>> {
-        self.nodes.first()
+        self.root.map(|root| &self[root])
     }
 
     /// Acquire a mutable borrow to the [`Node`] at the root of the tree.
@@ -286,17 +360,56 @@ impl<Tab> Tree<Tab> {
     /// # Examples
     ///
     /// ```rust
-    /// # use egui_dock::{DockState, LeafNode};
+    /// # use egui_dock::DockState;
     /// let mut dock_state = DockState::new(vec!["single tab"]);
     /// let root_node = dock_state.main_surface_mut().root_node_mut().unwrap();
-    /// let root_as_leaf = root_node.get_leaf_mut().unwrap();
-    /// root_as_leaf.tabs.push("partner tab");
+    /// root_node.append_tab("partner tab");
     ///
-    /// assert_eq!(root_node.tabs(), Some(["single tab", "partner tab"].as_slice()));
+    /// assert_eq!(root_node.tabs_count(), 2);
     /// ```
     pub fn root_node_mut(&mut self) -> Option<&mut Node<Tab>> {
-        self.nodes.first_mut()
+        let root = self.root?;
+        Some(&mut self[root])
     }
+
+    /// Returns the active `Tab` inside the first leaf node, or `None` if no leaf exists
+    /// in the [`Tree`].
+    ///
+    /// Geometry is not returned alongside: it lives in
+    /// [`DockLayout`](crate::layout::DockLayout).
+    #[inline]
+    pub fn find_active(&mut self) -> Option<&mut Tab> {
+        let first_leaf = self
+            .breadth_first()
+            .into_iter()
+            .find(|id| self[*id].is_leaf())?;
+        self.leaf_mut(first_leaf).unwrap().active_focused()
+    }
+
+    /// Returns the active `Tab` inside the focused leaf node or [`None`] if it does not exist.
+    #[inline]
+    pub fn find_active_focused(&mut self) -> Option<&mut Tab> {
+        let focused = self.focused_node?;
+        self.leaf_mut(focused).ok()?.active_focused()
+    }
+
+    /// Gets the id of the currently focused leaf node; returns [`None`] when no leaf is focused.
+    #[inline]
+    pub fn focused_leaf(&self) -> Option<NodeId> {
+        self.focused_node
+    }
+
+    /// Sets the currently focused leaf to `node` if it names a leaf.
+    ///
+    /// Never panics: a stale id or a split simply removes focus from all nodes.
+    #[inline]
+    pub fn set_focused_node(&mut self, node: NodeId) {
+        self.focused_node = self.leaf(node).is_ok().then_some(node);
+    }
+
+    // ------------------------------------------------------------------------
+    // Structural operations
+    // ------------------------------------------------------------------------
 
     /// Creates two new nodes by splitting a given `parent` node and assigns them as its children. The first (old) node
     /// inherits content of the `parent` from before the split, and the second (new) gets the `tabs`.
@@ -306,7 +419,8 @@ impl<Tab> Tree<Tab> {
     ///
     /// The new node is placed relatively to the old node, in the direction specified by `split`.
     ///
-    /// Returns the indices of the old node and the new node.
+    /// Returns the ids of the old node and the new node. Note that the old node *keeps its
+    /// id*: what changes is where it hangs, not who it is.
     ///
     /// # Panics
     ///
@@ -315,427 +429,225 @@ impl<Tab> Tree<Tab> {
     /// # Example
     ///
     /// ```rust
-    /// # use egui_dock::{DockState, SurfaceIndex, NodeIndex, Split};
+    /// # use egui_dock::{DockState, SurfaceIndex, Split};
     /// let mut dock_state = DockState::new(vec!["tab 1", "tab 2"]);
     ///
     /// // At this point, the main surface only contains the leaf with tab 1 and 2.
     /// assert!(dock_state.main_surface().root_node().unwrap().is_leaf());
     ///
+    /// let root = dock_state.main_surface().root().unwrap();
     /// // Split the node, giving 50% of the space to the new nodes and 50% to the old ones.
     /// let [old, new] = dock_state.main_surface_mut()
-    ///     .split_tabs(NodeIndex::root(), Split::Below, 0.5, vec!["tab 3"]);
+    ///     .split_tabs(root, Split::Below, 0.5, vec!["tab 3"]);
     ///
     /// assert!(dock_state.main_surface().root_node().unwrap().is_parent());
-    /// assert!(dock_state[SurfaceIndex::main()][old].is_leaf());
-    /// assert!(dock_state[SurfaceIndex::main()][new].is_leaf());
+    /// assert!(dock_state.main_surface()[old].is_leaf());
+    /// assert!(dock_state.main_surface()[new].is_leaf());
+    /// assert_eq!(old, root, "splitting a node does not rename it");
     /// ```
     #[inline(always)]
     pub fn split_tabs(
         &mut self,
-        parent: NodeIndex,
+        parent: NodeId,
         split: Split,
         fraction: f32,
         tabs: Vec<Tab>,
-    ) -> [NodeIndex; 2] {
+    ) -> [NodeId; 2] {
         self.split(parent, split, fraction, Node::leaf_with(tabs))
     }
 
-    /// Creates two new nodes by splitting a given `parent` node and assigns them as its children. The first (old) node
-    /// inherits content of the `parent` from before the split, and the second (new) gets the `tabs`.
+    /// Splits `parent`, placing the new node *above* the old one.
     ///
-    /// This is a shorthand for using `split_tabs` with [`Split::Above`].
-    ///
-    /// `fraction` (in range 0..=1) specifies how much of the `parent` node's area the old node will attempt to occupy
-    /// after the split.
-    ///
-    /// The new node is placed *above* the old node.
-    ///
-    /// Returns the indices of the old node and the new node.
-    ///
-    /// # Panics
-    ///
-    /// If `fraction` isn't in range 0..=1.
+    /// Shorthand for [`split_tabs`](Self::split_tabs) with [`Split::Above`].
     #[inline(always)]
-    pub fn split_above(
-        &mut self,
-        parent: NodeIndex,
-        fraction: f32,
-        tabs: Vec<Tab>,
-    ) -> [NodeIndex; 2] {
+    pub fn split_above(&mut self, parent: NodeId, fraction: f32, tabs: Vec<Tab>) -> [NodeId; 2] {
         self.split(parent, Split::Above, fraction, Node::leaf_with(tabs))
     }
 
-    /// Creates two new nodes by splitting a given `parent` node and assigns them as its children. The first (old) node
-    /// inherits content of the `parent` from before the split, and the second (new) gets the `tabs`.
+    /// Splits `parent`, placing the new node *below* the old one.
     ///
-    /// This is a shorthand for using `split_tabs` with [`Split::Below`].
-    ///
-    /// `fraction` (in range 0..=1) specifies how much of the `parent` node's area the old node will attempt to occupy
-    /// after the split.
-    ///
-    /// The new node is placed *below* the old node.
-    ///
-    /// Returns the indices of the old node and the new node.
-    ///
-    /// # Panics
-    ///
-    /// If `fraction` isn't in range 0..=1.
+    /// Shorthand for [`split_tabs`](Self::split_tabs) with [`Split::Below`].
     #[inline(always)]
-    pub fn split_below(
-        &mut self,
-        parent: NodeIndex,
-        fraction: f32,
-        tabs: Vec<Tab>,
-    ) -> [NodeIndex; 2] {
+    pub fn split_below(&mut self, parent: NodeId, fraction: f32, tabs: Vec<Tab>) -> [NodeId; 2] {
         self.split(parent, Split::Below, fraction, Node::leaf_with(tabs))
     }
 
-    /// Creates two new nodes by splitting a given `parent` node and assigns them as its children. The first (old) node
-    /// inherits content of the `parent` from before the split, and the second (new) gets the `tabs`.
+    /// Splits `parent`, placing the new node to the *left* of the old one.
     ///
-    /// This is a shorthand for using `split_tabs` with [`Split::Left`].
-    ///
-    /// `fraction` (in range 0..=1) specifies how much of the `parent` node's area the old node will attempt to occupy
-    /// after the split.
-    ///
-    /// The new node is placed to the *left* of the old node.
-    ///
-    /// Returns the indices of the old node and the new node.
-    ///
-    /// # Panics
-    ///
-    /// If `fraction` isn't in range 0..=1.
+    /// Shorthand for [`split_tabs`](Self::split_tabs) with [`Split::Left`].
     #[inline(always)]
-    pub fn split_left(
-        &mut self,
-        parent: NodeIndex,
-        fraction: f32,
-        tabs: Vec<Tab>,
-    ) -> [NodeIndex; 2] {
+    pub fn split_left(&mut self, parent: NodeId, fraction: f32, tabs: Vec<Tab>) -> [NodeId; 2] {
         self.split(parent, Split::Left, fraction, Node::leaf_with(tabs))
     }
 
-    /// Creates two new nodes by splitting a given `parent` node and assigns them as its children. The first (old) node
-    /// inherits content of the `parent` from before the split, and the second (new) gets the `tabs`.
+    /// Splits `parent`, placing the new node to the *right* of the old one.
     ///
-    /// This is a shorthand for using `split_tabs` with [`Split::Right`].
-    ///
-    /// `fraction` (in range 0..=1) specifies how much of the `parent` node's area the old node will attempt to occupy
-    /// after the split.
-    ///
-    /// The new node is placed to the *right* of the old node.
-    ///
-    /// Returns the indices of the old node and the new node.
-    ///
-    /// # Panics
-    ///
-    /// If `fraction` isn't in range 0..=1.
+    /// Shorthand for [`split_tabs`](Self::split_tabs) with [`Split::Right`].
     #[inline(always)]
-    pub fn split_right(
-        &mut self,
-        parent: NodeIndex,
-        fraction: f32,
-        tabs: Vec<Tab>,
-    ) -> [NodeIndex; 2] {
+    pub fn split_right(&mut self, parent: NodeId, fraction: f32, tabs: Vec<Tab>) -> [NodeId; 2] {
         self.split(parent, Split::Right, fraction, Node::leaf_with(tabs))
     }
 
-    /// Creates two new nodes by splitting a given `parent` node and assigns them as its children. The first (old) node
-    /// inherits content of the `parent` from before the split, and the second (new) uses `new`.
+    /// Splits the node `target` names, putting `new` next to it in the direction given by
+    /// `split`, and returns `[target, new_id]`.
     ///
-    /// `fraction` (in range 0..=1) specifies how much of the `parent` node's area the old node will attempt to occupy
-    /// after the split.
-    ///
-    /// The new node is placed relatively to the old node, in the direction specified by `split`.
-    ///
-    /// Returns the indices of the old node and the new node.
+    /// A fresh split node is allocated to hold the two of them; `target` keeps its id and
+    /// its content, and simply gains a parent.
     ///
     /// # Panics
     ///
-    /// If `fraction` isn't in range 0..=1.
-    ///
-    /// If `new` is an [`Empty`](Node::Empty), [`Horizontal`](Node::Horizontal) or [`Vertical`](Node::Vertical) node.
-    ///
-    /// If `new` is a [`Leaf`](Node::Leaf) node without any tabs.
-    ///
-    /// If `parent` points to an [`Empty`](Node::Empty) node.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// # use egui_dock::{DockState, SurfaceIndex, NodeIndex, Split, Node};
-    /// let mut dock_state = DockState::new(vec!["tab 1", "tab 2"]);
-    ///
-    /// // At this point, the main surface only contains the leaf with tab 1 and 2.
-    /// assert!(dock_state.main_surface().root_node().unwrap().is_leaf());
-    ///
-    /// // Splits the node, giving 50% of the space to the new nodes and 50% to the old ones.
-    /// let [old, new] = dock_state.main_surface_mut()
-    ///     .split(NodeIndex::root(), Split::Below, 0.5, Node::leaf_with(vec!["tab 3"]));
-    ///
-    /// assert!(dock_state.main_surface().root_node().unwrap().is_parent());
-    /// assert!(dock_state[SurfaceIndex::main()][old].is_leaf());
-    /// assert!(dock_state[SurfaceIndex::main()][new].is_leaf());
-    /// ```
+    /// If `fraction` isn't in range 0..=1, if `new` is not a leaf with at least one tab,
+    /// or if `target` is not a node of this tree.
     pub fn split(
         &mut self,
-        parent: NodeIndex,
+        target: NodeId,
         split: Split,
         fraction: f32,
         new: Node<Tab>,
-    ) -> [NodeIndex; 2] {
-        let old = self[parent].split(split, fraction);
-        assert!(old.is_leaf() || old.is_parent());
-        assert_ne!(new.tabs_count(), 0);
-        // Resize vector to fit the new size of the binary tree.
-        {
-            let index = self.nodes.iter().rposition(|n| !n.is_empty()).unwrap_or(0);
-            let level = NodeIndex(index).level();
-            self.nodes
-                .resize_with((1 << (level + 1)) - 1, || Node::Empty);
-        }
+    ) -> [NodeId; 2] {
+        assert!((0.0..=1.0).contains(&fraction));
+        assert_ne!(new.tabs_count(), 0, "splitting in an empty leaf");
+        assert!(self.contains(target), "no node {target} in this tree");
 
-        let index = match split {
-            Split::Left | Split::Above => [parent.right(), parent.left()],
-            Split::Right | Split::Below => [parent.left(), parent.right()],
+        let grandparent = self.parent(target);
+        let side_of_target = grandparent.map(|split_id| {
+            self[split_id]
+                .get_split()
+                .expect("a parent is always a split")
+                .side_of(target)
+                .expect("a child is known to its parent")
+        });
+
+        let new_id = self.nodes.insert(NodeEntry {
+            parent: None,
+            node: new,
+        });
+
+        let children = match split {
+            // The new node takes the first slot, pushing the old one to the second.
+            Split::Left | Split::Above => [new_id, target],
+            Split::Right | Split::Below => [target, new_id],
         };
+        // The split inherits the collapsed state of what used to be there, exactly as the
+        // in-place `Node::split` did before; `node_update_collapsed` below then settles
+        // the counts for the whole chain of ancestors.
+        let inherited = SplitNode::new(
+            children,
+            fraction,
+            self[target].is_collapsed(),
+            self[target].collapsed_leaf_count(),
+        );
+        let split_node = match split {
+            Split::Left | Split::Right => Node::Horizontal(inherited),
+            Split::Above | Split::Below => Node::Vertical(inherited),
+        };
+        let split_id = self.nodes.insert(NodeEntry {
+            parent: grandparent,
+            node: split_node,
+        });
 
-        // If the node were splitting is a parent, all it's children need to be moved.
-        if old.is_parent() {
-            let levels_to_move = NodeIndex(self.nodes.len()).level() - index[0].level();
+        self.nodes.get_mut(target).unwrap().parent = Some(split_id);
+        self.nodes.get_mut(new_id).unwrap().parent = Some(split_id);
 
-            // Level 0 is ourself, which is done when we assign self[index[0]] = old, so start at 1.
-            for level in (1..levels_to_move).rev() {
-                // Old child indices for this level
-                let old_start = parent.children_at(level).start;
-                // New child indices for this level
-                let new_start = index[0].children_at(level).start;
-
-                // Children to be moved this level change
-                let len = 1 << level;
-
-                // Swap self[old_start..(old_start+len)] with self[new_start..(new_start+len)]
-                // (the new part will only contain empty entries).
-                let (old_range, new_range) = {
-                    let (first_part, second_part) = self.nodes.split_at_mut(new_start);
-                    // Cut to length.
-                    (
-                        &mut first_part[old_start..old_start + len],
-                        &mut second_part[..len],
-                    )
-                };
-                old_range.swap_with_slice(new_range);
-            }
+        match (grandparent, side_of_target) {
+            (Some(grandparent), Some(side)) => self[grandparent]
+                .get_split_mut()
+                .expect("a parent is always a split")
+                .set_child(side, split_id),
+            _ => self.root = Some(split_id),
         }
 
-        self[index[0]] = old;
-        self[index[1]] = new;
+        self.focused_node = Some(new_id);
+        self.node_update_collapsed(new_id);
 
-        self.focused_node = Some(index[1]);
-        self.node_update_collapsed(index[1]);
-
-        index
+        [target, new_id]
     }
 
-    /// Immutably borrows a leaf node at the given path.
+    /// Removes the given leaf from the [`Tree`].
     ///
-    /// Returns `Err` if the path is invalid or the node at the path is not a leaf.
-    pub fn leaf(&self, node: NodeIndex) -> Result<&LeafNode<Tab>> {
-        self.nodes
-            .get(node.0)
-            .ok_or(Error::InvalidNode)?
-            .get_leaf()
-            .ok_or(Error::NonLeafNode)
-    }
-
-    /// Mutably borrows a leaf node at the given index.
-    ///
-    /// Returns `Err` if the index is invalid or if the node is not a leaf.
-    pub fn leaf_mut(&mut self, node: NodeIndex) -> Result<&mut LeafNode<Tab>> {
-        self.nodes
-            .get_mut(node.0)
-            .ok_or(Error::InvalidNode)?
-            .get_leaf_mut()
-            .ok_or(Error::NonLeafNode)
-    }
-
-    fn first_leaf(&self, top: NodeIndex) -> Option<NodeIndex> {
-        let left = top.left();
-        let right = top.right();
-        match (self.nodes.get(left.0), self.nodes.get(right.0)) {
-            (Some(&Node::Leaf { .. }), _) => Some(left),
-            (_, Some(&Node::Leaf { .. })) => Some(right),
-
-            (
-                Some(Node::Horizontal { .. } | Node::Vertical { .. }),
-                Some(Node::Horizontal { .. } | Node::Vertical { .. }),
-            ) => self.first_leaf(left).or(self.first_leaf(right)),
-            (Some(Node::Horizontal { .. } | Node::Vertical { .. }), _) => self.first_leaf(left),
-            (_, Some(Node::Horizontal { .. } | Node::Vertical { .. })) => self.first_leaf(right),
-
-            (None, None)
-            | (Some(&Node::Empty), None)
-            | (None, Some(&Node::Empty))
-            | (Some(&Node::Empty), Some(&Node::Empty)) => None,
-        }
-    }
-
-    /// Returns the active `Tab` inside the focused leaf node or [`None`] if it does not exist.
-    ///
-    /// Used to return the viewport rectangle alongside the tab; geometry now lives in
-    /// [`DockLayout`](crate::layout::DockLayout).
-    #[inline]
-    pub fn find_active_focused(&mut self) -> Option<&mut Tab> {
-        match self.focused_node.and_then(|idx| self.nodes.get_mut(idx.0)) {
-            Some(Node::Leaf(leaf)) => leaf.active_focused(),
-            _ => None,
-        }
-    }
-
-    /// Gets the node index of currently focused leaf node; returns [`None`] when no leaf is focused.
-    #[inline]
-    pub fn focused_leaf(&self) -> Option<NodeIndex> {
-        self.focused_node
-    }
-
-    /// Sets the currently focused leaf to `node_index` if the node at `node_index` is a leaf.
-    ///
-    /// This method will not never panic and instead removes focus from all nodes when given an invalid index.
-    #[inline]
-    pub fn set_focused_node(&mut self, node_index: NodeIndex) {
-        self.focused_node = self
-            .nodes
-            .get(node_index.0)
-            .filter(|node| node.is_leaf())
-            .map(|_| node_index);
-    }
-
-    /// Removes the given node from the [`Tree`].
+    /// Its sibling takes the place of their common parent, keeping its own id and its
+    /// whole subtree. Removing the root leaf empties the tree.
     ///
     /// # Panics
     ///
-    /// - If the tree is empty.
-    /// - If the node at index `node` is not a [`Leaf`](Node::Leaf).
-    pub fn remove_leaf(&mut self, node: NodeIndex) {
-        assert!(!self.is_empty());
-        assert!(self[node].is_leaf());
+    /// If `node` is not a live leaf of this tree.
+    pub fn remove_leaf(&mut self, node: NodeId) {
+        assert!(
+            self.node(node).is_ok_and(Node::is_leaf),
+            "remove_leaf on {node}, which is not a live leaf"
+        );
 
-        let Some(parent) = node.parent() else {
-            // Removing the root leaf empties the tree. Focus must go with it: every other exit
-            // from this function repairs `focused_node`, and leaving it dangling here means
-            // `focused_leaf()` keeps returning an index into a `Vec` that no longer has any
-            // elements — indexing the tree with it panics.
-            self.focused_node = None;
+        let Some(parent) = self.parent(node) else {
+            // Removing the root leaf empties the tree; focus must go with it.
             self.nodes.clear();
+            self.root = None;
+            self.focused_node = None;
             return;
         };
 
-        if Some(node) == self.focused_node {
-            self.focused_node = None;
-            let mut node = node;
-            while let Some(parent) = node.parent() {
-                let next = if node.is_left() {
-                    parent.right()
-                } else {
-                    parent.left()
-                };
-                if self.nodes.get(next.0).is_some_and(|node| node.is_leaf()) {
-                    self.focused_node = Some(next);
-                    break;
-                }
-                if let Some(node) = self.first_leaf(next) {
-                    self.focused_node = Some(node);
-                    break;
-                }
-                node = parent;
-            }
+        let [left, right] = self.children(parent).expect("a parent is always a split");
+        let sibling = if left == node { right } else { left };
+        let grandparent = self.parent(parent);
+        let side_of_parent = grandparent.map(|split_id| {
+            self[split_id]
+                .get_split()
+                .expect("a parent is always a split")
+                .side_of(parent)
+                .expect("a child is known to its parent")
+        });
+
+        // Promote the sibling into the parent's place.
+        self.nodes.get_mut(sibling).unwrap().parent = grandparent;
+        match (grandparent, side_of_parent) {
+            (Some(grandparent), Some(side)) => self[grandparent]
+                .get_split_mut()
+                .expect("a parent is always a split")
+                .set_child(side, sibling),
+            _ => self.root = Some(sibling),
         }
 
-        self[parent] = Node::Empty;
-        self[node] = Node::Empty;
+        self.nodes.remove(node);
+        self.nodes.remove(parent);
 
-        let mut level = 0;
-
-        if node.is_left() {
-            'left_end: loop {
-                let dst = parent.children_at(level);
-                let src = parent.children_right(level + 1);
-                for (dst, src) in dst.zip(src) {
-                    if src >= self.nodes.len() {
-                        break 'left_end;
-                    }
-                    if Some(NodeIndex(src)) == self.focused_node {
-                        self.focused_node = Some(NodeIndex(dst));
-                    }
-                    self.nodes[dst] = std::mem::replace(&mut self.nodes[src], Node::Empty);
-                }
-                level += 1;
-            }
-        } else {
-            'right_end: loop {
-                let dst = parent.children_at(level);
-                let src = parent.children_left(level + 1);
-                for (dst, src) in dst.zip(src) {
-                    if src >= self.nodes.len() {
-                        break 'right_end;
-                    }
-                    if Some(NodeIndex(src)) == self.focused_node {
-                        self.focused_node = Some(NodeIndex(dst));
-                    }
-                    self.nodes[dst] = std::mem::replace(&mut self.nodes[src], Node::Empty);
-                }
-                level += 1;
-            }
-        }
-        // Ensure that there are no trailing `Node::Empty` items
-        while let Some(last_index) = self.nodes.len().checked_sub(1).map(NodeIndex) {
-            if self[last_index].is_empty()
-                && last_index.parent().is_some_and(|pi| !self[pi].is_parent())
-            {
-                self.nodes.pop();
-            } else {
-                break;
-            }
+        if self.focused_node == Some(node) {
+            // Focus moves to the nearest surviving leaf, which is the closest one inside
+            // the promoted sibling. Nothing else can have moved, so this is the whole
+            // repair — the heap version had to re-point focus at every level it shifted.
+            self.focused_node = self.first_leaf(sibling);
         }
     }
 
-    /// Pushes a tab to the first `Leaf` it finds or create a new leaf if an `Empty` node is encountered.
+    /// The first leaf inside the subtree rooted at `top` (including `top` itself).
+    fn first_leaf(&self, top: NodeId) -> Option<NodeId> {
+        let mut queue = VecDeque::from([top]);
+        while let Some(id) = queue.pop_front() {
+            match self.children(id) {
+                None => return Some(id),
+                Some(children) => queue.extend(children),
+            }
+        }
+        None
+    }
+
+    /// Pushes a tab to the first `Leaf` it finds, or creates a root leaf if the tree is empty.
     pub fn push_to_first_leaf(&mut self, tab: Tab) {
-        for (index, node) in &mut self.nodes.iter_mut().enumerate() {
-            match node {
-                Node::Leaf(leaf) => {
-                    // Go through `append_tab` rather than inlining the push:
-                    // it is the one place that keeps `prev_active` in sync with
-                    // the auto-focus this method performs.
-                    leaf.append_tab(tab);
-                    self.focused_node = Some(NodeIndex(index));
-                    return;
-                }
-                Node::Empty => {
-                    *node = Node::leaf(tab);
-                    self.focused_node = Some(NodeIndex(index));
-                    return;
-                }
-                _ => {}
+        match self.root.and_then(|root| self.first_leaf(root)) {
+            Some(leaf) => {
+                // Go through `append_tab` rather than inlining the push: it is the one
+                // place that keeps the focus history in sync with the auto-focus this
+                // method performs.
+                self.leaf_mut(leaf).unwrap().append_tab(tab);
+                self.focused_node = Some(leaf);
+            }
+            None => {
+                let root = self.nodes.insert(NodeEntry {
+                    parent: None,
+                    node: Node::leaf(tab),
+                });
+                self.root = Some(root);
+                self.focused_node = Some(root);
             }
         }
-        assert!(self.nodes.is_empty());
-        self.nodes.push(Node::leaf_with(vec![tab]));
-        self.focused_node = Some(NodeIndex(0));
-    }
-
-    /// Sets which is the active tab within a specific node.
-    ///
-    /// # Errors
-    /// If the node is invalid, not a leaf or if the tab index is out of bounds.
-    #[inline]
-    pub fn set_active_tab(
-        &mut self,
-        node_index: impl Into<NodeIndex>,
-        tab_index: impl Into<TabIndex>,
-    ) -> Result {
-        self.leaf_mut(node_index.into())?
-            .set_active_tab(tab_index.into())
     }
 
     /// Pushes `tab` to the currently focused leaf.
@@ -745,83 +657,120 @@ impl<Tab> Tree<Tab> {
     /// If no leaf is available then a new leaf will be created.
     pub fn push_to_focused_leaf(&mut self, tab: Tab) {
         match self.focused_node {
-            Some(node) => {
-                if self.nodes.is_empty() {
-                    self.nodes.push(Node::leaf(tab));
-                    self.focused_node = Some(NodeIndex::root());
-                } else {
-                    match &mut self[node] {
-                        Node::Empty => {
-                            self[node] = Node::leaf(tab);
-                            self.focused_node = Some(node);
-                        }
-                        Node::Leaf(leaf) => {
-                            leaf.append_tab(tab);
-                            self.focused_node = Some(node);
-                        }
-                        _ => {
-                            self.push_to_first_leaf(tab);
-                        }
-                    }
-                }
+            Some(node) if self.leaf(node).is_ok() => {
+                self.leaf_mut(node).unwrap().append_tab(tab);
             }
-            None => {
-                if self.nodes.is_empty() {
-                    self.nodes.push(Node::leaf(tab));
-                    self.focused_node = Some(NodeIndex::root());
-                } else {
-                    self.push_to_first_leaf(tab);
-                }
-            }
+            _ => self.push_to_first_leaf(tab),
         }
     }
 
-    /// Removes the tab at the given ([`NodeIndex`], [`TabIndex`]) pair.
+    /// Sets which is the active tab within a specific node.
+    ///
+    /// # Errors
+    /// If the node is stale, not a leaf, or if the tab index is out of bounds.
+    #[inline]
+    pub fn set_active_tab(&mut self, node: NodeId, tab_index: impl Into<TabIndex>) -> Result {
+        self.leaf_mut(node)?.set_active_tab(tab_index.into())
+    }
+
+    /// Removes the tab at the given ([`NodeId`], [`TabIndex`]) pair.
     ///
     /// If the node is emptied after the tab is removed, the node will also be removed.
     ///
     /// Returns the removed tab if it exists, or `None` otherwise.
-    pub fn remove_tab(&mut self, (node_index, tab_index): (NodeIndex, TabIndex)) -> Option<Tab> {
-        let node = &mut self[node_index];
-        let tab = node.remove_tab(tab_index);
-        if node.tabs_count() == 0 {
-            self.remove_leaf(node_index);
+    pub fn remove_tab(&mut self, (node, tab_index): (NodeId, TabIndex)) -> Option<Tab> {
+        let leaf = self.leaf_mut(node).ok()?;
+        let tab = leaf.remove_tab(tab_index);
+        if leaf.is_empty() {
+            self.remove_leaf(node);
         }
         tab
     }
 
+    // ------------------------------------------------------------------------
+    // Bulk edits
+    // ------------------------------------------------------------------------
+
     /// Returns a new [`Tree`] while mapping and filtering the tab type.
-    /// Any remaining empty [`Node`]s are removed.
+    ///
+    /// Leaves that lose all their tabs disappear, and a split left with one child is
+    /// replaced by that child.
     pub fn filter_map_tabs<F, NewTab>(&self, mut function: F) -> Tree<NewTab>
     where
         F: FnMut(&Tab) -> Option<NewTab>,
     {
-        let Tree {
-            focused_node,
-            nodes,
-            collapsed,
-            collapsed_leaf_count,
-        } = self;
-        let mut emptied_nodes = HashSet::default();
-        let nodes = nodes
-            .iter()
-            .enumerate()
-            .map(|(index, node)| {
-                let filtered_node = node.filter_map_tabs(&mut function);
-                if filtered_node.is_empty() && !node.is_empty() {
-                    emptied_nodes.insert(NodeIndex(index));
-                }
-                filtered_node
-            })
-            .collect();
         let mut new_tree = Tree {
-            nodes,
-            focused_node: *focused_node,
-            collapsed: *collapsed,
-            collapsed_leaf_count: *collapsed_leaf_count,
+            nodes: Arena::default(),
+            root: None,
+            focused_node: None,
+            collapsed: self.collapsed,
+            collapsed_leaf_count: self.collapsed_leaf_count,
         };
-        new_tree.balance(emptied_nodes);
+        new_tree.root = self.root.and_then(|root| {
+            let mut focus = None;
+            let copied = self.copy_filtered(root, &mut new_tree, &mut function, &mut focus);
+            new_tree.focused_node = focus;
+            copied
+        });
         new_tree
+    }
+
+    /// Copies the subtree at `id` into `target`, dropping tabs the `function` rejects.
+    ///
+    /// Returns the id the subtree got in `target`, or `None` if nothing of it survived.
+    /// `focus` collects where the focused node of `self` ended up.
+    fn copy_filtered<F, NewTab>(
+        &self,
+        id: NodeId,
+        target: &mut Tree<NewTab>,
+        function: &mut F,
+        focus: &mut Option<NodeId>,
+    ) -> Option<NodeId>
+    where
+        F: FnMut(&Tab) -> Option<NewTab>,
+    {
+        let copied = match &self[id] {
+            Node::Leaf(leaf) => {
+                let leaf = leaf.filter_map_tabs(&mut *function)?;
+                target.nodes.insert(NodeEntry {
+                    parent: None,
+                    node: Node::Leaf(leaf),
+                })
+            }
+            Node::Vertical(split) | Node::Horizontal(split) => {
+                let [left, right] = split.children();
+                let left = self.copy_filtered(left, target, function, focus);
+                let right = self.copy_filtered(right, target, function, focus);
+                match (left, right) {
+                    // A split with one surviving child is not a split any more: the child
+                    // takes its place, which is what the old `balance()` did by swapping
+                    // slots around.
+                    (Some(only), None) | (None, Some(only)) => return Some(only),
+                    (None, None) => return None,
+                    (Some(left), Some(right)) => {
+                        let node = SplitNode::new(
+                            [left, right],
+                            split.fraction,
+                            split.fully_collapsed,
+                            split.collapsed_leaf_count,
+                        );
+                        let node = if self[id].is_vertical() {
+                            Node::Vertical(node)
+                        } else {
+                            Node::Horizontal(node)
+                        };
+                        let copied = target.nodes.insert(NodeEntry { parent: None, node });
+                        target.nodes.get_mut(left).unwrap().parent = Some(copied);
+                        target.nodes.get_mut(right).unwrap().parent = Some(copied);
+                        copied
+                    }
+                }
+            }
+        };
+        if self.focused_node == Some(id) {
+            *focus = Some(copied);
+        }
+        Some(copied)
     }
 
     /// Returns a new [`Tree`] while mapping the tab type.
@@ -833,7 +782,7 @@ impl<Tab> Tree<Tab> {
     }
 
     /// Returns a new [`Tree`] while filtering the tab type.
-    /// Any remaining empty [`Node`]s are removed.
+    /// Leaves that lose all their tabs are removed.
     pub fn filter_tabs<F>(&self, mut predicate: F) -> Tree<Tab>
     where
         F: FnMut(&Tab) -> bool,
@@ -843,20 +792,36 @@ impl<Tab> Tree<Tab> {
     }
 
     /// Removes all tabs for which `predicate` returns `false`.
-    /// Any remaining empty [`Node`]s are also removed.
+    /// Leaves that lose all their tabs are removed as well.
     pub fn retain_tabs<F>(&mut self, mut predicate: F)
     where
         F: FnMut(&mut Tab) -> bool,
     {
-        let mut emptied_nodes = HashSet::default();
-        for (index, node) in self.nodes.iter_mut().enumerate() {
-            node.retain_tabs(&mut predicate);
-            if node.is_empty() {
-                emptied_nodes.insert(NodeIndex(index));
+        let leaves: Vec<NodeId> = self
+            .iter_indexed()
+            .filter(|(_, node)| node.is_leaf())
+            .map(|(id, _)| id)
+            .collect();
+        let mut emptied = Vec::new();
+        for id in leaves {
+            let leaf = self.leaf_mut(id).unwrap();
+            leaf.retain_tabs(&mut predicate);
+            if leaf.is_empty() {
+                emptied.push(id);
             }
         }
-        self.balance(emptied_nodes);
+        for id in emptied {
+            // Removing one leaf can remove its parent, but never another leaf, so every
+            // id collected above is still live unless the tree was emptied entirely.
+            if self.contains(id) {
+                self.remove_leaf(id);
+            }
+        }
     }
+
+    // ------------------------------------------------------------------------
+    // Collapsing
+    // ------------------------------------------------------------------------
 
     /// Sets the collapsing state of the [`Tree`].
     pub(crate) fn set_collapsed(&mut self, collapsed: bool) {
@@ -878,97 +843,62 @@ impl<Tab> Tree<Tab> {
         self.collapsed_leaf_count
     }
 
-    fn balance(&mut self, emptied_nodes: HashSet<NodeIndex>) {
-        let mut emptied_parents = HashSet::default();
-        for parent_index in emptied_nodes.into_iter().filter_map(|ni| ni.parent()) {
-            if !self[parent_index].is_parent() {
-                continue;
-            } else if self[parent_index.left()].is_empty() && self[parent_index.right()].is_empty()
-            {
-                self[parent_index] = Node::Empty;
-                emptied_parents.insert(parent_index);
-            } else if self[parent_index.left()].is_empty() {
-                self.nodes.swap(parent_index.0, parent_index.right().0);
-                self[parent_index.right()] = Node::Empty;
-            } else if self[parent_index.right()].is_empty() {
-                self.nodes.swap(parent_index.0, parent_index.left().0);
-                self[parent_index.left()] = Node::Empty;
+    /// Updates the collapsed state of the node's ancestors, and of the tree itself.
+    pub(crate) fn node_update_collapsed(&mut self, node: NodeId) {
+        let collapsed = self[node].is_collapsed();
+
+        let mut current = self.parent(node);
+        while let Some(parent) = current {
+            current = self.parent(parent);
+
+            let [left, right] = self.children(parent).expect("a parent is always a split");
+            let left_count = self[left].collapsed_leaf_count();
+            let right_count = self[right].collapsed_leaf_count();
+            let both_collapsed = self[left].is_collapsed() && self[right].is_collapsed();
+            let horizontal = self[parent].is_horizontal();
+
+            if !collapsed {
+                self[parent].set_collapsed(false);
+            }
+            // A horizontal split stacks its children side by side, so the collapsed rows
+            // overlap; a vertical one stacks them, so they add up.
+            self[parent].set_collapsed_leaf_count(if horizontal {
+                max(left_count, right_count)
+            } else {
+                left_count + right_count
+            });
+            if collapsed && both_collapsed {
+                self[parent].set_collapsed(true);
             }
         }
-        if !emptied_parents.is_empty() {
-            self.balance(emptied_parents);
-        }
-    }
 
-    /// Updates the collapsed state of the node and its parents.
-    pub(crate) fn node_update_collapsed(&mut self, node_index: NodeIndex) {
-        let collapsed = self[node_index].is_collapsed();
+        let root_collapsed = self.root_node().is_some_and(Node::is_collapsed);
+        let root_count = self.root_node().map_or(0, Node::collapsed_leaf_count);
         if !collapsed {
-            // Recursively notify parent nodes that the leaf has expanded
-            let mut parent_index_option = node_index.parent();
-            while let Some(parent_index) = parent_index_option {
-                parent_index_option = parent_index.parent();
-
-                // Update collapsed leaf count and collapse status
-                let left_count = self[parent_index.left()].collapsed_leaf_count();
-                let right_count = self[parent_index.right()].collapsed_leaf_count();
-                self[parent_index].set_collapsed(false);
-
-                if self[parent_index].is_horizontal() {
-                    self[parent_index].set_collapsed_leaf_count(max(left_count, right_count));
-                } else {
-                    self[parent_index].set_collapsed_leaf_count(left_count + right_count);
-                }
-            }
             self.set_collapsed(false);
-            let root_index = NodeIndex::root();
-            self.set_collapsed_leaf_count(self[root_index].collapsed_leaf_count());
-        } else {
-            // Recursively notify parent nodes that the leaf has collapsed
-            let mut parent_index_option = node_index.parent();
-            while let Some(parent_index) = parent_index_option {
-                parent_index_option = parent_index.parent();
-
-                // Update collapsed leaf count and collapse status
-                let left_count = self[parent_index.left()].collapsed_leaf_count();
-                let right_count = self[parent_index.right()].collapsed_leaf_count();
-
-                if self[parent_index].is_horizontal() {
-                    self[parent_index].set_collapsed_leaf_count(max(left_count, right_count));
-                } else {
-                    self[parent_index].set_collapsed_leaf_count(left_count + right_count);
-                }
-
-                if self[parent_index.left()].is_collapsed()
-                    && self[parent_index.right()].is_collapsed()
-                {
-                    self[parent_index].set_collapsed(true);
-                }
-            }
-            if self.root_node().is_some_and(|root| root.is_collapsed()) {
-                self.set_collapsed(true);
-                let root_index = NodeIndex::root();
-                self.set_collapsed_leaf_count(self[root_index].collapsed_leaf_count());
-            }
+            self.set_collapsed_leaf_count(root_count);
+        } else if root_collapsed {
+            self.set_collapsed(true);
+            self.set_collapsed_leaf_count(root_count);
         }
     }
 
-    /// Find a given tab based on ``predicate``.
+    // ------------------------------------------------------------------------
+    // Lookups
+    // ------------------------------------------------------------------------
+
+    /// Find a given tab based on `predicate`.
     ///
-    /// Returns the indices in where that node and tab is in this surface.
-    ///
-    /// The returned [`NodeIndex`] will always point to a [`Node::Leaf`].
-    ///
-    /// In case there are several hits, only the first is returned.
-    pub fn find_tab_from(&self, predicate: impl Fn(&Tab) -> bool) -> Option<(NodeIndex, TabIndex)> {
-        for (node_index, node) in self.nodes.iter().enumerate() {
-            if let Some(tabs) = node.tabs() {
-                for (tab_index, tab) in tabs.iter().enumerate() {
-                    if predicate(tab) {
-                        return Some((node_index.into(), tab_index.into()));
-                    }
-                }
+    /// Returns which node and where in that node the tab is; the [`NodeId`] always names a
+    /// leaf. In case there are several hits, only the first is returned.
+    pub fn find_tab_from(&self, predicate: impl Fn(&Tab) -> bool) -> Option<(NodeId, TabIndex)> {
+        for node_id in self.breadth_first() {
+            let Ok(leaf) = self.leaf(node_id) else {
+                continue;
             };
+            if let Some((tab_index, _)) = leaf.iter_tabs_indexed().find(|(_, tab)| predicate(tab)) {
+                return Some((node_id, tab_index));
+            }
         }
         None
     }
@@ -980,12 +910,9 @@ where
 {
     /// Find the given tab.
     ///
-    /// Returns in which node and where in that node the tab is.
-    ///
-    /// The returned [`NodeIndex`] will always point to a [`Node::Leaf`].
-    ///
-    /// In case there are several hits, only the first is returned.
-    pub fn find_tab(&self, needle_tab: &Tab) -> Option<(NodeIndex, TabIndex)> {
+    /// Returns in which node and where in that node the tab is; the [`NodeId`] always
+    /// names a leaf. In case there are several hits, only the first is returned.
+    pub fn find_tab(&self, needle_tab: &Tab) -> Option<(NodeId, TabIndex)> {
         self.find_tab_from(|tab| tab == needle_tab)
     }
 }
@@ -1007,21 +934,72 @@ mod test {
 
         let i1 = tree.find_tab(&Tab(1)).unwrap();
         tree.remove_tab(i1);
-        assert_eq!(tree.nodes.len(), 1);
+        assert_eq!(tree.len(), 1, "the split collapsed back into a single leaf");
 
         tree.retain_tabs(|_| true);
         assert!(tree.find_tab(&Tab(0)).is_some());
     }
 
-    /// Tests whether `retain_tabs` works correctly with trailing `Empty` nodes
+    /// The identity claim, stated as a test: a structural edit anywhere else in the tree
+    /// leaves an id alone. The heap representation renamed nodes on exactly these edits.
     #[test]
-    fn retain_trailing_empty() {
-        let mut tree: Tree<Tab> = Tree::new(vec![]);
-        tree.push_to_focused_leaf(Tab(0));
-        tree.nodes.push(Node::Empty);
-        tree.nodes.push(Node::Empty);
+    fn ids_survive_structural_edits() {
+        let mut tree = Tree::new(vec![Tab(0)]);
+        let root = tree.root().unwrap();
 
-        tree.retain_tabs(|_| true);
-        assert!(tree.find_tab(&Tab(0)).is_some());
+        let [old, right] = tree.split_right(root, 0.5, vec![Tab(1)]);
+        assert_eq!(old, root, "the split node keeps its id");
+
+        // Split again deeper down, then remove that leaf again.
+        let [_, deep] = tree.split_below(right, 0.5, vec![Tab(2)]);
+        assert_eq!(
+            tree.find_tab(&Tab(0)),
+            Some((root, TabIndex(0))),
+            "an unrelated leaf is untouched by a split elsewhere"
+        );
+
+        tree.remove_leaf(deep);
+        assert_eq!(
+            tree.find_tab(&Tab(0)),
+            Some((root, TabIndex(0))),
+            "...and by a removal elsewhere"
+        );
+        assert_eq!(tree.find_tab(&Tab(1)), Some((right, TabIndex(0))));
+    }
+
+    /// A removed node's id must not resolve afterwards — neither to nothing, nor (worse)
+    /// to whichever node took its place.
+    #[test]
+    fn a_removed_id_stops_resolving() {
+        let mut tree = Tree::new(vec![Tab(0)]);
+        let root = tree.root().unwrap();
+        let [_, right] = tree.split_right(root, 0.5, vec![Tab(1)]);
+
+        tree.remove_leaf(right);
+        assert!(!tree.contains(right));
+        assert!(tree.node(right).is_err());
+        assert_eq!(tree.root(), Some(root), "the sibling is promoted to root");
+    }
+
+    #[test]
+    fn breadth_first_lists_parents_before_children() {
+        let mut tree = Tree::new(vec![Tab(0)]);
+        let root = tree.root().unwrap();
+        let [left, right] = tree.split_right(root, 0.5, vec![Tab(1)]);
+        let [_, deep] = tree.split_below(right, 0.5, vec![Tab(2)]);
+
+        let order = tree.breadth_first();
+        assert_eq!(order.len(), tree.len());
+        let position = |id: NodeId| order.iter().position(|other| *other == id).unwrap();
+        for id in &order {
+            if let Some(parent) = tree.parent(*id) {
+                assert!(
+                    position(parent) < position(*id),
+                    "parent {parent} came after its child {id}"
+                );
+            }
+        }
+        assert!(position(left) > position(tree.root().unwrap()));
+        assert!(position(deep) > position(right));
     }
 }

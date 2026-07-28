@@ -2,48 +2,66 @@ use std::ops;
 
 use crate::{Error, Result, TabIndex};
 
-/// The inner data of a [``Node::Leaf``](crate::Node), which contains tabs and can be collapsed.
+/// Stable identity of a tab inside one [`LeafNode`].
+///
+/// Positions inside a leaf shift on every insert and removal; identities do not. State
+/// that must survive an edit — which tab is open, which one we came from — is expressed
+/// with `TabId`, while [`TabIndex`] stays for the two places where a position is what is
+/// actually meant: the persisted layout format, and one frame of UI (the tab bar draws
+/// tabs in order and hit-tests them by order).
+///
+/// Ids are handed out per leaf and are not reused within it. They are not persisted: a
+/// loaded layout gets a fresh set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TabId(u32);
+
+/// A tab together with its identity.
+#[derive(Clone, Debug)]
+struct TabEntry<Tab> {
+    id: TabId,
+    tab: Tab,
+}
+
+/// The inner data of a [`Node::Leaf`](crate::Node), which contains tabs and can be collapsed.
 ///
 /// Carries no geometry: both the full rectangle (tab bar plus body) and the body-only
 /// viewport are derived by the layout pass every frame and live in
 /// [`DockLayout`](crate::layout::DockLayout), keyed by `(surface, node)`. Everything
 /// left in this struct is genuine state — which tabs, in which order, which one is
 /// active, and how the tab bar is scrolled.
+///
+/// # Invariants (upheld by every method here, checked by [`Tree::validate`](crate::Tree::validate))
+///
+/// * `active` is `Some` exactly when the leaf has tabs, and names a tab that is present.
+/// * `prev_active`, when `Some`, names a present tab that is not `active`.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct LeafNode<Tab> {
-    /// All the tabs in this node.
-    pub tabs: Vec<Tab>,
+    /// All the tabs in this node, in display order.
+    tabs: Vec<TabEntry<Tab>>,
 
-    /// The opened tab.
-    pub active: TabIndex,
+    /// Next identity to hand out. Monotonic within this leaf.
+    next_tab_id: u32,
 
-    /// The tab that was active immediately *before* [`active`](Self::active),
-    /// or `None` if there is no such history (fresh leaf, or the previous
-    /// active tab has since been removed).
+    /// The opened tab, or `None` when the leaf has no tabs at all (only the root leaf is
+    /// allowed to be in that state — an empty dock).
+    active: Option<TabId>,
+
+    /// The tab that was active immediately *before* [`active`](Self::active_id), or `None`
+    /// if there is no such history (fresh leaf, or the previously active tab is gone).
     ///
     /// # Why this exists
     ///
-    /// `active` is a *positional* index, not a tab identity. When the active
-    /// tab is removed (closed / moved out via a split / detached) we must pick
-    /// a new active tab. The naive choice — the left neighbour (`active - 1`) —
-    /// is surprising: open a non-last tab, append a new one (which auto-focuses),
-    /// then move that new tab elsewhere, and the leaf jumps to the neighbour
-    /// instead of returning to the tab you were actually looking at.
-    /// `prev_active` records "where we came from" so removal of the active tab
-    /// falls back to it instead.
+    /// When the active tab is removed (closed / moved out via a split / detached) we must
+    /// pick a new active tab. The naive choice — the left neighbour — is surprising: open
+    /// a non-last tab, append a new one (which auto-focuses), then move that new tab
+    /// elsewhere, and the leaf jumps to the neighbour instead of returning to the tab you
+    /// were actually looking at. `prev_active` records "where we came from" so removal of
+    /// the active tab falls back to it instead.
     ///
-    /// # Invariant (upheld by every method on this type)
-    ///
-    /// * Either `None`, or `Some(i)` with `i < tabs.len()` and `i != active`.
-    /// * Updated **only** through the methods below — never assign `active`
-    ///   directly from outside. UI activation paths must go through
-    ///   [`set_active_tab`](Self::set_active_tab) or
-    ///   [`activate_tab_remembering`](Self::activate_tab_remembering) so this
-    ///   field stays in sync. One place per mutation touches it — that is what
-    ///   keeps this addition easy to maintain.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub prev_active: Option<TabIndex>,
+    /// Both fields hold identities, so insertions and removals elsewhere in the leaf do
+    /// not touch them — before the arena refactor these were positions, and every mutating
+    /// method had to shift them by hand.
+    prev_active: Option<TabId>,
 
     /// Scroll amount of the tab bar.
     pub scroll: f32,
@@ -53,186 +71,347 @@ pub struct LeafNode<Tab> {
 }
 
 impl<Tab> LeafNode<Tab> {
-    /// Create New LeafNode with specified ``tabs``, all other internal values will be filled by "nothing" defaults.
-    pub const fn new(tabs: Vec<Tab>) -> Self {
+    /// Creates a leaf holding `tabs`, with the first one active.
+    pub fn new(tabs: Vec<Tab>) -> Self {
+        let tabs: Vec<_> = tabs
+            .into_iter()
+            .enumerate()
+            .map(|(index, tab)| TabEntry {
+                id: TabId(index as u32),
+                tab,
+            })
+            .collect();
+        let active = tabs.first().map(|entry| entry.id);
         LeafNode {
+            next_tab_id: tabs.len() as u32,
             tabs,
-            active: TabIndex(0),
+            active,
             prev_active: None,
             scroll: 0.0,
             collapsed: false,
         }
     }
 
-    /// Set the active tab of this [`LeafNode`]
+    /// Rebuilds a leaf from a persisted (positional) description.
     ///
-    /// If `active_tab` is out of bounds, an error is returned and the active tab is not changed.
-    #[inline]
-    pub fn set_active_tab(&mut self, active_tab: impl Into<TabIndex>) -> Result {
-        let index = active_tab.into();
-        if index.0 < self.len() {
-            self.activate_tab_remembering(index);
-            Ok(())
-        } else {
-            Err(Error::InvalidTab)
-        }
+    /// `active` and `prev_active` are positions in `tabs`; anything out of range is
+    /// dropped rather than trusted, because a stored layout is the one input to this type
+    /// that no code path of ours is responsible for.
+    pub(crate) fn from_persisted(
+        tabs: Vec<Tab>,
+        active: TabIndex,
+        prev_active: Option<TabIndex>,
+        scroll: f32,
+        collapsed: bool,
+    ) -> Self {
+        let mut leaf = Self::new(tabs);
+        leaf.scroll = scroll;
+        leaf.collapsed = collapsed;
+        leaf.active = leaf.tab_id_at(active).or(leaf.active);
+        leaf.prev_active = prev_active
+            .and_then(|index| leaf.tab_id_at(index))
+            .filter(|id| Some(*id) != leaf.active);
+        leaf
     }
 
-    /// Make `index` the active tab, recording the previously-active tab in
-    /// [`prev_active`](Self::prev_active) so a later removal of `index` can fall
-    /// back to it. A no-op (and history-preserving) if `index` is already active.
-    ///
-    /// `index` is assumed to be in bounds — this is the single chokepoint every
-    /// "switch to this tab" path (including the UI tab-bar click handlers) must
-    /// funnel through, so the [`prev_active`](Self::prev_active) invariant cannot
-    /// drift out of sync.
     #[inline]
-    pub fn activate_tab_remembering(&mut self, index: TabIndex) {
-        if index != self.active {
-            self.prev_active = Some(self.active);
-            self.active = index;
-        }
+    fn alloc_id(&mut self) -> TabId {
+        let id = TabId(self.next_tab_id);
+        self.next_tab_id += 1;
+        id
     }
 
-    /// Get the length of tab list in this [`LeafNode`].
+    /// Number of tabs in this leaf.
+    #[inline]
     pub fn len(&self) -> usize {
         self.tabs.len()
     }
 
-    /// Returns `true` when the [`LeafNode`] contains no tabs.
+    /// Returns `true` when the leaf contains no tabs.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.tabs.is_empty()
     }
 
-    /// Get immutable access to the ``Tab``s of this [`LeafNode`]
+    /// The tab at `index`, or `None` if there is no such position.
     #[inline]
-    pub fn tabs(&self) -> &[Tab] {
-        &self.tabs
+    pub fn tab_at(&self, index: TabIndex) -> Option<&Tab> {
+        self.tabs.get(index.0).map(|entry| &entry.tab)
     }
 
-    /// Get mutable access to the ``Tab``s of this [`LeafNode`]
+    /// The tab at `index`, mutably.
     #[inline]
-    pub fn tabs_mut(&mut self) -> &mut [Tab] {
-        &mut self.tabs
+    pub fn tab_at_mut(&mut self, index: TabIndex) -> Option<&mut Tab> {
+        self.tabs.get_mut(index.0).map(|entry| &mut entry.tab)
     }
 
-    /// Append a ``Tab`` to the end of this [`LeafNode`]s tab list.
+    /// Identity of the tab at `index`, or `None` if there is no such position.
+    #[inline]
+    pub fn tab_id_at(&self, index: TabIndex) -> Option<TabId> {
+        self.tabs.get(index.0).map(|entry| entry.id)
+    }
+
+    /// Where the tab named by `id` currently sits, or `None` if it is not in this leaf.
+    #[inline]
+    pub fn index_of(&self, id: TabId) -> Option<TabIndex> {
+        self.tabs
+            .iter()
+            .position(|entry| entry.id == id)
+            .map(TabIndex)
+    }
+
+    /// Iterates the tabs in display order.
+    #[inline]
+    pub fn iter_tabs(&self) -> impl Iterator<Item = &Tab> {
+        self.tabs.iter().map(|entry| &entry.tab)
+    }
+
+    /// Iterates the tabs in display order, mutably.
+    #[inline]
+    pub fn iter_tabs_mut(&mut self) -> impl Iterator<Item = &mut Tab> {
+        self.tabs.iter_mut().map(|entry| &mut entry.tab)
+    }
+
+    /// Iterates the tabs together with their positions.
+    #[inline]
+    pub fn iter_tabs_indexed(&self) -> impl Iterator<Item = (TabIndex, &Tab)> {
+        self.iter_tabs()
+            .enumerate()
+            .map(|(i, tab)| (TabIndex(i), tab))
+    }
+
+    /// Iterates the tabs together with their positions, mutably.
+    #[inline]
+    pub fn iter_tabs_mut_indexed(&mut self) -> impl Iterator<Item = (TabIndex, &mut Tab)> {
+        self.iter_tabs_mut()
+            .enumerate()
+            .map(|(i, tab)| (TabIndex(i), tab))
+    }
+
+    /// Identity of the active tab, or `None` if the leaf is empty.
+    #[inline]
+    pub fn active_id(&self) -> Option<TabId> {
+        self.active
+    }
+
+    /// Position of the active tab, or `None` if the leaf is empty.
+    #[inline]
+    pub fn active_index(&self) -> Option<TabIndex> {
+        self.active.and_then(|id| self.index_of(id))
+    }
+
+    /// Identity of the previously active tab, if any is remembered.
+    #[inline]
+    pub fn prev_active_id(&self) -> Option<TabId> {
+        self.prev_active
+    }
+
+    /// Position of the previously active tab, if that history still exists.
+    #[inline]
+    pub fn prev_active_index(&self) -> Option<TabIndex> {
+        self.prev_active.and_then(|id| self.index_of(id))
+    }
+
+    /// Test-only: drops every tab without touching `active`, leaving it naming a tab that
+    /// is no longer there.
     ///
-    /// This will also focus the added tab.
-    #[track_caller]
-    #[inline]
-    pub fn append_tab(&mut self, tab: Tab) {
-        // Appending happens at the end, so existing indices (including the old
-        // active) keep their positions — record the old active verbatim as the
-        // tab to return to if this freshly-focused tab is later removed.
-        self.prev_active = (!self.tabs.is_empty()).then_some(self.active);
-        self.active = TabIndex(self.tabs.len());
-        self.tabs.push(tab);
+    /// Exists so [`Tree::validate`](crate::Tree::validate) can be shown to bite. The public
+    /// API cannot reach this state, which is exactly why breaking it takes a back door.
+    #[cfg(test)]
+    pub(crate) fn corrupt_clear_tabs(&mut self) {
+        self.tabs.clear();
     }
 
-    /// Insert a ``Tab`` to this [`LeafNode`]s tab list at the specified [`TabIndex`].
+    /// Test-only: points the history at the active tab, which the invariant forbids.
+    #[cfg(test)]
+    pub(crate) fn corrupt_prev_active_to_active(&mut self) {
+        self.prev_active = self.active;
+    }
+
+    /// Whether the tab at `index` is the active one.
+    #[inline]
+    pub fn is_active(&self, index: TabIndex) -> bool {
+        let id = self.tab_id_at(index);
+        id.is_some() && id == self.active
+    }
+
+    /// The active tab, or `None` if the leaf holds no tabs.
+    #[inline]
+    pub fn active_focused(&mut self) -> Option<&mut Tab> {
+        let index = self.active_index()?;
+        self.tab_at_mut(index)
+    }
+
+    /// Sets the active tab of this [`LeafNode`].
     ///
-    /// This will also focus the added tab.
+    /// If `active_tab` is out of bounds, an error is returned and the active tab is not
+    /// changed.
+    #[inline]
+    pub fn set_active_tab(&mut self, active_tab: impl Into<TabIndex>) -> Result {
+        let index = active_tab.into();
+        match self.tab_id_at(index) {
+            Some(id) => {
+                self.activate(id);
+                Ok(())
+            }
+            None => Err(Error::InvalidTab),
+        }
+    }
+
+    /// Makes the tab at `index` active, recording the previously active tab as the one to
+    /// fall back to.
+    ///
+    /// This is the single chokepoint every "switch to this tab" path (including the UI tab
+    /// bar click handlers) funnels through, so the history cannot drift out of sync.
     ///
     /// # Panics
     ///
-    /// if ``tab_index`` exceeds the leaf's tab list length.
+    /// If `index` is out of bounds — callers that cannot guarantee that should use
+    /// [`set_active_tab`](Self::set_active_tab).
+    #[track_caller]
+    #[inline]
+    pub fn activate_tab_remembering(&mut self, index: TabIndex) {
+        let id = self
+            .tab_id_at(index)
+            .expect("activate_tab_remembering called with an out-of-bounds tab index");
+        self.activate(id);
+    }
+
+    /// Makes `id` active, remembering the tab we came from. A no-op (and
+    /// history-preserving) if `id` is already active.
+    #[inline]
+    fn activate(&mut self, id: TabId) {
+        if self.active != Some(id) {
+            self.prev_active = self.active;
+            self.active = Some(id);
+        }
+    }
+
+    /// Appends a tab at the end of the tab list and focuses it.
+    #[inline]
+    pub fn append_tab(&mut self, tab: Tab) {
+        let id = self.alloc_id();
+        // Whatever was active becomes the tab to return to if this one is removed again.
+        // No index arithmetic: appending cannot move any existing tab.
+        self.prev_active = self.active;
+        self.tabs.push(TabEntry { id, tab });
+        self.active = Some(id);
+    }
+
+    /// Inserts a tab at `tab_index` and focuses it.
+    ///
+    /// # Panics
+    ///
+    /// If `tab_index` exceeds the leaf's tab count.
     #[track_caller]
     #[inline]
     pub fn insert_tab(&mut self, tab_index: impl Into<TabIndex>, tab: Tab) {
         let tab_index = tab_index.into();
-        // Capture the old active before the insertion shifts indices: any tab
-        // at or after the insertion point moves one slot to the right.
-        self.prev_active = (!self.tabs.is_empty()).then(|| {
-            let old = self.active.0;
-            TabIndex(if old >= tab_index.0 { old + 1 } else { old })
-        });
-        self.tabs.insert(tab_index.0, tab);
-        self.active = tab_index;
+        let id = self.alloc_id();
+        self.prev_active = self.active;
+        self.tabs.insert(tab_index.0, TabEntry { id, tab });
+        self.active = Some(id);
     }
 
-    /// Remove a ``Tab`` to this [`LeafNode`]s tab list at the specified [`TabIndex`].
+    /// Removes the tab at `tab_index`, returning it, or `None` if there is no such tab.
     ///
-    /// This will also focus the added tab.'
-    ///
-    /// # Panics
-    ///
-    /// if ``tab_index`` is out of bounds for the tab list
+    /// If the removed tab was the active one, focus falls back to the previously active
+    /// tab, or — when there is no such history — to the left neighbour.
     #[inline]
     pub fn remove_tab(&mut self, tab_index: impl Into<TabIndex>) -> Option<Tab> {
         let index = tab_index.into();
-        if index == self.active {
-            // Removing the active tab: fall back to the previously-active tab
-            // if we still have a valid record of it (the common case behind the
-            // "split moved the wrong tab into focus" bug). Otherwise keep the
-            // old left-neighbour behaviour.
-            match self.prev_active {
-                // `prev != index` always holds by the invariant, but guard anyway.
-                Some(prev) if prev != index => {
-                    // `prev` survives the removal; shift it left if it sat to the
-                    // right of the tab being removed.
-                    self.active = if prev.0 > index.0 {
-                        TabIndex(prev.0 - 1)
-                    } else {
-                        prev
-                    };
-                }
-                _ => self.active.0 = self.active.0.saturating_sub(1),
-            }
-            // The history slot is consumed: the tab we came from is now active,
-            // so there is no longer a meaningful "before that" to keep.
-            self.prev_active = None;
-        } else {
-            // Removing some other tab: keep `active` pointing at the same tab,
-            // shifting its index if the removal was to its left.
-            if index.0 < self.active.0 {
-                self.active.0 -= 1;
-            }
-            // Keep `prev_active` pointing at the same tab as well.
-            self.prev_active = match self.prev_active {
-                Some(prev) if prev == index => None, // the remembered tab is gone
-                Some(prev) if index.0 < prev.0 => Some(TabIndex(prev.0 - 1)),
-                other => other,
-            };
+        if index.0 >= self.tabs.len() {
+            return None;
         }
-        Some(self.tabs.remove(index.0))
+        let removed = self.tabs.remove(index.0);
+
+        if self.active == Some(removed.id) {
+            // The history slot is consumed: the tab we came from becomes active, so there
+            // is no longer a meaningful "before that" to keep.
+            self.active = match self.prev_active.take() {
+                Some(prev) => Some(prev),
+                // Classic left-neighbour rule. This one *is* positional on purpose: "the
+                // tab next to the one that just went away" is a statement about order.
+                None => self.tab_id_at(TabIndex(index.0.saturating_sub(1))),
+            };
+        } else if self.prev_active == Some(removed.id) {
+            self.prev_active = None;
+        }
+
+        Some(removed.tab)
     }
 
     /// Removes all tabs for which `predicate` returns `false`.
-    pub fn retain_tabs<F>(&mut self, predicate: F)
+    ///
+    /// Focus survives if the tab it names does; otherwise it falls back the same way a
+    /// single removal does.
+    pub fn retain_tabs<F>(&mut self, mut predicate: F)
     where
         F: FnMut(&mut Tab) -> bool,
     {
-        self.tabs.retain_mut(predicate);
-        // A bulk retain can drop arbitrary tabs, so the recorded "previous
-        // active" index can no longer be trusted — drop it.
-        self.prev_active = None;
+        self.tabs.retain_mut(|entry| predicate(&mut entry.tab));
+        self.repair_focus();
     }
 
-    /// Return the tab which is currently representing this [`LeafNode`].
-    ///
-    /// This may return ``None`` if the leaf contains 0 tabs.
-    ///
-    /// Used to return the viewport rectangle alongside the tab; geometry now comes from
-    /// [`DockLayout`](crate::layout::DockLayout) instead, so callers that need it ask
-    /// the layout map for the same `(surface, node)`.
-    #[inline]
-    pub fn active_focused(&mut self) -> Option<&mut Tab> {
-        self.tabs.get_mut(self.active.0)
+    /// Restores the focus invariants after a bulk edit that may have dropped arbitrary
+    /// tabs: `active` must name a present tab (or be `None` for an empty leaf), and
+    /// `prev_active` must name a present tab other than `active`.
+    fn repair_focus(&mut self) {
+        let contains = |tabs: &Vec<TabEntry<Tab>>, id: TabId| tabs.iter().any(|e| e.id == id);
+        self.prev_active = self.prev_active.filter(|id| contains(&self.tabs, *id));
+        if !self.active.is_some_and(|id| contains(&self.tabs, id)) {
+            self.active = self
+                .prev_active
+                .take()
+                .or_else(|| self.tabs.first().map(|entry| entry.id));
+        }
+        if self.prev_active == self.active {
+            self.prev_active = None;
+        }
+    }
+
+    /// Returns a new leaf with the tab type mapped and filtered, or `None` if no tab
+    /// survives the filter.
+    pub(crate) fn filter_map_tabs<F, NewTab>(&self, mut function: F) -> Option<LeafNode<NewTab>>
+    where
+        F: FnMut(&Tab) -> Option<NewTab>,
+    {
+        let tabs: Vec<TabEntry<NewTab>> = self
+            .tabs
+            .iter()
+            .filter_map(|entry| function(&entry.tab).map(|tab| TabEntry { id: entry.id, tab }))
+            .collect();
+        if tabs.is_empty() {
+            return None;
+        }
+        let mut leaf = LeafNode {
+            tabs,
+            next_tab_id: self.next_tab_id,
+            // Identities are preserved by the mapping, so focus carries over verbatim and
+            // is repaired only where the filter actually dropped the tab it named.
+            active: self.active,
+            prev_active: self.prev_active,
+            scroll: self.scroll,
+            collapsed: self.collapsed,
+        };
+        leaf.repair_focus();
+        Some(leaf)
     }
 }
 
 impl<Tab> ops::Index<TabIndex> for LeafNode<Tab> {
     type Output = Tab;
 
+    #[track_caller]
     fn index(&self, index: TabIndex) -> &Tab {
-        &self.tabs[index.0]
+        &self.tabs[index.0].tab
     }
 }
 
 impl<Tab> ops::IndexMut<TabIndex> for LeafNode<Tab> {
+    #[track_caller]
     fn index_mut(&mut self, index: TabIndex) -> &mut Tab {
-        &mut self.tabs[index.0]
+        &mut self.tabs[index.0].tab
     }
 }
 
@@ -241,148 +420,172 @@ mod prev_active_tests {
     use super::LeafNode;
     use crate::{TabIndex, Tree};
 
-    /// Build a leaf with the given tabs and active index set *via the public
-    /// path* (`set_active_tab`) so `prev_active` is initialised the same way the
-    /// real UI would set it.
+    /// Build a leaf with the given tabs and active index set *via the public path*
+    /// (`set_active_tab`) so the history is initialised the same way the real UI does.
     fn leaf_active(tabs: &[char], active: usize) -> LeafNode<char> {
         let mut leaf = LeafNode::new(tabs.to_vec());
         leaf.set_active_tab(TabIndex(active)).unwrap();
         leaf
     }
 
-    /// The exact reported bug: open a non-last tab, append a new tab (which
-    /// auto-focuses), then remove that appended tab (as a split/move does).
-    /// The leaf must return to the tab that was active *before* the append,
-    /// not the appended tab's left neighbour.
+    fn tabs_of(leaf: &LeafNode<char>) -> Vec<char> {
+        leaf.iter_tabs().copied().collect()
+    }
+
+    /// The exact reported bug: open a non-last tab, append a new tab (which auto-focuses),
+    /// then remove that appended tab (as a split/move does). The leaf must return to the
+    /// tab that was active *before* the append, not the appended tab's left neighbour.
     #[test]
     fn append_then_remove_active_returns_to_prior_tab() {
         // tabs [A,B,C,D], active = C (index 2)
         let mut leaf = leaf_active(&['A', 'B', 'C', 'D'], 2);
-        assert_eq!(leaf.prev_active, Some(TabIndex(0))); // set_active recorded default-0
+        assert_eq!(leaf.prev_active_index(), Some(TabIndex(0)));
 
         // append E -> auto-focus, prev becomes C(2)
         leaf.append_tab('E');
-        assert_eq!(leaf.active, TabIndex(4));
-        assert_eq!(leaf.prev_active, Some(TabIndex(2)));
+        assert_eq!(leaf.active_index(), Some(TabIndex(4)));
+        assert_eq!(leaf.prev_active_index(), Some(TabIndex(2)));
 
         // move E out == remove the active tab
         let removed = leaf.remove_tab(TabIndex(4));
         assert_eq!(removed, Some('E'));
-        assert_eq!(leaf.tabs, vec!['A', 'B', 'C', 'D']);
+        assert_eq!(tabs_of(&leaf), ['A', 'B', 'C', 'D']);
         // BEFORE the fix this was D (index 3); now it is C (index 2).
-        assert_eq!(leaf.active, TabIndex(2));
-        assert_eq!(leaf.prev_active, None, "history slot consumed on fallback");
+        assert_eq!(leaf.active_index(), Some(TabIndex(2)));
+        assert_eq!(
+            leaf.prev_active_index(),
+            None,
+            "history slot consumed on fallback"
+        );
     }
 
     #[test]
     fn append_on_fresh_leaf_has_no_history() {
         let mut leaf = LeafNode::new(Vec::<char>::new());
+        assert_eq!(leaf.active_index(), None, "an empty leaf has no active tab");
         leaf.append_tab('A');
-        assert_eq!(leaf.active, TabIndex(0));
-        assert_eq!(leaf.prev_active, None);
+        assert_eq!(leaf.active_index(), Some(TabIndex(0)));
+        assert_eq!(leaf.prev_active_index(), None);
     }
 
     #[test]
     fn remove_active_without_history_uses_left_neighbour() {
-        // No set_active call -> prev_active is None.
         let mut leaf = LeafNode::new(vec!['A', 'B', 'C']);
         leaf.set_active_tab(TabIndex(2)).unwrap(); // prev = 0
         // First removal of active consumes the history...
         leaf.remove_tab(TabIndex(2)); // active -> prev (0)
-        assert_eq!(leaf.active, TabIndex(0));
-        assert_eq!(leaf.prev_active, None);
-        // ...so a second removal of the active tab has no history and falls
-        // back to the classic left-neighbour rule (saturating at 0).
+        assert_eq!(leaf.active_index(), Some(TabIndex(0)));
+        assert_eq!(leaf.prev_active_index(), None);
+        // ...so a second removal of the active tab has no history and falls back to the
+        // classic left-neighbour rule (saturating at 0).
         leaf.remove_tab(TabIndex(0));
-        assert_eq!(leaf.tabs, vec!['B']);
-        assert_eq!(leaf.active, TabIndex(0));
+        assert_eq!(tabs_of(&leaf), ['B']);
+        assert_eq!(leaf.active_index(), Some(TabIndex(0)));
     }
 
+    /// The identity payoff: inserting in front of the remembered tab used to require
+    /// shifting the recorded index by hand. Now nothing shifts, and the behaviour is the
+    /// same — this is the test that would have caught the shifting arithmetic.
     #[test]
-    fn insert_tab_shifts_recorded_prev_active() {
-        // tabs [A,B,C], active C(2), prev recorded as default 0.
+    fn insert_tab_keeps_history_pointing_at_the_same_tab() {
+        // tabs [A,B,C], active C(2), prev recorded as default A(0).
         let mut leaf = leaf_active(&['A', 'B', 'C'], 2);
         // Insert X at front and focus it: everything shifts right by one.
         leaf.insert_tab(TabIndex(0), 'X');
-        assert_eq!(leaf.tabs, vec!['X', 'A', 'B', 'C']);
-        assert_eq!(leaf.active, TabIndex(0));
-        assert_eq!(leaf.prev_active, Some(TabIndex(3))); // old C, shifted 2 -> 3
+        assert_eq!(tabs_of(&leaf), ['X', 'A', 'B', 'C']);
+        assert_eq!(leaf.active_index(), Some(TabIndex(0)));
+        assert_eq!(leaf.prev_active_index(), Some(TabIndex(3))); // old C, now at 3
 
-        // Remove the focused X -> fall back to the shifted prior tab C.
+        // Remove the focused X -> fall back to the prior tab C.
         leaf.remove_tab(TabIndex(0));
-        assert_eq!(leaf.tabs, vec!['A', 'B', 'C']);
-        assert_eq!(leaf.active, TabIndex(2)); // C again
+        assert_eq!(tabs_of(&leaf), ['A', 'B', 'C']);
+        assert_eq!(leaf.active_index(), Some(TabIndex(2))); // C again
     }
 
     #[test]
     fn removing_remembered_tab_clears_history() {
         // active C(2), prev = A(0).
         let mut leaf = leaf_active(&['A', 'B', 'C', 'D'], 2);
-        assert_eq!(leaf.prev_active, Some(TabIndex(0)));
+        assert_eq!(leaf.prev_active_index(), Some(TabIndex(0)));
         // Remove A (the remembered tab, not the active one).
         leaf.remove_tab(TabIndex(0));
-        assert_eq!(leaf.tabs, vec!['B', 'C', 'D']);
-        assert_eq!(leaf.active, TabIndex(1)); // C shifted left
-        assert_eq!(leaf.prev_active, None, "remembered tab gone");
+        assert_eq!(tabs_of(&leaf), ['B', 'C', 'D']);
+        assert_eq!(leaf.active_index(), Some(TabIndex(1))); // C, which did not move
+        assert_eq!(leaf.prev_active_index(), None, "remembered tab gone");
     }
 
     #[test]
-    fn removing_tab_right_of_active_leaves_indices_untouched() {
+    fn removing_tab_right_of_active_leaves_focus_untouched() {
         // active B(1), prev = A(0).
         let mut leaf = leaf_active(&['A', 'B', 'C', 'D'], 1);
         leaf.remove_tab(TabIndex(3)); // remove D, to the right of both
-        assert_eq!(leaf.tabs, vec!['A', 'B', 'C']);
-        assert_eq!(leaf.active, TabIndex(1));
-        assert_eq!(leaf.prev_active, Some(TabIndex(0)));
+        assert_eq!(tabs_of(&leaf), ['A', 'B', 'C']);
+        assert_eq!(leaf.active_index(), Some(TabIndex(1)));
+        assert_eq!(leaf.prev_active_index(), Some(TabIndex(0)));
     }
 
     #[test]
     fn prev_active_tracks_only_one_level() {
         let mut leaf = LeafNode::new(vec!['A', 'B', 'C']);
         leaf.set_active_tab(TabIndex(1)).unwrap(); // active B, prev A(0)
-        assert_eq!(leaf.prev_active, Some(TabIndex(0)));
+        assert_eq!(leaf.prev_active_index(), Some(TabIndex(0)));
         leaf.set_active_tab(TabIndex(2)).unwrap(); // active C, prev B(1)
-        assert_eq!(leaf.prev_active, Some(TabIndex(1)));
+        assert_eq!(leaf.prev_active_index(), Some(TabIndex(1)));
         // Removing active C returns to B, not A.
         leaf.remove_tab(TabIndex(2));
-        assert_eq!(leaf.active, TabIndex(1));
+        assert_eq!(leaf.active_index(), Some(TabIndex(1)));
     }
 
     #[test]
     fn reactivating_same_tab_is_a_noop_for_history() {
         let mut leaf = leaf_active(&['A', 'B', 'C'], 2); // prev = 0
         leaf.set_active_tab(TabIndex(2)).unwrap(); // same active -> no change
-        assert_eq!(leaf.prev_active, Some(TabIndex(0)));
+        assert_eq!(leaf.prev_active_index(), Some(TabIndex(0)));
+    }
+
+    /// Before identities, a bulk retain could leave `active` addressing a position that no
+    /// longer exists (nothing repaired it), and the history was dropped wholesale. Now
+    /// focus survives when its tab does.
+    #[test]
+    fn retain_keeps_focus_on_a_surviving_tab() {
+        let mut leaf = leaf_active(&['A', 'B', 'C'], 2); // active C, prev A
+        leaf.retain_tabs(|t| *t != 'B');
+        assert_eq!(tabs_of(&leaf), ['A', 'C']);
+        assert_eq!(leaf.active_index(), Some(TabIndex(1)), "C is still active");
+        assert_eq!(leaf.prev_active_index(), Some(TabIndex(0)));
     }
 
     #[test]
-    fn retain_drops_history() {
-        let mut leaf = leaf_active(&['A', 'B', 'C'], 2); // prev = 0
-        leaf.retain_tabs(|t| *t != 'B');
-        assert_eq!(leaf.prev_active, None);
+    fn retain_that_drops_the_active_tab_falls_back_to_history() {
+        let mut leaf = leaf_active(&['A', 'B', 'C'], 2); // active C, prev A
+        leaf.retain_tabs(|t| *t != 'C');
+        assert_eq!(leaf.active_index(), Some(TabIndex(0)), "back to A");
+        assert_eq!(leaf.prev_active_index(), None);
     }
 
-    /// `Tree::push_to_first_leaf` auto-focuses the pushed tab, so it is an
-    /// active-changing site and must funnel through `append_tab` like every
-    /// other one — otherwise the bug above survives on that path.
+    /// `Tree::push_to_first_leaf` auto-focuses the pushed tab, so it is an active-changing
+    /// site and must funnel through `append_tab` like every other one.
     #[test]
     fn push_to_first_leaf_records_history() {
         let mut tree = Tree::new(vec!['A', 'B', 'C']);
-        let root = crate::NodeIndex::root();
-        tree[root]
-            .get_leaf_mut()
+        let root = tree.root().unwrap();
+        tree.leaf_mut(root)
             .unwrap()
             .set_active_tab(TabIndex(1))
             .unwrap();
 
         tree.push_to_first_leaf('D');
 
-        let leaf = tree[root].get_leaf_mut().unwrap();
-        assert_eq!(leaf.active, TabIndex(3), "the pushed tab is focused");
-        assert_eq!(leaf.prev_active, Some(TabIndex(1)));
+        let leaf = tree.leaf_mut(root).unwrap();
+        assert_eq!(
+            leaf.active_index(),
+            Some(TabIndex(3)),
+            "the pushed tab is focused"
+        );
+        assert_eq!(leaf.prev_active_index(), Some(TabIndex(1)));
 
         // Moving the pushed tab out returns to B, not to its left neighbour C.
         leaf.remove_tab(TabIndex(3));
-        assert_eq!(leaf.active, TabIndex(1));
+        assert_eq!(leaf.active_index(), Some(TabIndex(1)));
     }
 }

@@ -3,7 +3,7 @@
 use std::fs;
 
 use eframe::{NativeOptions, egui};
-use egui_dock::{DockArea, DockState, NodeIndex, Style};
+use egui_dock::{DockArea, DockState, Style};
 
 const DOCK_STATE_FILE: &str = "target/dock_state.json";
 
@@ -60,10 +60,11 @@ impl Default for MyApp {
         // Try loading from file, fallback to default layout
         Self::load_json().unwrap_or_else(|| {
             let mut tree = DockState::new(vec!["tab1".to_owned(), "tab2".to_owned()]);
+            let root = tree.main_surface().root().unwrap();
 
-            let [a, b] =
-                tree.main_surface_mut()
-                    .split_left(NodeIndex::root(), 0.3, vec!["tab3".to_owned()]);
+            let [a, b] = tree
+                .main_surface_mut()
+                .split_left(root, 0.3, vec!["tab3".to_owned()]);
             let [_, _] = tree
                 .main_surface_mut()
                 .split_below(a, 0.7, vec!["tab4".to_owned()]);

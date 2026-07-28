@@ -12,6 +12,68 @@ Ordered newest first.
 
 ---
 
+## The tree addressed nodes by position, so every structural edit renamed them
+
+**Status upstream:** not submitted. This is a representation change, not a patch — it is
+offered as a description of a root cause rather than as something to cherry-pick.
+
+**Symptom.** Two of the fixes below ("focus survives the removal of the root leaf" and "the
+previously active tab is forgotten") look unrelated: one is about `focused_node`, the other
+about a tab index inside a leaf. They are the same bug twice, and there is no reason to
+believe there were only two. Alongside them, saved layouts grew absurd: the corpus that
+prompted this work contains a real file with 218 `Empty` entries for a handful of panels.
+
+**Root cause.** `Tree<Tab>` stored its nodes as an implicit binary heap in a `Vec`: children
+of *n* at *2n + 1* and *2n + 2*, holes spelled `Node::Empty`. A node's address *was* its
+position, so every split, removal and re-balance renamed nodes — including nodes nobody
+touched. Anything that held an address across such an edit (focus, a drag in flight, the
+active-tab index inside a leaf, a caller that split a node and wanted to touch it again)
+kept naming a position that now held something else. Nothing failed loudly; the tree stayed
+well-formed, it just described a different layout than the one the caller had in mind. The
+heap also forced the shape to be balanced-ish to stay small, which is where the `Empty`
+explosion in saved layouts came from.
+
+**Fix.** Nodes live in a generational arena and are addressed by `NodeId` (slot +
+generation); the shape is carried by explicit links — every node knows its parent, every
+split owns its two children. `Node::Empty` no longer exists as a concept. Inside a leaf,
+tabs get the same treatment: `TabId` identifies a tab, and `active` / `prev_active` hold
+identities. Positions survive in exactly two places, both of which genuinely mean a
+position: the persisted layout format, and one frame of UI (the tab bar draws tabs in order
+and hit-tests them by order).
+
+Three things that used to be checked are now impossible to express:
+
+- a split with one child — a `SplitNode` stores both;
+- a stale id silently naming a different node — reusing a slot bumps its generation, so the
+  old id stops resolving;
+- an index that "survived" a structural edit — nothing is renumbered by an edit.
+
+**Evidence.** The whole test suite of the fork, plus:
+
+- `proptests::ids_keep_naming_the_same_node`: over random operation sequences, an id taken
+  before an operation still names a leaf with the same tabs afterwards, unless that
+  operation was about that leaf. This is the property the heap could not satisfy.
+- The `prev_active` code is the readable proof: `insert_tab` used to have to shift the
+  remembered index (`if old >= tab_index { old + 1 } else { old }`) and `remove_tab` had to
+  shift it back; both now assign identities and shift nothing, and the existing behaviour
+  tests pass unchanged.
+- Mutation-checked: dropping the re-parent in `split` fails 7 tests naming
+  `ChildLinkBroken`; dropping the history fallback in `remove_tab` fails 5.
+
+**Also fixed on the way.** `LeafNode::retain_tabs` used to leave `active` addressing a
+position that the retain had removed (nothing repaired it) and dropped the history
+wholesale. With identities, focus survives when its tab does, and falls back the same way a
+single removal does when it does not. Covered by
+`prev_active_tests::retain_keeps_focus_on_a_surviving_tab`.
+
+**Cost, stated honestly.** The public API changed: `NodeIndex` is gone (with its `root()` /
+`left()` / `right()` arithmetic), `LeafNode`'s fields are behind accessors, and
+`Tree`'s serialized form is a recursive tree rather than a heap `Vec`. Layouts written by
+the old form are still read — `src/core/tree/persist.rs` accepts both and writes only the
+new one.
+
+---
+
 ## Focus survives the removal of the root leaf
 
 **Status upstream:** not submitted.

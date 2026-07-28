@@ -2,7 +2,7 @@
 
 use eframe::{NativeOptions, egui};
 use egui::{Color32, RichText};
-use egui_dock::{DockArea, DockState, NodeIndex, NodePath, Style, SurfaceIndex};
+use egui_dock::{DockArea, DockState, NodePath, Style};
 
 fn main() -> eframe::Result<()> {
     let options = NativeOptions::default();
@@ -13,6 +13,7 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+#[derive(Clone, Copy)]
 enum MyTabKind {
     Regular,
     Fancy,
@@ -20,28 +21,36 @@ enum MyTabKind {
 
 struct MyTab {
     kind: MyTabKind,
+    /// Just a label for this example. Node identities are opaque handles, not numbers to
+    /// show the user, so a tab that wants a number keeps its own.
+    number: usize,
+}
+
+/// Where a tab asked for from the "+" popup should go, and what it should be.
+struct AddRequest {
     path: NodePath,
+    kind: MyTabKind,
 }
 
 impl MyTab {
-    fn regular(node: NodePath) -> Self {
+    fn regular(number: usize) -> Self {
         Self {
             kind: MyTabKind::Regular,
-            path: node,
+            number,
         }
     }
 
-    fn fancy(node: NodePath) -> Self {
+    fn fancy(number: usize) -> Self {
         Self {
             kind: MyTabKind::Fancy,
-            path: node,
+            number,
         }
     }
 
     fn title(&self) -> String {
         match self.kind {
-            MyTabKind::Regular => format!("Regular Tab {}", self.path.node.0),
-            MyTabKind::Fancy => format!("Fancy Tab {}", self.path.node.0),
+            MyTabKind::Regular => format!("Regular Tab {}", self.number),
+            MyTabKind::Fancy => format!("Fancy Tab {}", self.number),
         }
     }
 
@@ -62,7 +71,7 @@ impl MyTab {
 }
 
 struct TabViewer<'a> {
-    added_nodes: &'a mut Vec<MyTab>,
+    added_nodes: &'a mut Vec<AddRequest>,
 }
 
 impl egui_dock::TabViewer for TabViewer<'_> {
@@ -81,11 +90,17 @@ impl egui_dock::TabViewer for TabViewer<'_> {
         ui.style_mut().visuals.button_frame = false;
 
         if ui.button("Regular tab").clicked() {
-            self.added_nodes.push(MyTab::regular(path));
+            self.added_nodes.push(AddRequest {
+                path,
+                kind: MyTabKind::Regular,
+            });
         }
 
         if ui.button("Fancy tab").clicked() {
-            self.added_nodes.push(MyTab::fancy(path));
+            self.added_nodes.push(AddRequest {
+                path,
+                kind: MyTabKind::Fancy,
+            });
         }
     }
 }
@@ -97,42 +112,19 @@ struct MyApp {
 
 impl Default for MyApp {
     fn default() -> Self {
-        let mut tree = DockState::new(vec![
-            MyTab::regular(NodePath {
-                surface: SurfaceIndex::main(),
-                node: NodeIndex(1),
-            }),
-            MyTab::fancy(NodePath {
-                surface: SurfaceIndex::main(),
-                node: NodeIndex(2),
-            }),
-        ]);
+        let mut tree = DockState::new(vec![MyTab::regular(1), MyTab::fancy(2)]);
+        let root = tree.main_surface().root().unwrap();
 
         // You can modify the tree before constructing the dock
-        let [a, b] = tree.main_surface_mut().split_left(
-            NodeIndex::root(),
-            0.3,
-            vec![MyTab::fancy(NodePath {
-                surface: SurfaceIndex::main(),
-                node: NodeIndex(3),
-            })],
-        );
-        let [_, _] = tree.main_surface_mut().split_below(
-            a,
-            0.7,
-            vec![MyTab::fancy(NodePath {
-                surface: SurfaceIndex::main(),
-                node: NodeIndex(4),
-            })],
-        );
-        let [_, _] = tree.main_surface_mut().split_below(
-            b,
-            0.5,
-            vec![MyTab::regular(NodePath {
-                surface: SurfaceIndex::main(),
-                node: NodeIndex(5),
-            })],
-        );
+        let [a, b] = tree
+            .main_surface_mut()
+            .split_left(root, 0.3, vec![MyTab::fancy(3)]);
+        let [_, _] = tree
+            .main_surface_mut()
+            .split_below(a, 0.7, vec![MyTab::fancy(4)]);
+        let [_, _] = tree
+            .main_surface_mut()
+            .split_below(b, 0.5, vec![MyTab::regular(5)]);
 
         Self {
             dock_state: tree,
@@ -155,14 +147,11 @@ impl eframe::App for MyApp {
                 },
             );
 
-        added_nodes.drain(..).for_each(|node| {
-            self.dock_state.set_focused_node_and_surface(node.path);
+        added_nodes.drain(..).for_each(|request| {
+            self.dock_state.set_focused_node_and_surface(request.path);
             self.dock_state.push_to_focused_leaf(MyTab {
-                kind: node.kind,
-                path: NodePath {
-                    surface: node.path.surface,
-                    node: NodeIndex(self.counter),
-                },
+                kind: request.kind,
+                number: self.counter,
             });
             self.counter += 1;
         });

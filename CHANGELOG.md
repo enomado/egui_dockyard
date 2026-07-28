@@ -2,7 +2,27 @@
 
 ## Unreleased
 
+### Changed
+
+- **Nodes and tabs are now addressed by identity, not by position.** `Tree` stores its
+  nodes in a generational arena: `NodeId` replaces `NodeIndex` (and its `root()` /
+  `left()` / `right()` arithmetic — ask the tree instead: `Tree::root`,
+  `Tree::children`, `Tree::parent`, `Tree::breadth_first`), and `Node::Empty` is gone.
+  Inside a leaf, `TabId` identifies a tab and `active` / `prev_active` hold identities;
+  `TabIndex` remains for positions, which is what the persisted format and the tab bar
+  actually mean. `LeafNode`'s fields are behind accessors so those invariants have one
+  place to live.
+- Removed `WindowState::rect()` and `WindowState::dragged()` together with the fields
+  behind them: nothing ever wrote either, so they answered `Rect::NOTHING` and `false`
+  forever. Window geometry that *is* known comes from `DockLayout`.
+- **Serialized layouts are a recursive tree instead of a heap `Vec`.** Layouts written by
+  earlier versions are still read (both forms are accepted; only the new one is written),
+  and they no longer carry the `Empty` slots that made deeply nested layouts explode.
+
 ### Fixed
+
+- `LeafNode::retain_tabs` no longer leaves the active tab addressing a tab it removed, and
+  keeps the focus history when the tab it names survives.
 
 - Removing the active tab of a leaf (closing it, or moving/detaching it out via
   a split) now restores the tab that was active *before* it, instead of always

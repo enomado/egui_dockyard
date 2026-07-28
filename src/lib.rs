@@ -14,7 +14,7 @@
 //! You show the tabs using [`DockArea`] and specify how they are shown by implementing [`TabViewer`].
 //!
 //! ```rust
-//! use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
+//! use egui_dock::{DockArea, DockState, Style, TabViewer};
 //! use egui::{Ui, WidgetText};
 //!
 //! // First, let's pick a type that we'll use to attach some data to each tab.
@@ -157,7 +157,7 @@
 //! Example:
 //!
 //! ```rust
-//! # use egui_dock::{DockState, NodeIndex};
+//! # use egui_dock::DockState;
 //! // Create a `DockState` with an initial tab "tab1" in the main `Surface`'s root node.
 //! let mut dock_state = DockState::new(vec!["tab1".to_string()]);
 //!
@@ -166,9 +166,11 @@
 //! let surface = dock_state.main_surface_mut();
 //!
 //! // Insert "tab2" to the left of "tab1", where the width of "tab2"
-//! // is 20% of root node's width.
+//! // is 20% of root node's width. Nodes are addressed by identity, so ask the
+//! // surface for the id of its root rather than naming a position.
+//! let root = surface.root().unwrap();
 //! let [_old_node, new_node] =
-//!     surface.split_left(NodeIndex::root(), 0.20, vec!["tab2".to_string()]);
+//!     surface.split_left(root, 0.20, vec!["tab2".to_string()]);
 //!
 //! // Insert "tab3" below "tab2" with both tabs having equal size.
 //! surface.split_below(new_node, 0.5, vec!["tab3".to_string()]);

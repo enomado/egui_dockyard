@@ -2,7 +2,7 @@
 
 use eframe::{NativeOptions, egui};
 use egui_dock::tab_viewer::OnCloseResponse;
-use egui_dock::{DockArea, DockState, NodeIndex, Style};
+use egui_dock::{DockArea, DockState, Style};
 
 fn main() -> eframe::Result<()> {
     let options = NativeOptions::default();
@@ -41,9 +41,10 @@ impl Default for MyApp {
         let mut tree = DockState::new(vec!["tab1".to_owned(), "tab2".to_owned()]);
 
         // You can modify the tree before constructing the dock
-        let [a, b] =
-            tree.main_surface_mut()
-                .split_left(NodeIndex::root(), 0.3, vec!["tab3".to_owned()]);
+        let root = tree.main_surface().root().unwrap();
+        let [a, b] = tree
+            .main_surface_mut()
+            .split_left(root, 0.3, vec!["tab3".to_owned()]);
         let [_, _] = tree
             .main_surface_mut()
             .split_below(a, 0.7, vec!["tab4".to_owned()]);

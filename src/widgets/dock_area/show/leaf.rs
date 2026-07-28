@@ -10,10 +10,9 @@ use egui::{
 use crate::NodePath;
 use crate::dock_area::events::DockEvent;
 use crate::dock_area::tab_removal::{ForcedRemoval, TabRemoval};
-use crate::node::LeafNode;
 use crate::tab_viewer::OnCloseResponse;
 use crate::{
-    DockArea, Node, NodeIndex, Style, SurfaceIndex, TabAddAlign, TabIndex, TabStyle, TabViewer,
+    DockArea, Node, Style, SurfaceIndex, TabAddAlign, TabIndex, TabStyle, TabViewer,
     dock_area::{
         drag_and_drop::{DragData, DragDropState, HoverData, TreeComponent},
         state::State,
@@ -79,16 +78,18 @@ impl<Tab> DockArea<'_, Tab> {
             collapsed,
         );
 
-        let tabs = self.dock_state[path]
-            .tabs_mut()
+        let leaf = self.dock_state[path]
+            .get_leaf_mut()
             .expect("This node must be a leaf here");
-        for (tab_index, tab) in tabs.iter_mut().enumerate() {
-            if tab_viewer.force_close(tab) {
-                self.to_remove.push(TabRemoval::Tab(
-                    (path, TabIndex(tab_index)).into(),
-                    ForcedRemoval(true),
-                ));
-            }
+        let forced: Vec<TabIndex> = leaf
+            .iter_tabs_mut_indexed()
+            .filter_map(|(tab_index, tab)| tab_viewer.force_close(tab).then_some(tab_index))
+            .collect();
+        for tab_index in forced {
+            self.to_remove.push(TabRemoval::Tab(
+                (path, tab_index).into(),
+                ForcedRemoval(true),
+            ));
         }
     }
 
@@ -174,7 +175,7 @@ impl<Tab> DockArea<'_, Tab> {
             let prefered_width = style
                 .tab_bar
                 .fill_tab_bar
-                .then_some(available_width / (leaf.tabs.len() as f32));
+                .then_some(available_width / (leaf.len() as f32));
 
             let tab_hovered = self.tabs(
                 tabs_ui,
@@ -216,14 +217,14 @@ impl<Tab> DockArea<'_, Tab> {
                 let disabled = self
                     .dock_state
                     .leaf_mut(path)
-                    .map(|leaf| !leaf.tabs.iter_mut().all(|tab| tab_viewer.is_closeable(tab)))
+                    .map(|leaf| !leaf.iter_tabs_mut().all(|tab| tab_viewer.is_closeable(tab)))
                     .expect("This node must be a leaf");
 
                 // Current window contains non-closable tabs.
                 let close_window_disabled = disabled
                     || !self.dock_state[path.surface].iter_mut().all(|node| {
                         node.get_leaf_mut().is_none_or(|leaf| {
-                            leaf.tabs.iter_mut().all(|tab| tab_viewer.is_closeable(tab))
+                            leaf.iter_tabs_mut().all(|tab| tab_viewer.is_closeable(tab))
                         })
                     });
 
@@ -275,12 +276,10 @@ impl<Tab> DockArea<'_, Tab> {
         assert!(self.dock_state[path].is_leaf());
 
         let focused = self.dock_state.focused_leaf();
-        let tabs_len = {
-            let tabs = self.dock_state[path]
-                .tabs()
-                .expect("This node must be a leaf here");
-            tabs.len()
-        };
+        let tabs_len = self.dock_state[path]
+            .get_leaf()
+            .expect("This node must be a leaf here")
+            .len();
 
         for tab_index in 0..tabs_len {
             let id = self
@@ -302,12 +301,12 @@ impl<Tab> DockArea<'_, Tab> {
                     .get_leaf_mut()
                     .expect("This node must be a leaf");
                 let style = fade.unwrap_or_else(|| self.style.as_ref().unwrap());
-                let tab_style = tab_viewer.tab_style_override(&leaf.tabs[tab_index.0], &style.tab);
+                let tab_style = tab_viewer.tab_style_override(&leaf[tab_index], &style.tab);
                 (
-                    leaf.active == tab_index || is_being_dragged,
-                    tab_viewer.title(&mut leaf.tabs[tab_index.0]),
+                    leaf.is_active(tab_index) || is_being_dragged,
+                    tab_viewer.title(&mut leaf[tab_index]),
                     tab_style.unwrap_or(style.tab.clone()),
-                    tab_viewer.is_closeable(&leaf.tabs[tab_index.0]),
+                    tab_viewer.is_closeable(&leaf[tab_index]),
                 )
             };
 
@@ -378,10 +377,11 @@ impl<Tab> DockArea<'_, Tab> {
                 let is_lonely_tab = self.dock_state[path.surface].num_tabs() == 1;
 
                 if self.show_tab_name_on_hover {
-                    let tabs = self.dock_state[path]
-                        .tabs_mut()
-                        .expect("This node must be a leaf");
-                    let tab = &mut tabs[tab_index.0];
+                    let tab = self.dock_state[path]
+                        .get_leaf_mut()
+                        .expect("This node must be a leaf")
+                        .tab_at_mut(tab_index)
+                        .expect("this tab was just drawn");
                     response = response.on_hover_ui(|ui| {
                         ui.label(tab_viewer.title(tab));
                     });
@@ -397,7 +397,11 @@ impl<Tab> DockArea<'_, Tab> {
                         let leaf = self.dock_state[path]
                             .get_leaf_mut()
                             .expect("This node must be a leaf");
-                        let tab = &mut leaf.tabs[tab_index.0];
+                        // Read the active flag before borrowing the tab out of the same
+                        // leaf: the two borrows cannot overlap now that tabs are behind
+                        // accessors rather than a public field.
+                        let already_active = leaf.is_active(tab_index);
+                        let tab = &mut leaf[tab_index];
 
                         tab_viewer.context_menu(ui, tab, path);
                         if (path.surface.is_main() || !is_lonely_tab)
@@ -420,7 +424,7 @@ impl<Tab> DockArea<'_, Tab> {
                                     // a no-op close-on-already-active-tab does not
                                     // emit a committed event. The activation itself
                                     // goes through the `prev_active` chokepoint.
-                                    if leaf.active != tab_index {
+                                    if !already_active {
                                         leaf.activate_tab_remembering(tab_index);
                                         self.events.push(DockEvent::LayoutCommitted);
                                     }
@@ -464,7 +468,8 @@ impl<Tab> DockArea<'_, Tab> {
 
             // Paint hline below each tab unless its active (or option says otherwise).
             let leaf = self.dock_state.leaf_mut(path).unwrap();
-            let tab = &mut leaf.tabs[tab_index.0];
+            let already_active = leaf.is_active(tab_index);
+            let tab = &mut leaf[tab_index];
             let style = fade.unwrap_or_else(|| self.style.as_ref().unwrap());
             let tab_style = tab_viewer.tab_style_override(tab, &style.tab);
             let tab_style = tab_style.as_ref().unwrap_or(&style.tab);
@@ -482,9 +487,9 @@ impl<Tab> DockArea<'_, Tab> {
                 || (tabs_ui.memory(|m| m.has_focus(title_id))
                     && tabs_ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Space)))
             {
-                // Reading `leaf.active` is a disjoint-field borrow (fine while
-                // `tab` borrows `leaf.tabs`); the actual mutation is deferred.
-                if leaf.active != tab_index {
+                // The active flag was read before `tab` borrowed the leaf; the
+                // mutation itself is deferred to after that borrow ends.
+                if !already_active {
                     activate_to = Some(tab_index);
                     self.events.push(DockEvent::LayoutCommitted);
                 }
@@ -953,9 +958,9 @@ impl<Tab> DockArea<'_, Tab> {
         } else if surface.root_node().is_some_and(|root| root.is_collapsed()) {
             // Height of the window before collapsing, so expanding restores it. A root
             // that was never laid out has no height to remember.
-            let surface_height = self
-                .layout
-                .rect(NodePath::new(path.surface, NodeIndex::root()))
+            let surface_height = surface
+                .root()
+                .and_then(|root| self.layout.rect(NodePath::new(path.surface, root)))
                 .map_or(0.0, |rect| rect.height());
             if let Some(window_state) = self.dock_state.get_window_state_mut(path.surface) {
                 window_state.set_expanded_height(surface_height);
@@ -1223,8 +1228,7 @@ impl<Tab> DockArea<'_, Tab> {
             .dock_state
             .leaf_mut(path)
             .expect("This node must be a leaf");
-        let LeafNode { tabs, active, .. } = leaf;
-        if !collapsed && let Some(tab) = tabs.get_mut(active.0) {
+        if !collapsed && let Some(tab) = leaf.active_focused() {
             if previous_viewport != Some(body_rect) {
                 self.layout.set_viewport(path, body_rect);
                 tab_viewer.on_rect_changed(tab);
@@ -1321,7 +1325,7 @@ impl<Tab> DockArea<'_, Tab> {
                         if let Node::Leaf(leaf) =
                             &mut self.dock_state[src_path.surface][src_path.node]
                         {
-                            tab_viewer.allowed_in_windows(&mut leaf.tabs[src_path.tab.0])
+                            tab_viewer.allowed_in_windows(&mut leaf[src_path.tab])
                                 || path.surface == SurfaceIndex::main()
                         } else {
                             true
@@ -1362,14 +1366,17 @@ impl<Tab> DockArea<'_, Tab> {
 #[cfg(test)]
 mod tests {
     use super::tab_body_id;
-    use crate::{NodeIndex, NodePath, SurfaceIndex};
+    use crate::{DockState, NodePath, SurfaceIndex};
     use egui::Id;
 
     #[test]
     fn tab_body_ids_differ_between_surfaces() {
         let dock_area_id = Id::new("dock-area");
         let tab_id = Id::new("same-tab");
-        let node = NodeIndex::root();
+        // The same node identity seen through two surfaces must still give two ids: the
+        // surface is part of the address, and ids are only unique within one tree.
+        let dock_state = DockState::new(vec!["a tab"]);
+        let node = dock_state.main_surface().root().unwrap();
 
         let main = NodePath {
             surface: SurfaceIndex::main(),

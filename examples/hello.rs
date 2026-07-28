@@ -9,7 +9,7 @@ use egui::{
     vec2,
 };
 use egui_dock::{
-    AllowedSplits, DockArea, DockState, NodeIndex, NodePath, OverlayType, Style, SurfaceIndex,
+    AllowedSplits, DockArea, DockState, NodePath, OverlayType, Style, SurfaceIndex,
     TabInteractionStyle, TabViewer, tab_viewer::OnCloseResponse,
 };
 
@@ -523,11 +523,11 @@ impl Default for MyApp {
         let mut dock_state =
             DockState::new(vec!["Simple Demo".to_owned(), "Style Editor".to_owned()]);
         "Undock".clone_into(&mut dock_state.translations.tab_context_menu.eject_button);
-        let [a, b] = dock_state.main_surface_mut().split_left(
-            NodeIndex::root(),
-            0.3,
-            vec!["Inspector".to_owned()],
-        );
+        let root = dock_state.main_surface().root().unwrap();
+        let [a, b] =
+            dock_state
+                .main_surface_mut()
+                .split_left(root, 0.3, vec!["Inspector".to_owned()]);
         let [_, _] = dock_state.main_surface_mut().split_below(
             a,
             0.7,
@@ -541,10 +541,8 @@ impl Default for MyApp {
         let mut open_tabs = HashSet::new();
 
         for node in dock_state[SurfaceIndex::main()].iter() {
-            if let Some(tabs) = node.tabs() {
-                for tab in tabs {
-                    open_tabs.insert(tab.clone());
-                }
+            for tab in node.iter_tabs() {
+                open_tabs.insert(tab.clone());
             }
         }
         let context = MyContext {

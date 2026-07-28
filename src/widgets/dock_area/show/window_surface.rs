@@ -4,7 +4,7 @@ use egui::{
 };
 
 use crate::{
-    DockArea, NodeIndex, NodePath, Style, SurfaceIndex, TabViewer,
+    DockArea, NodePath, Style, SurfaceIndex, TabViewer,
     dock_area::{events::DockEvent, state::State, tab_removal::TabRemoval},
     utils::{fade_visuals, rect_set_size_centered},
 };
@@ -45,26 +45,26 @@ impl<Tab> DockArea<'_, Tab> {
             let node_id = self.dock_state[surf_index]
                 .focused_leaf()
                 .unwrap_or_else(|| {
-                    for node_index in self.dock_state[surf_index].breadth_first_index_iter() {
-                        if self.dock_state[surf_index][node_index].is_leaf() {
-                            return node_index;
-                        }
-                    }
-                    unreachable!("a window surface should never be empty")
+                    self.dock_state[surf_index]
+                        .breadth_first()
+                        .into_iter()
+                        .find(|node| self.dock_state[surf_index][*node].is_leaf())
+                        .expect("a window surface should never be empty")
                 });
             let leaf = self.dock_state[surf_index][node_id].get_leaf_mut().unwrap();
+            let active = leaf
+                .active_focused()
+                .expect("a window surface should never hold an empty leaf");
             tab_viewer
-                .title(&mut leaf.tabs[leaf.active.0])
+                .title(active)
                 .color(ui.visuals().widgets.noninteractive.fg_stroke.color)
         };
 
         // Iterate through every node in dock_state[surf_index], and sum up the number of tabs in them
-        let mut tab_count = 0;
-        for node_index in self.dock_state[surf_index].breadth_first_index_iter() {
-            if self.dock_state[surf_index][node_index].is_leaf() {
-                tab_count += self.dock_state[surf_index][node_index].tabs_count();
-            }
-        }
+        let tab_count: usize = self.dock_state[surf_index]
+            .iter()
+            .map(|n| n.tabs_count())
+            .sum();
 
         // Fade window frame (if necessary)
         let mut frame = Frame::window(ui.style());
@@ -275,9 +275,9 @@ impl<Tab> DockArea<'_, Tab> {
         } else {
             // Remember how tall the window was so un-minimizing restores that height. A
             // surface that was never laid out has no height to remember.
-            let surface_height = self
-                .layout
-                .rect(NodePath::new(surf_index, NodeIndex::root()))
+            let surface_height = self.dock_state[surf_index]
+                .root()
+                .and_then(|root| self.layout.rect(NodePath::new(surf_index, root)))
                 .map_or(0.0, |rect| rect.height());
             if let Some(window_state) = self.dock_state.get_window_state_mut(surf_index) {
                 window_state.set_expanded_height(surface_height);

@@ -11,7 +11,7 @@
 //!   reads back as truth;
 //! * they forced `egui` into the model, blocking the core from being egui-free.
 //!
-//! So geometry now lives here, keyed by [`NodePath`] (`surface` + `node`), and is stored
+//! So geometry now lives here, keyed by [`NodePath`] (`surface` + node identity), and is stored
 //! in egui's temporary memory next to the [`DockArea`](crate::DockArea) id rather than in
 //! the [`DockState`](crate::DockState).
 //!
@@ -22,11 +22,13 @@
 //! automation, diagnostics) can ask for the last known geometry:
 //!
 //! ```rust
-//! # use egui_dock::{DockLayout, NodePath};
+//! # use egui_dock::{DockLayout, DockState, NodePath, SurfaceIndex};
 //! # egui::__run_test_ctx(|ctx| {
+//! let dock_state = DockState::new(vec!["a tab"]);
 //! let dock_id = egui::Id::new("egui_dock::DockArea");
 //! let layout = DockLayout::load(ctx, dock_id);
-//! let _rect = layout.rect(NodePath::MAIN_ROOT);
+//! let root = dock_state.main_surface().root().unwrap();
+//! let _rect = layout.rect(NodePath::new(SurfaceIndex::main(), root));
 //! # });
 //! ```
 //!
@@ -146,15 +148,15 @@ impl DockLayout {
 
     /// Forget the geometry of nodes that no longer exist in `dock_state`.
     ///
-    /// Without this the map would grow forever: node indices are positional, so closing
-    /// a tab leaves entries pointing at slots that are now empty (or, worse, reused by an
-    /// unrelated node before the next layout pass overwrites them).
+    /// Keys are identities, so a dead entry can no longer be mistaken for a live node —
+    /// this is now only about not growing forever, which is why it can be a plain
+    /// "is it still there?" question.
     pub(crate) fn retain_live<Tab>(&mut self, dock_state: &DockState<Tab>) {
         self.nodes.retain(|path, _| {
             dock_state
                 .get_surface(path.surface)
                 .and_then(|surface| surface.node_tree())
-                .is_some_and(|tree| path.node.0 < tree.len() && !tree[path.node].is_empty())
+                .is_some_and(|tree| tree.contains(path.node))
         });
     }
 }

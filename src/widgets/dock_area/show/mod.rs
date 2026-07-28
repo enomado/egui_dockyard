@@ -13,8 +13,7 @@ use crate::dock_area::tab_removal::ForcedRemoval;
 use crate::layout::DockLayout;
 use crate::tab_viewer::OnCloseResponse;
 use crate::{
-    AllowedSplits, DockArea, Node, NodeIndex, OverlayType, Style, SurfaceIndex, TabDestination,
-    TabViewer,
+    AllowedSplits, DockArea, Node, OverlayType, Style, SurfaceIndex, TabDestination, TabViewer,
     utils::{expand_to_pixel, fade_dock_style, map_to_pixel},
 };
 
@@ -116,7 +115,7 @@ impl<Tab> DockArea<'_, Tab> {
                         self.events.push(DockEvent::LayoutCommitted);
                     } else {
                         let leaf = &mut self.dock_state.leaf_mut(path.node_path()).unwrap();
-                        match tab_viewer.on_close(&mut leaf.tabs[path.tab.0]) {
+                        match tab_viewer.on_close(&mut leaf[path.tab]) {
                             OnCloseResponse::Close => {
                                 self.dock_state.remove_tab(path);
                                 self.events.push(DockEvent::LayoutCommitted);
@@ -262,7 +261,7 @@ impl<Tab> DockArea<'_, Tab> {
                 let Node::Leaf(leaf) = &mut self.dock_state[path.node_path()] else {
                     unreachable!("tab drags can only come from leaf nodes")
                 };
-                tab_viewer.allowed_in_windows(&mut leaf.tabs[path.tab.0])
+                tab_viewer.allowed_in_windows(&mut leaf[path.tab])
             }
             _ => todo!("collections of tabs, like nodes or surfaces, can't be dragged! (yet)"),
         };
@@ -314,24 +313,23 @@ impl<Tab> DockArea<'_, Tab> {
         surf_index: SurfaceIndex,
         fade_style: Option<(&Style, f32)>,
     ) {
+        // Breadth-first: a node's rectangle is cut out of its parent's, so parents have to
+        // be laid out first. The order is snapshotted once and reused by all three passes;
+        // nothing below changes the shape of the tree.
+        let order = self.dock_state[surf_index].breadth_first();
+
         // First compute all rect sizes in the node graph.
         let max_rect = self.allocate_area_for_root_node(ui, surf_index);
-        for node_index in self.dock_state[surf_index].breadth_first_index_iter() {
-            let path = NodePath {
-                surface: surf_index,
-                node: node_index,
-            };
+        for node in order.iter().copied() {
+            let path = NodePath::new(surf_index, node);
             if self.dock_state[path].is_parent() {
                 self.compute_rect_sizes(ui, path, max_rect);
             }
         }
 
         // Then, draw the bodies of each leaves.
-        for node_index in self.dock_state[surf_index].breadth_first_index_iter() {
-            let path = NodePath {
-                surface: surf_index,
-                node: node_index,
-            };
+        for node in order.iter().copied() {
+            let path = NodePath::new(surf_index, node);
             if self.dock_state[path].is_leaf() {
                 self.show_leaf(ui, state, path, tab_viewer, fade_style);
             }
@@ -340,15 +338,29 @@ impl<Tab> DockArea<'_, Tab> {
         // Finally, draw separators so that their "interaction zone" is above
         // bodies (see `SeparatorStyle::extra_interact_width`).
         let fade_style = fade_style.map(|(style, _)| style);
-        for node_index in self.dock_state[surf_index].breadth_first_index_iter() {
-            let path = NodePath {
-                surface: surf_index,
-                node: node_index,
-            };
-            if self.dock_state[surf_index][node_index].is_parent() {
+        for node in order.iter().copied() {
+            let path = NodePath::new(surf_index, node);
+            if self.dock_state[path].is_parent() {
                 self.show_separator(ui, path, fade_style, state);
             }
         }
+    }
+
+    /// The paths of a split's two children, first (left / top) then second (right / bottom).
+    ///
+    /// # Panics
+    ///
+    /// If `path` does not name a split.
+    #[track_caller]
+    fn child_paths(&self, path: NodePath) -> [NodePath; 2] {
+        let [left, right] = self.dock_state[path]
+            .get_split()
+            .expect("only a split has children")
+            .children();
+        [
+            NodePath::new(path.surface, left),
+            NodePath::new(path.surface, right),
+        ]
     }
 
     fn allocate_area_for_root_node(&mut self, ui: &mut Ui, surface: SurfaceIndex) -> Rect {
@@ -371,11 +383,10 @@ impl<Tab> DockArea<'_, Tab> {
         }
         ui.allocate_rect(rect, Sense::hover());
 
-        if self.dock_state[surface].is_empty() {
+        let Some(root) = self.dock_state[surface].root() else {
             return rect;
-        }
-        self.layout
-            .set_rect(NodePath::new(surface, NodeIndex::root()), rect);
+        };
+        self.layout.set_rect(NodePath::new(surface, root), rect);
         rect
     }
 
@@ -385,10 +396,11 @@ impl<Tab> DockArea<'_, Tab> {
         let style = self.style.as_ref().unwrap();
         let pixels_per_point = ui.ctx().pixels_per_point();
 
-        let left_collapsed_count = self.dock_state[path.left_node()].collapsed_leaf_count();
-        let right_collapsed_count = self.dock_state[path.right_node()].collapsed_leaf_count();
-        let left_collapsed = self.dock_state[path.left_node()].is_collapsed();
-        let right_collapsed = self.dock_state[path.right_node()].is_collapsed();
+        let [left_path, right_path] = self.child_paths(path);
+        let left_collapsed_count = self.dock_state[left_path].collapsed_leaf_count();
+        let right_collapsed_count = self.dock_state[right_path].collapsed_leaf_count();
+        let left_collapsed = self.dock_state[left_path].is_collapsed();
+        let right_collapsed = self.dock_state[right_path].is_collapsed();
 
         // The parent's rectangle was written either by `allocate_area_for_root_node` (for
         // the root) or by this same function when its own parent was visited — the
@@ -424,8 +436,8 @@ impl<Tab> DockArea<'_, Tab> {
                 let right = rect
                     .intersect(Rect::everything_below(right_separator_border))
                     .intersect(max_rect);
-                self.layout.set_rect(path.left_node(), left);
-                self.layout.set_rect(path.right_node(), right);
+                self.layout.set_rect(left_path, left);
+                self.layout.set_rect(right_path, right);
             } else {
                 // Only right collapsed
                 let border_y = rect.max.y - (right_collapsed_count as f32) * style.tab_bar.height;
@@ -445,8 +457,8 @@ impl<Tab> DockArea<'_, Tab> {
                 let right = rect
                     .intersect(Rect::everything_below(right_separator_border))
                     .intersect(max_rect);
-                self.layout.set_rect(path.left_node(), left);
-                self.layout.set_rect(path.right_node(), right);
+                self.layout.set_rect(left_path, left);
+                self.layout.set_rect(right_path, right);
             }
             return;
         }
@@ -488,8 +500,8 @@ impl<Tab> DockArea<'_, Tab> {
                     let right = rect.intersect(Rect::[<everything_ right_of>](right_separator_border)).intersect(max_rect);
                 }
 
-                self.layout.set_rect(path.left_node(), left);
-                self.layout.set_rect(path.right_node(), right);
+                self.layout.set_rect(left_path, left);
+                self.layout.set_rect(right_path, right);
             }
         }
     }
@@ -504,9 +516,9 @@ impl<Tab> DockArea<'_, Tab> {
         assert!(self.dock_state[path.surface][path.node].is_parent());
 
         // If either of the children is collapsed, we don't want the user to interact with the separator
-        if (self.dock_state[path.left_node()].is_collapsed()
-            || self.dock_state[path.right_node()].is_collapsed())
-            && self.dock_state[path.surface][path.node].is_vertical()
+        let [left_path, right_path] = self.child_paths(path);
+        if (self.dock_state[left_path].is_collapsed() || self.dock_state[right_path].is_collapsed())
+            && self.dock_state[path].is_vertical()
         {
             return;
         }

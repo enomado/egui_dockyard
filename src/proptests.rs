@@ -1,29 +1,34 @@
 //! Property tests: random sequences of tree operations must keep the tree well-formed.
 //!
 //! The oracle is [`Tree::validate`](crate::Tree::validate). Unit tests pin down the cases
-//! somebody thought of; these cover the ones nobody did, which is where the tree's positional
-//! indices tend to bite — every structural operation renumbers nodes, so an operation that
-//! forgets to shift an index produces a tree that still *type-checks* and still renders, just
-//! with a subtree quietly detached or an active tab pointing at the wrong place.
+//! somebody thought of; these cover the ones nobody did — historically the place where the
+//! tree's positional indices bit, since every structural operation renumbered nodes and an
+//! operation that forgot to shift an index produced a tree that still *type-checked* and still
+//! rendered, just with a subtree quietly detached or an active tab pointing at the wrong place.
 //!
-//! Two families of assertions:
+//! Three families of assertions:
 //!
 //! * **structure** — `validate()` after every single operation, so a failure names the operation
 //!   that broke it rather than the end of the sequence;
 //! * **conservation** — operations that are not supposed to destroy anything must not change the
-//!   total number of tabs. Without this, a "well-formed" empty tree would pass happily.
+//!   total number of tabs. Without this, a "well-formed" empty tree would pass happily;
+//! * **identity** — a node id taken before an operation still names the same node afterwards,
+//!   unless that operation was about that node. This is the property the arena exists for, and
+//!   the one the heap representation could not have.
 
 use proptest::prelude::*;
 
+use std::collections::HashMap;
+
 use crate::{
-    DockState, Node, NodeIndex, NodePath, Split, SurfaceIndex, TabIndex, TabInsert, TabPath, Tree,
+    DockState, Node, NodeId, NodePath, Split, SurfaceIndex, TabIndex, TabInsert, TabPath, Tree,
 };
 
 /// One operation applied to the dock state.
 ///
-/// Leaves are addressed as "the k-th live leaf" rather than by `NodeIndex`: node indices are
-/// positions in an implicit heap and are renumbered by every split, so a generated `NodeIndex`
-/// would mostly miss. `k` is taken modulo the number of live leaves at apply time.
+/// Leaves are addressed as "the k-th live leaf" rather than by id: ids cannot be generated out
+/// of thin air (they are handed out by the arena), so the operation picks one at apply time.
+/// `k` is taken modulo the number of live leaves.
 #[derive(Clone, Copy, Debug)]
 enum Op {
     Split {
@@ -82,11 +87,19 @@ fn op_strategy() -> impl Strategy<Value = Op> {
     ]
 }
 
-/// Live (non-`Empty`) leaves of the main surface, in slot order.
-fn live_leaves<Tab>(tree: &Tree<Tab>) -> Vec<NodeIndex> {
-    tree.iter()
-        .enumerate()
-        .filter_map(|(index, node)| matches!(node, Node::Leaf(_)).then_some(NodeIndex(index)))
+/// Live leaves of the main surface, in tree order.
+fn live_leaves<Tab>(tree: &Tree<Tab>) -> Vec<NodeId> {
+    tree.breadth_first()
+        .into_iter()
+        .filter(|id| tree[*id].is_leaf())
+        .collect()
+}
+
+/// Tabs of every live leaf, keyed by identity. The snapshot the identity property compares.
+fn leaf_contents(tree: &Tree<u32>) -> HashMap<NodeId, Vec<u32>> {
+    live_leaves(tree)
+        .into_iter()
+        .map(|id| (id, tree.leaf(id).unwrap().iter_tabs().copied().collect()))
         .collect()
 }
 
@@ -99,9 +112,10 @@ fn split_from(index: usize) -> Split {
     }
 }
 
-/// Applies one operation. Returns `false` if it could not be applied at all (e.g. the tree has
-/// no leaves left) — such a step is skipped rather than counted as a pass.
-fn apply(dock_state: &mut DockState<u32>, op: Op, next_tab: &mut u32) -> bool {
+/// Applies one operation. Returns `None` if it could not be applied at all (e.g. the tree has
+/// no leaves left) — such a step is skipped rather than counted as a pass. Otherwise returns
+/// the leaves the operation was *about*, which is what the identity property excludes.
+fn apply(dock_state: &mut DockState<u32>, op: Op, next_tab: &mut u32) -> Option<Vec<NodeId>> {
     let main = SurfaceIndex::main();
     let leaves = live_leaves(dock_state.main_surface());
     if leaves.is_empty() {
@@ -110,12 +124,18 @@ fn apply(dock_state: &mut DockState<u32>, op: Op, next_tab: &mut u32) -> bool {
             let tab = *next_tab;
             *next_tab += 1;
             dock_state.main_surface_mut().push_to_focused_leaf(tab);
-            return true;
+            return Some(
+                dock_state
+                    .main_surface()
+                    .focused_leaf()
+                    .into_iter()
+                    .collect(),
+            );
         }
-        return false;
+        return None;
     }
 
-    match op {
+    let touched = match op {
         Op::Split { leaf, split, tabs } => {
             let node = leaves[leaf % leaves.len()];
             let new_tabs: Vec<u32> = (0..tabs)
@@ -125,28 +145,31 @@ fn apply(dock_state: &mut DockState<u32>, op: Op, next_tab: &mut u32) -> bool {
                     tab
                 })
                 .collect();
-            let _ = dock_state.main_surface_mut().split(
+            let [_, new] = dock_state.main_surface_mut().split(
                 node,
                 split_from(split),
                 0.5,
                 Node::leaf_with(new_tabs),
             );
+            vec![node, new]
         }
 
         Op::RemoveLeaf { leaf } => {
             let node = leaves[leaf % leaves.len()];
             dock_state.main_surface_mut().remove_leaf(node);
+            vec![node]
         }
 
         Op::RemoveTab { leaf, tab } => {
             let node = leaves[leaf % leaves.len()];
             let tab_count = dock_state.main_surface()[node].tabs_count();
             if tab_count == 0 {
-                return false;
+                return None;
             }
             let _ = dock_state
                 .main_surface_mut()
                 .remove_tab((node, TabIndex(tab % tab_count)));
+            vec![node]
         }
 
         Op::MoveTab {
@@ -160,7 +183,7 @@ fn apply(dock_state: &mut DockState<u32>, op: Op, next_tab: &mut u32) -> bool {
             let src_count = dock_state.main_surface()[src_node].tabs_count();
             let dst_count = dock_state.main_surface()[dst_node].tabs_count();
             if src_count == 0 {
-                return false;
+                return None;
             }
             let src = TabPath::new(main, src_node, TabIndex(src_tab % src_count));
             let dst_path = NodePath {
@@ -179,32 +202,41 @@ fn apply(dock_state: &mut DockState<u32>, op: Op, next_tab: &mut u32) -> bool {
                 _ => TabInsert::Insert(TabIndex(0)),
             };
             dock_state.move_tab(src, (dst_path, insert));
+            vec![src_node, dst_node]
         }
 
         Op::SetActive { leaf, tab } => {
             let node = leaves[leaf % leaves.len()];
             let tab_count = dock_state.main_surface()[node].tabs_count();
             if tab_count == 0 {
-                return false;
+                return None;
             }
             let _ = dock_state
                 .main_surface_mut()
                 .set_active_tab(node, TabIndex(tab % tab_count));
+            // Which tab is open does not change *which tabs are there*.
+            vec![]
         }
 
         Op::Focus { leaf } => {
             let node = leaves[leaf % leaves.len()];
             dock_state.main_surface_mut().set_focused_node(node);
+            vec![]
         }
 
         Op::PushToFocused => {
             let tab = *next_tab;
             *next_tab += 1;
             dock_state.main_surface_mut().push_to_focused_leaf(tab);
+            dock_state
+                .main_surface()
+                .focused_leaf()
+                .into_iter()
+                .collect()
         }
-    }
+    };
 
-    true
+    Some(touched)
 }
 
 proptest! {
@@ -218,7 +250,7 @@ proptest! {
         prop_assert_eq!(dock_state.validate(), Ok(()), "the initial state must be well-formed");
 
         for (step, op) in ops.into_iter().enumerate() {
-            if !apply(&mut dock_state, op, &mut next_tab) {
+            if apply(&mut dock_state, op, &mut next_tab).is_none() {
                 continue;
             }
             prop_assert_eq!(
@@ -242,7 +274,7 @@ proptest! {
 
         for (step, op) in ops.into_iter().enumerate() {
             let before = dock_state.main_surface().num_tabs();
-            if !apply(&mut dock_state, op, &mut next_tab) {
+            if apply(&mut dock_state, op, &mut next_tab).is_none() {
                 continue;
             }
             let after = dock_state.main_surface().num_tabs();
@@ -264,6 +296,38 @@ proptest! {
                     after <= before,
                     "a destructive op must not invent tabs (step {})", step
                 ),
+            }
+        }
+    }
+
+    /// A node id keeps naming the same node across operations that are not about it.
+    ///
+    /// This is the property the whole arena exists for, and the one the previous
+    /// representation could not satisfy: there, a split renumbered every node after the
+    /// split point, so an id held across it addressed a different node — silently, and only
+    /// sometimes, which is why the two bugs it caused took so long to pin down.
+    #[test]
+    fn ids_keep_naming_the_same_node(ops in prop::collection::vec(op_strategy(), 1..24)) {
+        let mut dock_state = DockState::new(vec![0u32, 1, 2]);
+        let mut next_tab = 3u32;
+
+        for (step, op) in ops.into_iter().enumerate() {
+            let before = leaf_contents(dock_state.main_surface());
+            let Some(touched) = apply(&mut dock_state, op, &mut next_tab) else {
+                continue;
+            };
+            let after = leaf_contents(dock_state.main_surface());
+
+            for (id, tabs) in &before {
+                if touched.contains(id) {
+                    continue;
+                }
+                if let Some(now) = after.get(id) {
+                    prop_assert_eq!(
+                        now, tabs,
+                        "{:?} at step {} changed the tabs of an unrelated leaf {}", op, step, id
+                    );
+                }
             }
         }
     }

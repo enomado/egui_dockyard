@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
 use eframe::{NativeOptions, egui};
-use egui_dock::{DockArea, DockState, NodeIndex, Style};
+use egui_dock::{DockArea, DockState, Style};
 
 fn main() -> eframe::Result<()> {
     let options = NativeOptions::default();
@@ -73,8 +73,9 @@ impl Default for MyApp {
         ]);
 
         // You can modify the tree before constructing the dock
+        let root = tree.main_surface().root().unwrap();
         let [a, _] = tree.main_surface_mut().split_right(
-            NodeIndex::root(),
+            root,
             0.6,
             vec![OpinionatedTab {
                 can_become_window: Ok(true),

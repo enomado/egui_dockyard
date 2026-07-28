@@ -1,4 +1,4 @@
-use crate::core::geom::{Point, Rect, Size};
+use crate::core::geom::{Point, Size};
 
 /// The state of a [`Surface::Window`](crate::Surface::Window).
 ///
@@ -11,12 +11,6 @@ use crate::core::geom::{Point, Rect, Size};
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct WindowState {
-    /// The [`Rect`] that this window was last taking up.
-    screen_rect: Option<Rect>,
-
-    /// Was this window dragged in the last frame?
-    dragged: bool,
-
     /// The next position this window should be set to next frame.
     next_position: Option<Point>,
 
@@ -37,8 +31,6 @@ pub struct WindowState {
 impl Default for WindowState {
     fn default() -> Self {
         Self {
-            screen_rect: None,
-            dragged: false,
             next_position: None,
             next_size: None,
             expanded_height: None,
@@ -64,20 +56,6 @@ impl WindowState {
     pub fn set_size(&mut self, size: Size) -> &mut Self {
         self.next_size = Some(size);
         self
-    }
-
-    /// Get the [`Rect`] which this window occupies.
-    /// If this window hasn't been shown before, this will be [`Rect::NOTHING`].
-    pub fn rect(&self) -> Rect {
-        // The reason why we're unwrapping an Option with a default value instead of
-        // just storing Rect::NOTHING for the None variant is that deserializing Rect::NOTHING
-        // with serde_json causes a panic, because f32::INFINITY serializes into null in JSON.
-        self.screen_rect.unwrap_or(Rect::NOTHING)
-    }
-
-    /// Returns if this window is currently being dragged or not.
-    pub fn dragged(&self) -> bool {
-        self.dragged
     }
 
     /// Set the height of this window when it is expanded.

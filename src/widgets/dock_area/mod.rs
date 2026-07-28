@@ -9,13 +9,15 @@ mod drag_and_drop;
 mod events;
 mod state;
 mod tab_removal;
+mod window_ui;
 
 pub use allowed_splits::AllowedSplits;
 use egui::{Id, Modifiers, emath::*};
 pub use events::{DockAreaResponse, DockEvent};
 use tab_removal::TabRemoval;
 
-use crate::{NodePath, Style, TabIndex, TabPath, dock_state::DockState};
+use crate::layout::DockLayout;
+use crate::{NodePath, Style, TabIndex, TabPath, core::DockState};
 
 /// Displays a [`DockState`] in `egui`.
 pub struct DockArea<'tree, Tab> {
@@ -43,6 +45,13 @@ pub struct DockArea<'tree, Tab> {
     to_detach: Vec<TabPath>,
     new_focused: Option<NodePath>,
     tab_hover_rect: Option<(Rect, TabIndex)>,
+    /// Geometry of every node, recomputed by the layout pass each frame.
+    ///
+    /// Loaded from egui memory at the start of the pass (so the previous frame's values
+    /// are available — the tab body needs them to tell whether its viewport moved) and
+    /// stored back at the end, where consumers outside the frame can read it via
+    /// [`DockLayout::load`].
+    layout: DockLayout,
     /// Events accumulated during this render pass, drained into
     /// [`DockAreaResponse::events`] at the end of `show_inside_with_response`.
     events: Vec<DockEvent>,
@@ -68,6 +77,7 @@ impl<'tree, Tab> DockArea<'tree, Tab> {
             to_detach: Vec::new(),
             new_focused: None,
             tab_hover_rect: None,
+            layout: DockLayout::default(),
             events: Vec::new(),
             window_bounds: None,
             show_window_close_buttons: true,

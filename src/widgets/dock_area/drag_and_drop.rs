@@ -192,8 +192,9 @@ impl DragDropState {
             .min((rect.height() - total_button_spacing) / 3.0)
             .min(style.overlay.max_button_size);
 
-        let mut destination: Option<TabDestination> = windows_allowed
-            .then(|| TabDestination::Window(Rect::from_min_size(pointer, self.drag.rect.size())));
+        let mut destination: Option<TabDestination> = windows_allowed.then(|| {
+            TabDestination::Window(Rect::from_min_size(pointer, self.drag.rect.size()).into())
+        });
 
         let center = rect.center();
         let rect = Rect::from_center_size(center, Vec2::splat(shortest_side));
@@ -245,7 +246,7 @@ impl DragDropState {
         };
         self.update_lock(target_lock_state, style, ui.ctx());
         if let Some(TabDestination::Window(rect)) = destination {
-            let rect = self.window_preview_rect(rect);
+            let rect = self.window_preview_rect(rect.into());
             let rect_bounded = constrain_rect_to_area(ui, rect, window_bounds);
             draw_window_rect(rect_bounded, ui, style);
         }
@@ -345,8 +346,9 @@ impl DragDropState {
             }
         };
 
-        let default_value = windows_allowed
-            .then(|| TabDestination::Window(Rect::from_min_size(pointer, self.drag.rect.size())));
+        let default_value = windows_allowed.then(|| {
+            TabDestination::Window(Rect::from_min_size(pointer, self.drag.rect.size()).into())
+        });
         let final_result = tab_insertion.map_or(default_value, |tab| match self.hover.dst {
             TreeComponent::Surface(surface) => Some(TabDestination::EmptySurface(surface)),
             TreeComponent::Node(path) => Some(TabDestination::Node(path, tab)),
@@ -358,7 +360,7 @@ impl DragDropState {
         // Draw the overlay
         match final_result {
             Some(TabDestination::Window(rect)) => {
-                let rect = self.window_preview_rect(rect);
+                let rect = self.window_preview_rect(rect.into());
                 let rect_bounded = constrain_rect_to_area(ui, rect, window_bounds);
                 draw_window_rect(rect_bounded, ui, style);
             }

@@ -10,6 +10,7 @@ use super::{
 };
 use crate::NodePath;
 use crate::dock_area::tab_removal::ForcedRemoval;
+use crate::layout::DockLayout;
 use crate::tab_viewer::OnCloseResponse;
 use crate::{
     AllowedSplits, DockArea, Node, NodeIndex, OverlayType, Style, SurfaceIndex, TabDestination,
@@ -43,6 +44,10 @@ impl<Tab> DockArea<'_, Tab> {
         self.window_bounds.get_or_insert(ui.ctx().content_rect());
 
         let mut state = State::load(ui.ctx(), self.id);
+        // Last frame's geometry: the layout pass below overwrites every live node, but
+        // the tab body compares against the previous viewport to decide whether to call
+        // `TabViewer::on_rect_changed`, so we start from what was there.
+        self.layout = DockLayout::load(ui.ctx(), self.id);
 
         // Delay hover position one frame. On touch screens hover_pos() is None when any_released()
         if !ui.input(|i| i.pointer.any_released()) {
@@ -162,14 +167,15 @@ impl<Tab> DockArea<'_, Tab> {
 
         for path in self.to_detach.drain(..).rev() {
             let mouse_pos = state.last_hover_pos;
+            // The detached window inherits the size of the node the tab came from; a
+            // node that was never laid out (nothing to inherit) gets a default size.
+            let size = self
+                .layout
+                .rect(path.node_path())
+                .map_or(Vec2::new(100., 150.), |rect| rect.size());
             self.dock_state.detach_tab(
                 path,
-                Rect::from_min_size(
-                    mouse_pos.unwrap_or(Pos2::ZERO),
-                    self.dock_state[path.node_path()]
-                        .rect()
-                        .map_or(Vec2::new(100., 150.), |rect| rect.size()),
-                ),
+                Rect::from_min_size(mouse_pos.unwrap_or(Pos2::ZERO), size).into(),
             );
             self.events.push(DockEvent::LayoutCommitted);
         }
@@ -188,6 +194,11 @@ impl<Tab> DockArea<'_, Tab> {
         }
 
         state.store(ui.ctx(), self.id);
+        // Drop geometry of nodes that this pass removed (closed tabs, collapsed splits)
+        // before publishing, so out-of-frame readers never see a rectangle for a node
+        // that no longer exists.
+        self.layout.retain_live(self.dock_state);
+        std::mem::take(&mut self.layout).store(ui.ctx(), self.id);
         DockAreaResponse {
             events: std::mem::take(&mut self.events),
         }
@@ -363,7 +374,8 @@ impl<Tab> DockArea<'_, Tab> {
         if self.dock_state[surface].is_empty() {
             return rect;
         }
-        self.dock_state[surface][NodeIndex::root()].set_rect(rect);
+        self.layout
+            .set_rect(NodePath::new(surface, NodeIndex::root()), rect);
         rect
     }
 
@@ -378,10 +390,18 @@ impl<Tab> DockArea<'_, Tab> {
         let left_collapsed = self.dock_state[path.left_node()].is_collapsed();
         let right_collapsed = self.dock_state[path.right_node()].is_collapsed();
 
+        // The parent's rectangle was written either by `allocate_area_for_root_node` (for
+        // the root) or by this same function when its own parent was visited — the
+        // breadth-first order of the caller guarantees it is already there.
+        let parent_rect = self
+            .layout
+            .rect(path)
+            .expect("a parent node must have been laid out before its children");
+
         if (left_collapsed || right_collapsed)
-            && let Node::Vertical(split) = &mut self.dock_state[path.surface][path.node]
+            && self.dock_state[path.surface][path.node].is_vertical()
         {
-            let rect = split.rect();
+            let rect = parent_rect;
             debug_assert!(!rect.any_nan() && rect.is_finite());
             let rect = expand_to_pixel(rect, pixels_per_point);
 
@@ -404,8 +424,8 @@ impl<Tab> DockArea<'_, Tab> {
                 let right = rect
                     .intersect(Rect::everything_below(right_separator_border))
                     .intersect(max_rect);
-                self.dock_state[path.left_node()].set_rect(left);
-                self.dock_state[path.right_node()].set_rect(right);
+                self.layout.set_rect(path.left_node(), left);
+                self.layout.set_rect(path.right_node(), right);
             } else {
                 // Only right collapsed
                 let border_y = rect.max.y - (right_collapsed_count as f32) * style.tab_bar.height;
@@ -425,8 +445,8 @@ impl<Tab> DockArea<'_, Tab> {
                 let right = rect
                     .intersect(Rect::everything_below(right_separator_border))
                     .intersect(max_rect);
-                self.dock_state[path.left_node()].set_rect(left);
-                self.dock_state[path.right_node()].set_rect(right);
+                self.layout.set_rect(path.left_node(), left);
+                self.layout.set_rect(path.right_node(), right);
             }
             return;
         }
@@ -437,14 +457,17 @@ impl<Tab> DockArea<'_, Tab> {
                 [Horizontal]  [x]        [width]   [left_of]  [right_of];
                 [Vertical]    [y]        [height]  [above]    [below];
             ]
-            if let Node::orientation(split) = &mut self.dock_state[path.surface][path.node] {
-                let rect = split.rect;
+            // Copy the fraction out before touching `self.layout`: holding a borrow of
+            // the node while writing the geometry map would borrow `self` twice.
+            if let Node::orientation(split) = &self.dock_state[path.surface][path.node] {
+                let fraction = split.fraction;
+                let rect = parent_rect;
                 debug_assert!(!rect.any_nan() && rect.is_finite());
                 let rect = expand_to_pixel(rect, pixels_per_point);
 
                 let dim_size = rect.dim_size();
                 let midpoint = if dim_size > 0.0 {
-                    rect.min.dim_point + dim_size * split.fraction
+                    rect.min.dim_point + dim_size * fraction
                 } else {
                     rect.min.dim_point
                 };
@@ -465,8 +488,8 @@ impl<Tab> DockArea<'_, Tab> {
                     let right = rect.intersect(Rect::[<everything_ right_of>](right_separator_border)).intersect(max_rect);
                 }
 
-                self.dock_state[path.left_node()].set_rect(left);
-                self.dock_state[path.right_node()].set_rect(right);
+                self.layout.set_rect(path.left_node(), left);
+                self.layout.set_rect(path.right_node(), right);
             }
         }
     }
@@ -491,6 +514,13 @@ impl<Tab> DockArea<'_, Tab> {
         let style = fade_style.unwrap_or_else(|| self.style.as_ref().unwrap());
         let pixels_per_point = ui.ctx().pixels_per_point();
 
+        // Separators are drawn after the layout pass has run over every parent of this
+        // surface, so the geometry map is guaranteed to know this node.
+        let node_rect = self
+            .layout
+            .rect(path)
+            .expect("a separator is only drawn for a node that was just laid out");
+
         duplicate! {
             [
                 orientation   dim_point  dim_size;
@@ -498,7 +528,7 @@ impl<Tab> DockArea<'_, Tab> {
                 [Vertical]    [y]        [height];
             ]
             if let Node::orientation(split) = &mut self.dock_state[path.surface][path.node] {
-                let rect = split.rect;
+                let rect = node_rect;
                 let mut separator = rect;
 
                 let midpoint = rect.min.dim_point + rect.dim_size() * split.fraction;

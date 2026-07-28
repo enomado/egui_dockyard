@@ -31,7 +31,6 @@ use std::{
     slice::{Iter, IterMut},
 };
 
-use egui::Rect;
 pub use node::LeafNode;
 pub use node::Node;
 pub use node::SplitNode;
@@ -40,6 +39,7 @@ pub use tab_index::{TabIndex, TabPath};
 pub use tab_iter::TabIter;
 pub use validate::{SurfaceViolation, TreeViolation};
 
+use crate::core::geom::Rect;
 use crate::{Error, Result, SurfaceIndex};
 
 // ----------------------------------------------------------------------------
@@ -183,15 +183,15 @@ impl<Tab> Tree<Tab> {
         }
     }
 
-    /// Returns the viewport [`Rect`] and the `Tab` inside the first leaf node,
-    /// or `None` if no leaf exists in the [`Tree`].
+    /// Returns the active `Tab` inside the first leaf node, or `None` if no leaf exists
+    /// in the [`Tree`].
+    ///
+    /// Used to return the viewport rectangle alongside the tab; geometry now lives in
+    /// [`DockLayout`](crate::layout::DockLayout).
     #[inline]
-    pub fn find_active(&mut self) -> Option<(Rect, &mut Tab)> {
+    pub fn find_active(&mut self) -> Option<&mut Tab> {
         self.nodes.iter_mut().find_map(|node| match node {
-            Node::Leaf(leaf) => leaf
-                .tabs
-                .get_mut(leaf.active.0)
-                .map(|tab| (leaf.viewport.to_owned(), tab)),
+            Node::Leaf(leaf) => leaf.tabs.get_mut(leaf.active.0),
             _ => None,
         })
     }
@@ -580,9 +580,12 @@ impl<Tab> Tree<Tab> {
         }
     }
 
-    /// Returns the viewport [`Rect`] and the `Tab` inside the focused leaf node or [`None`] if it does not exist.
+    /// Returns the active `Tab` inside the focused leaf node or [`None`] if it does not exist.
+    ///
+    /// Used to return the viewport rectangle alongside the tab; geometry now lives in
+    /// [`DockLayout`](crate::layout::DockLayout).
     #[inline]
-    pub fn find_active_focused(&mut self) -> Option<(Rect, &mut Tab)> {
+    pub fn find_active_focused(&mut self) -> Option<&mut Tab> {
         match self.focused_node.and_then(|idx| self.nodes.get_mut(idx.0)) {
             Some(Node::Leaf(leaf)) => leaf.active_focused(),
             _ => None,

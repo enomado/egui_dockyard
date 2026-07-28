@@ -1,8 +1,13 @@
-use egui::{Id, Pos2, Rect, Vec2};
+use crate::core::geom::{Point, Rect, Size};
 
 /// The state of a [`Surface::Window`](crate::Surface::Window).
 ///
 /// Doubles as a handle for the surface, allowing the user to set its size and position.
+///
+/// Deliberately egui-free: window placement is *state* (the user dragged the window
+/// there; nothing recomputes it per frame), so it stays in the core. Turning this state
+/// into an actual `egui::Window` is the renderer's job — see
+/// `crate::widgets::dock_area::window_ui::create_window`.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct WindowState {
@@ -13,10 +18,10 @@ pub struct WindowState {
     dragged: bool,
 
     /// The next position this window should be set to next frame.
-    next_position: Option<Pos2>,
+    next_position: Option<Point>,
 
     /// The next size this window should be set to next frame.
-    next_size: Option<Vec2>,
+    next_size: Option<Size>,
 
     /// The height of the window before it was fully collapsed
     expanded_height: Option<f32>,
@@ -50,13 +55,13 @@ impl WindowState {
     }
 
     /// Set the position for this window in screen coordinates.
-    pub fn set_position(&mut self, position: Pos2) -> &mut Self {
+    pub fn set_position(&mut self, position: Point) -> &mut Self {
         self.next_position = Some(position);
         self
     }
 
     /// Set the size of this window in egui points.
-    pub fn set_size(&mut self, size: Vec2) -> &mut Self {
+    pub fn set_size(&mut self, size: Size) -> &mut Self {
         self.next_size = Some(size);
         self
     }
@@ -89,12 +94,17 @@ impl WindowState {
     }
 
     #[inline(always)]
-    pub(crate) fn next_position(&mut self) -> Option<Pos2> {
+    pub(crate) fn is_new(&self) -> bool {
+        self.new
+    }
+
+    #[inline(always)]
+    pub(crate) fn next_position(&mut self) -> Option<Point> {
         self.next_position.take()
     }
 
     #[inline(always)]
-    pub(crate) fn next_size(&mut self) -> Option<Vec2> {
+    pub(crate) fn next_size(&mut self) -> Option<Size> {
         self.next_size.take()
     }
 
@@ -111,27 +121,5 @@ impl WindowState {
     #[inline(always)]
     pub(crate) fn is_minimized(&self) -> bool {
         self.minimized
-    }
-
-    //the 'static in this case means that the `open` field is always `None`
-    pub(crate) fn create_window(&mut self, id: Id, bounds: Rect) -> egui::Window<'static> {
-        let new = self.new;
-        let mut window_constructor = egui::Window::new("")
-            .id(id)
-            .constrain_to(bounds)
-            .title_bar(false);
-
-        if let Some(position) = self.next_position() {
-            window_constructor = window_constructor.current_pos(position);
-        }
-        if let Some(size) = self.next_size() {
-            window_constructor = window_constructor.fixed_size(size);
-        }
-        // Reset the height of the window if it is now expanded
-        if new && let Some(height) = self.expanded_height() {
-            window_constructor = window_constructor.max_height(height).min_height(height);
-        }
-        self.new = false;
-        window_constructor
     }
 }

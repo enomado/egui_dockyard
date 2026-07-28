@@ -132,15 +132,17 @@
 //!
 //! ```rust
 //! # use egui_dock::DockState;
-//! # use egui::{Pos2, Vec2};
+//! # use egui_dock::geom::{Point, Size};
 //! # let mut dock_state = DockState::new(vec![]);
 //! // Create a new window `Surface` with one tab inside it.
 //! let mut surface_index = dock_state.add_window(vec!["Window Tab".to_string()]);
 //!
 //! // Access the window state by its surface index and then move and resize it.
+//! // Window placement is state, so it is expressed in the core's own egui-free
+//! // geometry types (which convert to and from `egui::Pos2` / `Vec2`).
 //! let window_state = dock_state.get_window_state_mut(surface_index).unwrap();
-//! window_state.set_position(Pos2::ZERO);
-//! window_state.set_size(Vec2::splat(100.0));
+//! window_state.set_position(Point::ZERO);
+//! window_state.set_size(Size::new(100.0, 100.0));
 //! ```
 //!
 //! For more details, see: [`DockState`].
@@ -235,15 +237,27 @@
 #![forbid(unsafe_code)]
 
 #[allow(deprecated)]
-pub use dock_state::*;
+pub use crate::core::*;
 pub use egui;
+pub use layout::{DockLayout, NodeGeometry};
 pub use style::*;
 pub use translations::*;
 pub use tree::*;
 pub use widgets::*;
 
-/// The main structure of the library.
-pub mod dock_state;
+/// The model: dock state, trees, nodes and the operations over them.
+///
+/// This module is deliberately **free of `egui`** — it is the part of the crate that can
+/// be reasoned about, property-tested and fuzzed without a UI. The rule is enforced by
+/// `tests/core_is_egui_free.rs`, not by convention. Anything that needs `egui` belongs in
+/// [`widgets`] (rendering) or [`layout`] (per-frame geometry).
+///
+/// Note the name: refer to it as `crate::core` inside this crate, never as bare `core`,
+/// which would collide with the standard `core` crate.
+pub mod core;
+
+/// Per-frame geometry of a dock tree — derived data, deliberately outside the model.
+pub mod layout;
 
 /// Look and feel.
 pub mod style;

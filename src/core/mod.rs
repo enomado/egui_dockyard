@@ -1,9 +1,10 @@
 use std::ops;
 
-use egui::Rect;
-
 mod error;
 pub use error::{Error, Result};
+
+/// Geometry value types owned by the core model (egui-free).
+pub mod geom;
 
 /// Wrapper around indices to the collection of surfaces inside a [`DockState`].
 pub mod surface_index;
@@ -21,6 +22,8 @@ pub use surface::Surface;
 pub use surface_index::SurfaceIndex;
 use tree::node::LeafNode;
 pub use window_state::WindowState;
+
+use crate::core::geom::{Rect, Size};
 
 use crate::{
     Node, NodeIndex, NodePath, Split, TabDestination, TabIndex, TabInsert, TabPath, Translations,
@@ -145,13 +148,13 @@ impl<Tab> DockState<Tab> {
     ///
     /// ```rust
     /// # use egui_dock::DockState;
-    /// # use egui::{Vec2, Pos2};
+    /// # use egui_dock::geom::{Point, Size};
     /// let mut dock_state = DockState::new(vec![]);
     /// let mut surface_index = dock_state.add_window(vec!["Window Tab".to_string()]);
     /// let window_state = dock_state.get_window_state_mut(surface_index).unwrap();
     ///
-    /// window_state.set_position(Pos2::ZERO);
-    /// window_state.set_size(Vec2::splat(100.0));
+    /// window_state.set_position(Point::ZERO);
+    /// window_state.set_size(Size::new(100.0, 100.0));
     /// ```
     pub fn get_window_state_mut(&mut self, surface: SurfaceIndex) -> Option<&mut WindowState> {
         match &mut self.surfaces[surface.0] {
@@ -170,9 +173,14 @@ impl<Tab> DockState<Tab> {
         }
     }
 
-    /// Returns the viewport [`Rect`] and the `Tab` inside the focused leaf node or `None` if no node is in focus.
+    /// Returns the active `Tab` inside the focused leaf node or `None` if no node is in focus.
+    ///
+    /// Used to return the viewport rectangle alongside the tab; geometry now lives in
+    /// [`DockLayout`](crate::layout::DockLayout), which is keyed by `(surface, node)`
+    /// and can be queried for the focused leaf via
+    /// [`focused_leaf`](Tree::focused_leaf).
     #[inline]
-    pub fn find_active_focused(&mut self) -> Option<(Rect, &mut Tab)> {
+    pub fn find_active_focused(&mut self) -> Option<&mut Tab> {
         self.focused_surface
             .and_then(|surface| self[surface].find_active_focused())
     }
@@ -346,13 +354,18 @@ impl<Tab> DockState<Tab> {
         let tab = self[src.node_path()].remove_tab(src.tab).unwrap();
         let surface_index = self.add_window(vec![tab]);
 
-        // Set the window size and position to match `window_rect`.
+        // Set the window size and position to match `window_rect`. This *is* state:
+        // where the user dropped the tab decides where the window opens, and nothing
+        // recomputes it later.
         let state = self.get_window_state_mut(surface_index).unwrap();
         state.set_position(window_rect.min);
+        let size = window_rect.size();
         if src.surface.is_main() {
-            state.set_size(window_rect.size() * 0.8);
+            // Detaching out of the main surface shrinks the window a little so it does
+            // not exactly cover the area it came from.
+            state.set_size(Size::new(size.x * 0.8, size.y * 0.8));
         } else {
-            state.set_size(window_rect.size());
+            state.set_size(size);
         }
 
         // Clean up any empty leaves and surfaces which may be left behind from the detachment.

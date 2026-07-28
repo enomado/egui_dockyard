@@ -1,5 +1,3 @@
-use egui::Rect;
-
 use crate::{Split, TabIndex};
 
 mod leaf;
@@ -51,30 +49,6 @@ impl<Tab> Node<Tab> {
     #[inline(always)]
     pub const fn leaf_with(tabs: Vec<Tab>) -> Self {
         Self::Leaf(LeafNode::new(tabs))
-    }
-
-    /// Sets the area occupied by the node.
-    ///
-    /// If the node is a ``Node::Empty``, this will do nothing.
-    #[inline]
-    pub fn set_rect(&mut self, new_rect: Rect) {
-        match self {
-            Self::Empty => (),
-            Self::Leaf(leaf) => leaf.set_rect(new_rect),
-            Self::Vertical(split) | Self::Horizontal(split) => split.set_rect(new_rect),
-        }
-    }
-
-    /// Get a [`Rect`] occupied by the node, could be used e.g. to draw a highlight rect around a node.
-    ///
-    /// Returns [`None`] if node is of the [`Empty`](Node::Empty) variant.
-    #[inline]
-    pub fn rect(&self) -> Option<Rect> {
-        match self {
-            Self::Empty => None,
-            Self::Leaf(leaf) => Some(leaf.rect()),
-            Self::Vertical(split) | Self::Horizontal(split) => Some(split.rect()),
-        }
     }
 
     /// Returns `true` if the node is a [`Empty`](Node::Empty), otherwise `false`.
@@ -133,8 +107,8 @@ impl<Tab> Node<Tab> {
         }
     }
 
-    /// Replaces the node with [`Horizontal`](Node::Horizontal) or [`Vertical`](Node::Vertical) (depending on `split`)
-    /// and assigns an empty rect to it.
+    /// Replaces the node with [`Horizontal`](Node::Horizontal) or [`Vertical`](Node::Vertical)
+    /// (depending on `split`), returning the old node.
     ///
     /// # Panics
     ///
@@ -142,16 +116,13 @@ impl<Tab> Node<Tab> {
     #[inline]
     pub fn split(&mut self, split: Split, fraction: f32) -> Self {
         assert!((0.0..=1.0).contains(&fraction));
-        let rect = Rect::NOTHING;
         let src = match split {
             Split::Left | Split::Right => Node::Horizontal(SplitNode::new(
-                rect,
                 fraction,
                 self.is_collapsed(),
                 self.collapsed_leaf_count(),
             )),
             Split::Above | Split::Below => Node::Vertical(SplitNode::new(
-                rect,
                 fraction,
                 self.is_collapsed(),
                 self.collapsed_leaf_count(),
@@ -216,7 +187,7 @@ impl<Tab> Node<Tab> {
     pub fn iter_tabs(&self) -> impl Iterator<Item = &Tab> {
         match self.tabs() {
             Some(tabs) => tabs.iter(),
-            None => core::slice::Iter::default(),
+            None => std::slice::Iter::default(),
         }
     }
 
@@ -234,7 +205,7 @@ impl<Tab> Node<Tab> {
     pub fn iter_tabs_mut(&mut self) -> impl Iterator<Item = &mut Tab> {
         match self.tabs_mut() {
             Some(tabs) => tabs.iter_mut(),
-            None => core::slice::IterMut::default(),
+            None => std::slice::IterMut::default(),
         }
     }
 
@@ -345,8 +316,6 @@ impl<Tab> Node<Tab> {
         match self {
             Node::Leaf(leaf) => {
                 let LeafNode {
-                    rect,
-                    viewport,
                     tabs,
                     active,
                     // Filtering can drop arbitrary tabs, invalidating the
@@ -361,8 +330,6 @@ impl<Tab> Node<Tab> {
                     Node::Empty
                 } else {
                     Node::Leaf(LeafNode {
-                        rect: *rect,
-                        viewport: *viewport,
                         tabs,
                         active: *active,
                         prev_active: None,

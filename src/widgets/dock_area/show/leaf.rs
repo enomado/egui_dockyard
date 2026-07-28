@@ -37,9 +37,11 @@ impl<Tab> DockArea<'_, Tab> {
         assert!(self.dock_state[path].is_leaf());
         let collapsed = self.dock_state[path].is_collapsed();
 
-        let rect = self.dock_state[path]
-            .rect()
-            .expect("This node must be a leaf");
+        // The layout pass has just assigned this leaf its rectangle; a leaf with no entry
+        // was never laid out, which means there is nothing to draw.
+        let Some(rect) = self.layout.rect(path) else {
+            return;
+        };
 
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
             return;
@@ -347,7 +349,7 @@ impl<Tab> DockArea<'_, Tab> {
                                 self.id.with("drag_data"),
                                 Some(DragData {
                                     src: TreeComponent::Tab((path, tab_index).into()),
-                                    rect: self.dock_state[path].rect().unwrap(),
+                                    rect: self.layout.rect(path).unwrap(),
                                 }),
                             );
                         });
@@ -949,12 +951,12 @@ impl<Tab> DockArea<'_, Tab> {
                 window_state.set_new(true);
             }
         } else if surface.root_node().is_some_and(|root| root.is_collapsed()) {
-            let root_index = NodeIndex::root();
-            let surface_height = if surface.root_node().is_some() {
-                surface[root_index].rect().unwrap().height()
-            } else {
-                0.0
-            };
+            // Height of the window before collapsing, so expanding restores it. A root
+            // that was never laid out has no height to remember.
+            let surface_height = self
+                .layout
+                .rect(NodePath::new(path.surface, NodeIndex::root()))
+                .map_or(0.0, |rect| rect.height());
             if let Some(window_state) = self.dock_state.get_window_state_mut(path.surface) {
                 window_state.set_expanded_height(surface_height);
             }
@@ -1206,20 +1208,25 @@ impl<Tab> DockArea<'_, Tab> {
         let (body_rect, _body_response) =
             ui.allocate_exact_size(ui.available_size_before_wrap(), Sense::hover());
 
+        // The leaf's own rectangle (tab bar plus body) — assigned by the layout pass
+        // earlier this frame, and used further below for hover hit-testing.
+        let rect = self
+            .layout
+            .rect(path)
+            .expect("the body of a leaf is only drawn after the leaf was laid out");
+        // What the body rectangle was on the previous frame: `TabViewer::on_rect_changed`
+        // must fire exactly when it moves, so the comparison needs the old value before
+        // this frame's is recorded.
+        let previous_viewport = self.layout.viewport(path);
+
         let leaf = self
             .dock_state
             .leaf_mut(path)
             .expect("This node must be a leaf");
-        let LeafNode {
-            rect,
-            viewport,
-            tabs,
-            active,
-            ..
-        } = leaf;
+        let LeafNode { tabs, active, .. } = leaf;
         if !collapsed && let Some(tab) = tabs.get_mut(active.0) {
-            if *viewport != body_rect {
-                *viewport = body_rect;
+            if previous_viewport != Some(body_rect) {
+                self.layout.set_viewport(path, body_rect);
                 tab_viewer.on_rect_changed(tab);
             }
 

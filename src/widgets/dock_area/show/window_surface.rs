@@ -4,7 +4,7 @@ use egui::{
 };
 
 use crate::{
-    DockArea, NodeIndex, Style, SurfaceIndex, TabViewer,
+    DockArea, NodeIndex, NodePath, Style, SurfaceIndex, TabViewer,
     dock_area::{events::DockEvent, state::State, tab_removal::TabRemoval},
     utils::{fade_visuals, rect_set_size_centered},
 };
@@ -22,11 +22,11 @@ impl<Tab> DockArea<'_, Tab> {
         let id = format!("window {surf_index:?}").into();
         let bounds = self.window_bounds.unwrap();
         let open = true;
-        let window = self
-            .dock_state
-            .get_window_state_mut(surf_index)
-            .unwrap()
-            .create_window(id, bounds);
+        let window = crate::dock_area::window_ui::create_window(
+            self.dock_state.get_window_state_mut(surf_index).unwrap(),
+            id,
+            bounds,
+        );
 
         // Calculate fading of the window (if any)
         let (fade_factor, fade_style) = match fade_style {
@@ -273,12 +273,12 @@ impl<Tab> DockArea<'_, Tab> {
                 window_state.toggle_minimized();
             }
         } else {
-            let root_index = NodeIndex::root();
-            let surface_height = if surface.root_node().is_some() {
-                surface[root_index].rect().unwrap().height()
-            } else {
-                0.0
-            };
+            // Remember how tall the window was so un-minimizing restores that height. A
+            // surface that was never laid out has no height to remember.
+            let surface_height = self
+                .layout
+                .rect(NodePath::new(surf_index, NodeIndex::root()))
+                .map_or(0.0, |rect| rect.height());
             if let Some(window_state) = self.dock_state.get_window_state_mut(surf_index) {
                 window_state.set_expanded_height(surface_height);
                 window_state.toggle_minimized();

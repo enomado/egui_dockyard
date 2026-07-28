@@ -1,19 +1,17 @@
 use std::ops;
 
-use egui::Rect;
-
 use crate::{Error, Result, TabIndex};
 
 /// The inner data of a [``Node::Leaf``](crate::Node), which contains tabs and can be collapsed.
+///
+/// Carries no geometry: both the full rectangle (tab bar plus body) and the body-only
+/// viewport are derived by the layout pass every frame and live in
+/// [`DockLayout`](crate::layout::DockLayout), keyed by `(surface, node)`. Everything
+/// left in this struct is genuine state — which tabs, in which order, which one is
+/// active, and how the tab bar is scrolled.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct LeafNode<Tab> {
-    /// The full rectangle - tab bar plus tab body.
-    pub rect: Rect,
-
-    /// The tab body rectangle.
-    pub viewport: Rect,
-
     /// All the tabs in this node.
     pub tabs: Vec<Tab>,
 
@@ -58,8 +56,6 @@ impl<Tab> LeafNode<Tab> {
     /// Create New LeafNode with specified ``tabs``, all other internal values will be filled by "nothing" defaults.
     pub const fn new(tabs: Vec<Tab>) -> Self {
         LeafNode {
-            rect: Rect::NOTHING,
-            viewport: Rect::NOTHING,
             tabs,
             active: TabIndex(0),
             prev_active: None,
@@ -98,12 +94,6 @@ impl<Tab> LeafNode<Tab> {
         }
     }
 
-    /// Set the area this [`LeafNode`] Occupies on screen.
-    #[inline]
-    pub fn set_rect(&mut self, new_rect: Rect) {
-        self.rect = new_rect;
-    }
-
     /// Get the length of tab list in this [`LeafNode`].
     pub fn len(&self) -> usize {
         self.tabs.len()
@@ -112,11 +102,6 @@ impl<Tab> LeafNode<Tab> {
     /// Returns `true` when the [`LeafNode`] contains no tabs.
     pub fn is_empty(&self) -> bool {
         self.tabs.is_empty()
-    }
-
-    /// Get a [`Rect`] representing the area this [`LeafNode`] occupies on screen.
-    pub fn rect(&self) -> Rect {
-        self.rect
     }
 
     /// Get immutable access to the ``Tab``s of this [`LeafNode`]
@@ -224,14 +209,16 @@ impl<Tab> LeafNode<Tab> {
         self.prev_active = None;
     }
 
-    /// Return the area and tab which is currently representing this [`LeafNode`]
+    /// Return the tab which is currently representing this [`LeafNode`].
     ///
     /// This may return ``None`` if the leaf contains 0 tabs.
+    ///
+    /// Used to return the viewport rectangle alongside the tab; geometry now comes from
+    /// [`DockLayout`](crate::layout::DockLayout) instead, so callers that need it ask
+    /// the layout map for the same `(surface, node)`.
     #[inline]
-    pub fn active_focused(&mut self) -> Option<(Rect, &mut Tab)> {
-        self.tabs
-            .get_mut(self.active.0)
-            .map(|tab| (self.viewport, tab))
+    pub fn active_focused(&mut self) -> Option<&mut Tab> {
+        self.tabs.get_mut(self.active.0)
     }
 }
 

@@ -11,8 +11,8 @@ mod state;
 mod tab_removal;
 
 pub use allowed_splits::AllowedSplits;
-pub use events::{DockAreaResponse, DockEvent};
 use egui::{Id, Modifiers, emath::*};
+pub use events::{DockAreaResponse, DockEvent};
 use tab_removal::TabRemoval;
 
 use crate::{NodePath, Style, TabIndex, TabPath, dock_state::DockState};

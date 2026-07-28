@@ -252,3 +252,6 @@ pub mod style;
 pub mod widgets;
 
 mod utils;
+
+#[cfg(test)]
+mod proptests;

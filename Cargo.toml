@@ -33,6 +33,7 @@ eframe = { version = "0.35", default-features = false, features = [
     "glow",
 ] }
 serde_json = { version = "1" }
+proptest = { version = "1" }
 
 [[example]]
 name = "save_load_dock_state"

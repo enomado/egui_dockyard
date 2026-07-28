@@ -1,0 +1,1012 @@
+(
+        surfaces: [
+            Main((
+                nodes: [
+                    Horizontal((
+                        rect: (
+                            min: (
+                                x: 0.0,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 871.375,
+                                y: 875.875,
+                            ),
+                        ),
+                        fraction: 0.5545336,
+                        fully_collapsed: false,
+                        collapsed_leaf_count: 0,
+                    )),
+                    Horizontal((
+                        rect: (
+                            min: (
+                                x: 0.0,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 482.72726,
+                                y: 875.875,
+                            ),
+                        ),
+                        fraction: 0.5056497,
+                        fully_collapsed: false,
+                        collapsed_leaf_count: 0,
+                    )),
+                    Horizontal((
+                        rect: (
+                            min: (
+                                x: 484.0909,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 871.375,
+                                y: 875.875,
+                            ),
+                        ),
+                        fraction: 0.4929577,
+                        fully_collapsed: false,
+                        collapsed_leaf_count: 0,
+                    )),
+                    Horizontal((
+                        rect: (
+                            min: (
+                                x: 0.0,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 243.63635,
+                                y: 875.875,
+                            ),
+                        ),
+                        fraction: 0.46202528,
+                        fully_collapsed: false,
+                        collapsed_leaf_count: 0,
+                    )),
+                    Horizontal((
+                        rect: (
+                            min: (
+                                x: 244.54546,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 482.72726,
+                                y: 875.875,
+                            ),
+                        ),
+                        fraction: 0.5,
+                        fully_collapsed: false,
+                        collapsed_leaf_count: 0,
+                    )),
+                    Horizontal((
+                        rect: (
+                            min: (
+                                x: 484.0909,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 674.5454,
+                                y: 875.875,
+                            ),
+                        ),
+                        fraction: 0.5,
+                        fully_collapsed: false,
+                        collapsed_leaf_count: 0,
+                    )),
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 675.90906,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 871.375,
+                                y: 875.875,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 675.90625,
+                                y: 48.0,
+                            ),
+                            max: (
+                                x: 871.375,
+                                y: 875.875,
+                            ),
+                        ),
+                        tabs: ["t0"],
+                        active: (0),
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
+                    Horizontal((
+                        rect: (
+                            min: (
+                                x: 0.0,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 112.27273,
+                                y: 875.875,
+                            ),
+                        ),
+                        fraction: 0.5,
+                        fully_collapsed: false,
+                        collapsed_leaf_count: 0,
+                    )),
+                    Vertical((
+                        rect: (
+                            min: (
+                                x: 113.181816,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 243.63635,
+                                y: 875.875,
+                            ),
+                        ),
+                        fraction: 0.36228484,
+                        fully_collapsed: false,
+                        collapsed_leaf_count: 0,
+                    )),
+                    Horizontal((
+                        rect: (
+                            min: (
+                                x: 244.54546,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 363.18182,
+                                y: 875.875,
+                            ),
+                        ),
+                        fraction: 0.31808507,
+                        fully_collapsed: false,
+                        collapsed_leaf_count: 0,
+                    )),
+                    Horizontal((
+                        rect: (
+                            min: (
+                                x: 364.0909,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 482.72726,
+                                y: 875.875,
+                            ),
+                        ),
+                        fraction: 0.366304,
+                        fully_collapsed: false,
+                        collapsed_leaf_count: 0,
+                    )),
+                    Horizontal((
+                        rect: (
+                            min: (
+                                x: 484.0909,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 578.63635,
+                                y: 875.875,
+                            ),
+                        ),
+                        fraction: 0.5,
+                        fully_collapsed: false,
+                        collapsed_leaf_count: 0,
+                    )),
+                    Horizontal((
+                        rect: (
+                            min: (
+                                x: 580.0,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 674.5454,
+                                y: 875.875,
+                            ),
+                        ),
+                        fraction: 0.58908045,
+                        fully_collapsed: false,
+                        collapsed_leaf_count: 0,
+                    )),
+                    Empty,
+                    Empty,
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 0.0,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 55.454544,
+                                y: 875.875,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 0.0,
+                                y: 55.5,
+                            ),
+                            max: (
+                                x: 55.46875,
+                                y: 875.875,
+                            ),
+                        ),
+                        tabs: ["t0"],
+                        active: (0),
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 56.81818,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 112.27273,
+                                y: 875.875,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 56.8125,
+                                y: 55.5,
+                            ),
+                            max: (
+                                x: 112.28125,
+                                y: 875.875,
+                            ),
+                        ),
+                        tabs: ["t0", "t1"],
+                        active: (1),
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 113.181816,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 243.63635,
+                                y: 331.81818,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 113.1875,
+                                y: 55.5,
+                            ),
+                            max: (
+                                x: 243.65625,
+                                y: 331.8125,
+                            ),
+                        ),
+                        tabs: ["t0", "t1", "t2", "t3"],
+                        active: (0),
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
+                    Vertical((
+                        rect: (
+                            min: (
+                                x: 113.181816,
+                                y: 332.72726,
+                            ),
+                            max: (
+                                x: 243.63635,
+                                y: 875.875,
+                            ),
+                        ),
+                        fraction: 0.5,
+                        fully_collapsed: false,
+                        collapsed_leaf_count: 0,
+                    )),
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 244.54546,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 281.81818,
+                                y: 875.875,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 244.53125,
+                                y: 55.5,
+                            ),
+                            max: (
+                                x: 281.8125,
+                                y: 875.875,
+                            ),
+                        ),
+                        tabs: ["t0"],
+                        active: (0),
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
+                    Horizontal((
+                        rect: (
+                            min: (
+                                x: 282.72726,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 363.18182,
+                                y: 875.875,
+                            ),
+                        ),
+                        fraction: 0.5,
+                        fully_collapsed: false,
+                        collapsed_leaf_count: 0,
+                    )),
+                    Horizontal((
+                        rect: (
+                            min: (
+                                x: 364.0909,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 407.2727,
+                                y: 875.875,
+                            ),
+                        ),
+                        fraction: 0.5102041,
+                        fully_collapsed: false,
+                        collapsed_leaf_count: 0,
+                    )),
+                    Horizontal((
+                        rect: (
+                            min: (
+                                x: 408.18182,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 482.72726,
+                                y: 875.875,
+                            ),
+                        ),
+                        fraction: 0.34949568,
+                        fully_collapsed: false,
+                        collapsed_leaf_count: 0,
+                    )),
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 484.0909,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 530.90906,
+                                y: 875.875,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 484.09375,
+                                y: 55.5,
+                            ),
+                            max: (
+                                x: 530.90625,
+                                y: 875.875,
+                            ),
+                        ),
+                        tabs: ["t0"],
+                        active: (0),
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 531.8182,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 578.63635,
+                                y: 875.875,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 531.8125,
+                                y: 55.5,
+                            ),
+                            max: (
+                                x: 578.625,
+                                y: 875.875,
+                            ),
+                        ),
+                        tabs: ["t0"],
+                        active: (0),
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 580.0,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 635.0,
+                                y: 875.875,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 580.0,
+                                y: 55.5,
+                            ),
+                            max: (
+                                x: 635.0,
+                                y: 875.875,
+                            ),
+                        ),
+                        tabs: ["t0"],
+                        active: (0),
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
+                    Vertical((
+                        rect: (
+                            min: (
+                                x: 636.36365,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 674.5454,
+                                y: 875.875,
+                            ),
+                        ),
+                        fraction: 0.5,
+                        fully_collapsed: false,
+                        collapsed_leaf_count: 0,
+                    )),
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 113.181816,
+                                y: 332.72726,
+                            ),
+                            max: (
+                                x: 243.63635,
+                                y: 603.63635,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 113.1875,
+                                y: 364.21875,
+                            ),
+                            max: (
+                                x: 243.65625,
+                                y: 603.625,
+                            ),
+                        ),
+                        tabs: ["t0", "t1"],
+                        active: (0),
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 113.181816,
+                                y: 605.0,
+                            ),
+                            max: (
+                                x: 243.63635,
+                                y: 875.875,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 113.1875,
+                                y: 636.5,
+                            ),
+                            max: (
+                                x: 243.65625,
+                                y: 875.875,
+                            ),
+                        ),
+                        tabs: ["t0", "t1"],
+                        active: (1),
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
+                    Empty,
+                    Empty,
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 282.72726,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 322.2727,
+                                y: 875.875,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 282.71875,
+                                y: 55.5,
+                            ),
+                            max: (
+                                x: 322.28125,
+                                y: 875.875,
+                            ),
+                        ),
+                        tabs: ["t0"],
+                        active: (0),
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 323.63635,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 363.18182,
+                                y: 875.875,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 323.625,
+                                y: 55.5,
+                            ),
+                            max: (
+                                x: 363.1875,
+                                y: 875.875,
+                            ),
+                        ),
+                        tabs: ["t0"],
+                        active: (0),
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 364.0909,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 385.45453,
+                                y: 875.875,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 364.09375,
+                                y: 55.5,
+                            ),
+                            max: (
+                                x: 385.46875,
+                                y: 875.875,
+                            ),
+                        ),
+                        tabs: ["t0"],
+                        active: (0),
+                        scroll: -0.0,
+                        collapsed: false,
+                    )),
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 386.81818,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 407.2727,
+                                y: 875.875,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 386.8125,
+                                y: 55.5,
+                            ),
+                            max: (
+                                x: 407.28125,
+                                y: 875.875,
+                            ),
+                        ),
+                        tabs: ["t0"],
+                        active: (0),
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 408.18182,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 433.63635,
+                                y: 875.875,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 408.1875,
+                                y: 55.5,
+                            ),
+                            max: (
+                                x: 433.65625,
+                                y: 875.875,
+                            ),
+                        ),
+                        tabs: ["t0"],
+                        active: (0),
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
+                    Vertical((
+                        rect: (
+                            min: (
+                                x: 434.54544,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 482.72726,
+                                y: 875.875,
+                            ),
+                        ),
+                        fraction: 0.5594679,
+                        fully_collapsed: false,
+                        collapsed_leaf_count: 0,
+                    )),
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 636.36365,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 674.5454,
+                                y: 449.0909,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 636.375,
+                                y: 55.5,
+                            ),
+                            max: (
+                                x: 674.5625,
+                                y: 449.09375,
+                            ),
+                        ),
+                        tabs: ["t0"],
+                        active: (0),
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 636.36365,
+                                y: 450.45453,
+                            ),
+                            max: (
+                                x: 674.5454,
+                                y: 875.875,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 636.375,
+                                y: 481.96875,
+                            ),
+                            max: (
+                                x: 674.5625,
+                                y: 875.875,
+                            ),
+                        ),
+                        tabs: ["t0"],
+                        active: (0),
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 434.54544,
+                                y: 24.0,
+                            ),
+                            max: (
+                                x: 482.72726,
+                                y: 500.0,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 434.53125,
+                                y: 55.5,
+                            ),
+                            max: (
+                                x: 482.71875,
+                                y: 500.0,
+                            ),
+                        ),
+                        tabs: ["t0"],
+                        active: (0),
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
+                    Leaf((
+                        rect: (
+                            min: (
+                                x: 434.54544,
+                                y: 500.9091,
+                            ),
+                            max: (
+                                x: 482.72726,
+                                y: 875.875,
+                            ),
+                        ),
+                        viewport: (
+                            min: (
+                                x: 434.53125,
+                                y: 532.40625,
+                            ),
+                            max: (
+                                x: 482.71875,
+                                y: 875.875,
+                            ),
+                        ),
+                        tabs: ["t0", "t1"],
+                        active: (1),
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                    Empty,
+                ],
+                focused_node: Some((93)),
+                collapsed: false,
+                collapsed_leaf_count: 0,
+            )),
+        ],
+        focused_surface: Some((0)),
+        translations: (
+            tab_context_menu: (
+                close_button: "Close",
+                eject_button: "Eject",
+            ),
+            leaf: (
+                close_button_disabled_tooltip: "This leaf contains non-closable tabs.",
+                close_all_button: "Close window",
+                close_all_button_menu_hint: "Right click to close this window.",
+                close_all_button_modifier_hint: "Press modifier keys (Shift by default) to close this window.",
+                close_all_button_modifier_menu_hint: "Press modifier keys (Shift by default) or right click to close this window.",
+                close_all_button_disabled_tooltip: "This window contains non-closable tabs.",
+                minimize_button: "Minimize window",
+                minimize_button_menu_hint: "Right click to minimize this window.",
+                minimize_button_modifier_hint: "Press modifier keys (Shift by default) to minimize this window.",
+                minimize_button_modifier_menu_hint: "Press modifier keys (Shift by default) or right click to minimize this window.",
+            ),
+        ),
+    )

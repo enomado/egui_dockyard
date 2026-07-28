@@ -261,8 +261,18 @@ impl<Tab> Tree<Tab> {
         id
     }
 
-    /// Builds a subtree of the current form, returning the id it got.
-    fn build(&mut self, node: NodeIn<Tab>) -> NodeId {
+    /// Builds a subtree of the current form.
+    ///
+    /// Returns `None` when nothing of the subtree survives. That happens for a leaf holding no
+    /// tabs: an empty leaf below the root is not a state the in-memory tree allows (removing
+    /// the last tab collapses the leaf), so a file describing one is repaired on the way in
+    /// rather than turned into a tree that fails its own invariants. A split left with a
+    /// single surviving child is replaced by that child — the same repair the pre-arena
+    /// reader already applies to a split that lost one.
+    ///
+    /// The root leaf is the documented exception (an empty dock is legitimate), and it is
+    /// handled by the caller, which never routes it through here.
+    fn build(&mut self, node: NodeIn<Tab>) -> Option<NodeId> {
         let vertical = matches!(node, NodeIn::Vertical { .. });
         match node {
             NodeIn::Leaf {
@@ -272,8 +282,10 @@ impl<Tab> Tree<Tab> {
                 scroll,
                 collapsed,
             } => {
-                let leaf = LeafNode::from_persisted(tabs, active, prev_active, scroll, collapsed);
-                self.adopt(Node::Leaf(leaf))
+                if tabs.is_empty() {
+                    return None;
+                }
+                Some(self.build_leaf(tabs, active, prev_active, scroll, collapsed))
             }
             NodeIn::Vertical {
                 fraction,
@@ -290,15 +302,32 @@ impl<Tab> Tree<Tab> {
                 let [left, right] = children;
                 let left = self.build(*left);
                 let right = self.build(*right);
-                self.adopt_split(
-                    vertical,
-                    [left, right],
-                    fraction,
-                    fully_collapsed,
-                    collapsed_leaf_count,
-                )
+                match (left, right) {
+                    (Some(left), Some(right)) => Some(self.adopt_split(
+                        vertical,
+                        [left, right],
+                        fraction,
+                        fully_collapsed,
+                        collapsed_leaf_count,
+                    )),
+                    (Some(only), None) | (None, Some(only)) => Some(only),
+                    (None, None) => None,
+                }
             }
         }
+    }
+
+    /// Adopts a leaf exactly as the file describes it, empty or not.
+    fn build_leaf(
+        &mut self,
+        tabs: Vec<Tab>,
+        active: TabIndex,
+        prev_active: Option<TabIndex>,
+        scroll: f32,
+        collapsed: bool,
+    ) -> NodeId {
+        let leaf = LeafNode::from_persisted(tabs, active, prev_active, scroll, collapsed);
+        self.adopt(Node::Leaf(leaf))
     }
 
     /// Builds a subtree of the pre-arena heap, starting at heap position `index`.
@@ -326,8 +355,13 @@ impl<Tab> Tree<Tab> {
                     scroll,
                     collapsed,
                 } = leaf;
-                let leaf = LeafNode::from_persisted(tabs, active, prev_active, scroll, collapsed);
-                self.adopt(Node::Leaf(leaf))
+                // Same repair as in the current form: an empty leaf anywhere but at the root
+                // is a state the tree does not allow, so it is dropped and its parent split
+                // collapses onto the surviving sibling below.
+                if tabs.is_empty() && index != 0 {
+                    return None;
+                }
+                self.build_leaf(tabs, active, prev_active, scroll, collapsed)
             }
             LegacyNode::Vertical(split) | LegacyNode::Horizontal(split) => {
                 let vertical = vertical_split;
@@ -380,7 +414,19 @@ impl<'de, Tab: Deserialize<'de>> Deserialize<'de> for Tree<Tab> {
         match root {
             // Current form.
             Some(root) => {
-                tree.root = Some(tree.build(root));
+                tree.root = match root {
+                    // A leaf at the root may legitimately be empty — that is an empty dock,
+                    // and the only place `validate` allows one — so it bypasses the pruning
+                    // that `build` applies below the root.
+                    NodeIn::Leaf {
+                        tabs,
+                        active,
+                        prev_active,
+                        scroll,
+                        collapsed,
+                    } => Some(tree.build_leaf(tabs, active, prev_active, scroll, collapsed)),
+                    split => tree.build(split),
+                };
                 tree.focused_node = focused.and_then(|path| tree.walk(&path));
             }
             // Pre-arena form. An absent `root` and an empty `nodes` both mean "no tree",
@@ -409,9 +455,61 @@ impl<'de, Tab: Deserialize<'de>> Deserialize<'de> for Tree<Tab> {
     }
 }
 
+// ----------------------------------------------------------------------------
+// The dock around the trees
+//
+// A `DockState` is a vector of surfaces plus an index into it, and both halves can arrive
+// broken from a file: the index may name a surface that is not there (or a hole), and the
+// vector may not carry a main surface at all. Neither is a state the running dock tolerates —
+// indexing a surface, `main_surface()` and `focused_leaf()` all resolve those without
+// checking — so reading is hand-written and repairs them, the same way tree reading above
+// repairs a split that lost a child.
+
+#[derive(Deserialize)]
+#[serde(bound(deserialize = "Tab: Deserialize<'de>"))]
+struct DockIn<Tab> {
+    surfaces: Vec<crate::Surface<Tab>>,
+    #[serde(default = "none")]
+    focused_surface: Option<crate::SurfaceIndex>,
+}
+
+impl<'de, Tab: Deserialize<'de>> Deserialize<'de> for crate::DockState<Tab> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let DockIn {
+            mut surfaces,
+            focused_surface,
+        } = DockIn::deserialize(deserializer)?;
+
+        // The main surface is the one that must be there. An empty *tree* is a legitimate
+        // empty dock; an absent surface is not, it is a panic on the next frame.
+        match surfaces.first() {
+            None => surfaces.push(crate::Surface::Main(Tree::default())),
+            Some(crate::Surface::Empty) => surfaces[0] = crate::Surface::Main(Tree::default()),
+            Some(_) => {}
+        }
+
+        // Focus into a surface that the file does not actually contain is dropped, exactly as
+        // a focus route that leads nowhere is dropped inside a tree: "nothing is focused" is a
+        // state the dock already has.
+        let focused_surface = focused_surface.filter(|surface| {
+            surfaces
+                .get(surface.0)
+                .is_some_and(|surface| !surface.is_empty())
+        });
+
+        // Translations are `#[serde(skip)]` on the way out and are not state a layout carries;
+        // a freshly read dock gets the defaults, as it did under the derived impl.
+        Ok(crate::DockState {
+            surfaces,
+            focused_surface,
+            translations: crate::Translations::default(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{Node, Split, TabIndex, Tree};
+    use crate::{DockState, Node, Split, SurfaceIndex, TabIndex, Tree};
 
     fn shape(tree: &Tree<String>) -> Vec<(usize, Vec<String>)> {
         tree.breadth_first()
@@ -597,5 +695,149 @@ mod tests {
         let back: Tree<String> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.focused_leaf(), None);
         assert_eq!(back.validate(), Ok(()));
+    }
+
+    /// Found by the `tree_persist` fuzz target: a file describing a leaf with no tabs below
+    /// the root loaded into a tree that failed its own oracle (`EmptyLeaf`).
+    ///
+    /// The state is unreachable in memory — removing the last tab collapses the leaf — but
+    /// nothing stopped it from arriving in a file, and `Deserialize` returning `Ok` is a
+    /// promise that what came back is well-formed. It is repaired the way the pre-arena
+    /// reader already repairs a half-split: the empty side is dropped and the split collapses
+    /// onto the surviving one.
+    #[test]
+    fn an_empty_leaf_below_the_root_is_dropped_on_load() {
+        let json = r#"{
+            "root": { "Horizontal": {
+                "fraction": 0.5,
+                "fully_collapsed": false,
+                "collapsed_leaf_count": 0,
+                "children": [
+                    { "Leaf": { "tabs": [], "active": 0, "scroll": 0.0, "collapsed": false }},
+                    { "Leaf": { "tabs": ["a"], "active": 0, "scroll": 0.0, "collapsed": false }}
+                ]
+            }},
+            "focused": null,
+            "collapsed": false,
+            "collapsed_leaf_count": 0
+        }"#;
+
+        let tree: Tree<String> = serde_json::from_str(json).unwrap();
+        assert_eq!(tree.validate(), Ok(()));
+        assert_eq!(
+            tree.len(),
+            1,
+            "the split collapsed onto its surviving child"
+        );
+        assert_eq!(tree.num_tabs(), 1, "the tab that was there is still there");
+        assert!(tree.root_node().unwrap().is_leaf());
+    }
+
+    /// The same hole in the pre-arena reader — and this is the one that can actually be on a
+    /// user's disk, since those files are the ones written by older versions.
+    #[test]
+    fn an_empty_leaf_in_the_pre_arena_heap_is_dropped_on_load() {
+        let legacy = r#"{
+            "nodes": [
+                { "Vertical": { "fraction": 0.5, "fully_collapsed": false, "collapsed_leaf_count": 0 }},
+                { "Leaf": { "tabs": [], "active": 0, "scroll": 0.0, "collapsed": false }},
+                { "Leaf": { "tabs": ["a"], "active": 0, "scroll": 0.0, "collapsed": false }}
+            ],
+            "focused_node": 1,
+            "collapsed": false,
+            "collapsed_leaf_count": 0
+        }"#;
+
+        let tree: Tree<String> = serde_json::from_str(legacy).unwrap();
+        assert_eq!(tree.validate(), Ok(()));
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree.num_tabs(), 1);
+        assert_eq!(
+            tree.focused_leaf(),
+            None,
+            "focus pointed at the leaf that was dropped, so there is nothing to focus"
+        );
+    }
+
+    /// Found by the `tree_persist` fuzz target: a stored dock whose `focused_surface` names a
+    /// surface the file does not contain used to load as-is.
+    ///
+    /// Nothing rejects it later — `focused_leaf()` indexes that surface and panics — so the
+    /// file is repaired on the way in: nothing is focused.
+    #[test]
+    fn saved_focus_into_a_surface_that_is_not_there_is_dropped() {
+        let json = r#"{
+            "surfaces": [
+                { "Main": { "root": { "Leaf": { "tabs": ["a"], "active": 0 }}, "focused": null }}
+            ],
+            "focused_surface": 3
+        }"#;
+
+        let dock_state: DockState<String> = serde_json::from_str(json).unwrap();
+        assert_eq!(dock_state.validate(), Ok(()));
+        assert_eq!(dock_state.focused_leaf(), None);
+    }
+
+    /// The other half: a file with no main surface at all, or with a hole where it should be.
+    /// Indexing, `main_surface()` and focus resolution all assume it is there.
+    #[test]
+    fn a_saved_dock_without_a_main_surface_gets_one() {
+        for json in [
+            r#"{ "surfaces": [], "focused_surface": null }"#,
+            r#"{ "surfaces": ["Empty"], "focused_surface": null }"#,
+        ] {
+            let dock_state: DockState<String> = serde_json::from_str(json).unwrap();
+            assert_eq!(dock_state.validate(), Ok(()), "for {json}");
+            assert_eq!(dock_state.main_surface().num_tabs(), 0);
+            assert!(dock_state.is_surface_valid(SurfaceIndex::main()));
+        }
+    }
+
+    /// And the ordinary case still round-trips: surfaces, their windows and the focus between
+    /// them survive a save.
+    #[test]
+    fn dock_state_round_trips_with_windows() {
+        let mut dock_state = DockState::new(vec!["a".to_string()]);
+        let window = dock_state.add_window(vec!["b".to_string()]);
+        let root = dock_state[window].root().unwrap();
+        dock_state.set_focused_node_and_surface(crate::NodePath {
+            surface: window,
+            node: root,
+        });
+
+        let back: DockState<String> =
+            serde_json::from_str(&serde_json::to_string(&dock_state).unwrap()).unwrap();
+
+        assert_eq!(back.validate(), Ok(()));
+        assert_eq!(back.surfaces_count(), 2);
+        assert_eq!(
+            back.focused_leaf().map(|path| path.surface),
+            Some(window),
+            "focus stayed in the window it was in"
+        );
+    }
+
+    /// A file made *only* of empty leaves has nothing to repair onto: the result is an empty
+    /// dock, not a tree of leaves nobody can put a tab into.
+    #[test]
+    fn a_tree_of_only_empty_leaves_loads_as_an_empty_dock() {
+        let json = r#"{
+            "root": { "Vertical": {
+                "fraction": 0.5,
+                "fully_collapsed": false,
+                "collapsed_leaf_count": 0,
+                "children": [
+                    { "Leaf": { "tabs": [], "active": 0, "scroll": 0.0, "collapsed": false }},
+                    { "Leaf": { "tabs": [], "active": 0, "scroll": 0.0, "collapsed": false }}
+                ]
+            }},
+            "focused": null,
+            "collapsed": false,
+            "collapsed_leaf_count": 0
+        }"#;
+
+        let tree: Tree<String> = serde_json::from_str(json).unwrap();
+        assert_eq!(tree.validate(), Ok(()));
+        assert!(tree.is_empty());
     }
 }

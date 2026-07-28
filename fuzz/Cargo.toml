@@ -1,0 +1,33 @@
+[package]
+name = "egui_dock-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+# The persisted format is what our downstream actually writes: RON, not JSON. Fuzzing the
+# format we really store is the whole point of seeding the corpus with real layouts.
+ron = "0.12"
+
+[dependencies.egui_dock]
+path = ".."
+features = ["serde"]
+
+[[bin]]
+name = "tree_ops"
+path = "fuzz_targets/tree_ops.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tree_persist"
+path = "fuzz_targets/tree_persist.rs"
+test = false
+doc = false
+bench = false

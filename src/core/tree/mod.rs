@@ -48,7 +48,7 @@ pub use node::TabId;
 pub use node_id::{NodeId, NodePath, Side};
 pub use tab_index::{TabIndex, TabPath};
 pub use tab_iter::TabIter;
-pub use validate::{SurfaceViolation, TreeViolation};
+pub use validate::{DockViolation, SurfaceViolation, TreeViolation};
 
 use crate::core::geom::Rect;
 use crate::{Error, Result, SurfaceIndex};
@@ -494,6 +494,9 @@ impl<Tab> Tree<Tab> {
     /// A fresh split node is allocated to hold the two of them; `target` keeps its id and
     /// its content, and simply gains a parent.
     ///
+    /// One case does not split at all: if `target` is a leaf holding no tabs, `new` takes its
+    /// place and both returned ids name it — see the code for why.
+    ///
     /// # Panics
     ///
     /// If `fraction` isn't in range 0..=1, if `new` is not a leaf with at least one tab,
@@ -508,6 +511,21 @@ impl<Tab> Tree<Tab> {
         assert!((0.0..=1.0).contains(&fraction));
         assert_ne!(new.tabs_count(), 0, "splitting in an empty leaf");
         assert!(self.contains(target), "no node {target} in this tree");
+
+        // Splitting a pane that shows nothing cannot be honoured literally: one side of the
+        // result would be an empty leaf, and an empty leaf below the root is a phantom pane —
+        // it renders as a blank half with a separator the user can drag but never fill or
+        // close, and `validate` rejects it. The request behind the call ("put these tabs
+        // here") is served by giving the empty leaf the content instead, which is also what
+        // dropping a tab onto an empty dock looks like to the user.
+        //
+        // Reachable through the public API: `DockState::new(vec![])` and an emptied
+        // `retain_tabs` both leave an empty root leaf, and dropping a tab onto it splits it.
+        // Found by the `tree_ops` fuzz target.
+        if self[target].get_leaf().is_some_and(LeafNode::is_empty) {
+            self.nodes.get_mut(target).unwrap().node = new;
+            return [target, target];
+        }
 
         let grandparent = self.parent(target);
         let side_of_target = grandparent.map(|split_id| {
@@ -923,6 +941,29 @@ mod test {
 
     #[derive(Copy, Clone, Debug, PartialEq)]
     struct Tab(u64);
+
+    /// Splitting a pane that shows nothing fills it instead of producing a phantom half.
+    ///
+    /// Found by the `tree_ops` fuzz target: the empty root leaf that `Tree::new(vec![])` and
+    /// an emptied `retain_tabs` both leave behind used to end up as the *child* of a fresh
+    /// split — an empty leaf below the root, which is a blank pane the user can neither fill
+    /// nor close, and which the oracle rejects.
+    #[test]
+    fn splitting_an_empty_leaf_fills_it_instead() {
+        let mut tree: Tree<Tab> = Tree::new(vec![]);
+        let root = tree.root().unwrap();
+
+        let [old, new] = tree.split(root, Split::Right, 0.5, Node::leaf_with(vec![Tab(1)]));
+
+        assert_eq!(
+            [old, new],
+            [root, root],
+            "there was nothing to split off, so both halves are the same node"
+        );
+        assert_eq!(tree.len(), 1, "no split node was allocated");
+        assert_eq!(tree.num_tabs(), 1, "and the tabs arrived");
+        assert_eq!(tree.validate(), Ok(()));
+    }
 
     /// Checks that `retain` works after removing a node
     #[test]

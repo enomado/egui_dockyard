@@ -42,8 +42,11 @@ use crate::{
 /// `DockState` may be serialized to record the placement of all surfaces.
 ///
 /// This does not include serialization of translations.
+/// Reading is hand-written (see [`crate::core::tree::persist`]): a stored dock can name a
+/// focused surface that is not there, or carry no main surface at all, and a derived
+/// `Deserialize` would hand that straight back as a state whose next frame panics.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct DockState<Tab> {
     surfaces: Vec<Surface<Tab>>,
     focused_surface: Option<SurfaceIndex>, // Part of the tree which is in focus.
@@ -698,11 +701,36 @@ impl<Tab> DockState<Tab> {
     where
         F: FnMut(&mut Tab) -> bool,
     {
-        let mut main_surface = true;
-        self.surfaces.retain_mut(|surface| {
+        for surface in &mut self.surfaces {
             surface.retain_tabs(&mut predicate);
-            std::mem::take(&mut main_surface) || !surface.is_empty()
-        });
+        }
+
+        // A window that lost its last tab leaves a *hole*, not a gap. `SurfaceIndex` is a
+        // position in this vector, so compacting it (which is what this used to do) silently
+        // renumbered every window after the one that went away: `focused_surface` and any
+        // index a caller was holding then named a different window — or none, which is how
+        // this was found, as a panic in `ensure_tree` on an index past the end.
+        //
+        // `remove_surface` already leaves holes for exactly this reason; only *trailing*
+        // holes are popped, and those can shift nothing that survived.
+        while self.surfaces.len() > 1 && self.surfaces.last().is_some_and(Surface::is_empty) {
+            self.surfaces.pop();
+        }
+
+        // `Surface::retain_tabs` nulls out a surface whose tree it emptied, and it cannot know
+        // that the main surface is the one surface that must always hold a tree: indexing the
+        // dock state, `main_surface()` and `focused_leaf()` all resolve it without asking. So
+        // it is rebuilt here, empty but present — filtering every tab away leaves an empty
+        // dock, not a dock with no main surface.
+        self.ensure_tree(SurfaceIndex::main());
+
+        // Focus may have been inside a window that no longer exists.
+        if !self
+            .focused_surface
+            .is_some_and(|surface| self.is_surface_valid(surface))
+        {
+            self.focused_surface = None;
+        }
     }
 
     /// Find a tab based on the conditions of a function.

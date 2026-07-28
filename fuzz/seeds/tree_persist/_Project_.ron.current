@@ -1,0 +1,21 @@
+(
+    surfaces: [
+        Main((
+            root: Some(Leaf(
+                tabs: [
+                    "t0",
+                    "t1",
+                    "t2",
+                ],
+                active: (2),
+                prev_active: None,
+                scroll: 0.0,
+                collapsed: false,
+            )),
+            focused: Some([]),
+            collapsed: false,
+            collapsed_leaf_count: 0,
+        )),
+    ],
+    focused_surface: Some((0)),
+)

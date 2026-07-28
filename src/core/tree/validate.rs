@@ -137,6 +137,36 @@ pub struct SurfaceViolation {
     pub violation: TreeViolation,
 }
 
+/// A single way in which a [`DockState`](crate::DockState) fails to be well-formed.
+///
+/// Most of them are about one surface's tree; the rest are about the state that ties the
+/// surfaces together, which no per-tree check can see.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DockViolation {
+    /// The tree inside one of the surfaces is not well-formed.
+    Tree(SurfaceViolation),
+
+    /// `focused_surface` names a surface that is gone or holds no tree.
+    ///
+    /// Surfaces are addressed by position, so removing one can leave this pointing past the
+    /// end of the vector or at a hole — after which anything that resolves focus (pushing a
+    /// tab to the focused leaf, for one) is reading a surface that is not there.
+    FocusedSurfaceInvalid {
+        /// The surface focus claims to be in.
+        surface: SurfaceIndex,
+    },
+
+    /// The main surface holds no tree at all.
+    ///
+    /// Every other surface may be a hole; this one may not. Indexing a [`DockState`] by
+    /// [`SurfaceIndex`], [`main_surface`](crate::DockState::main_surface) and
+    /// [`focused_leaf`](crate::DockState::focused_leaf) all resolve it without checking, so a
+    /// missing main surface is a panic waiting for the next frame. An *empty* main surface —
+    /// a tree with no nodes — is fine and is what an emptied dock actually looks like.
+    MainSurfaceMissing,
+}
+
 impl<Tab> Tree<Tab> {
     /// Checks the tree's structural invariants and returns every violation found.
     ///
@@ -278,8 +308,8 @@ impl<Tab> Tree<Tab> {
 }
 
 impl<Tab> crate::DockState<Tab> {
-    /// Runs [`Tree::validate`] over every surface and reports violations with their surface.
-    pub fn validate(&self) -> Result<(), Vec<SurfaceViolation>> {
+    /// Runs [`Tree::validate`] over every surface, and checks the state that spans them.
+    pub fn validate(&self) -> Result<(), Vec<DockViolation>> {
         let mut violations = Vec::new();
 
         for (surface_index, surface) in self.iter_surfaces_indexed() {
@@ -288,15 +318,25 @@ impl<Tab> crate::DockState<Tab> {
                 Surface::Main(tree) | Surface::Window(tree, _) => tree,
             };
             if let Err(tree_violations) = tree.validate() {
-                violations.extend(
-                    tree_violations
-                        .into_iter()
-                        .map(|violation| SurfaceViolation {
-                            surface: surface_index,
-                            violation,
-                        }),
-                );
+                violations.extend(tree_violations.into_iter().map(|violation| {
+                    DockViolation::Tree(SurfaceViolation {
+                        surface: surface_index,
+                        violation,
+                    })
+                }));
             }
+        }
+
+        if !self.is_surface_valid(SurfaceIndex::main()) {
+            violations.push(DockViolation::MainSurfaceMissing);
+        }
+
+        // Focus is the one piece of state that outlives the surface it points into: closing a
+        // window does not visit it, so it has to be checked from the outside.
+        if let Some(surface) = self.focused_surface
+            && !self.is_surface_valid(surface)
+        {
+            violations.push(DockViolation::FocusedSurfaceInvalid { surface });
         }
 
         if violations.is_empty() {
@@ -309,8 +349,8 @@ impl<Tab> crate::DockState<Tab> {
 
 #[cfg(test)]
 mod tests {
-    use super::TreeViolation;
-    use crate::{DockState, Node, Split, TabIndex, Tree};
+    use super::{DockViolation, TreeViolation};
+    use crate::{DockState, Node, NodePath, Split, SurfaceIndex, TabIndex, Tree};
 
     /// The oracle must accept trees built through the public API — otherwise every later test
     /// that uses it is just measuring the oracle's own false positives.
@@ -510,6 +550,148 @@ mod tests {
             "focus must not outlive the leaf it pointed at"
         );
         assert_eq!(tree.validate(), Ok(()));
+    }
+
+    /// Focus that points into a surface which is not there must be *reported*, not left for
+    /// whoever resolves it next to trip over.
+    #[test]
+    fn oracle_bites_on_focus_into_a_missing_surface() {
+        let mut dock_state = DockState::new(vec![1, 2]);
+        assert_eq!(dock_state.validate(), Ok(()));
+
+        // No public call can leave focus dangling any more (that is the fix below), so the
+        // field is corrupted directly: the point here is to test the oracle.
+        dock_state.focused_surface = Some(SurfaceIndex(7));
+
+        let violations = dock_state.validate().unwrap_err();
+        assert!(
+            violations.contains(&DockViolation::FocusedSurfaceInvalid {
+                surface: SurfaceIndex(7),
+            }),
+            "expected a dangling-focus report, got {violations:?}"
+        );
+    }
+
+    /// Regression, found by the `tree_ops` fuzz target: `retain_tabs` used to compact the
+    /// surface vector, so a window emptied by the filter took the indices of every window
+    /// after it down with it.
+    ///
+    /// The visible failure was a panic three operations later — `push_to_focused_leaf`
+    /// resolving a `focused_surface` that now pointed past the end — but the quieter half is
+    /// worse: a surviving window silently changed its `SurfaceIndex`, so anything holding one
+    /// (a caller's handle, a saved layout's focus) started naming a different window.
+    #[test]
+    fn retain_tabs_does_not_renumber_surviving_windows() {
+        let mut dock_state = DockState::new(vec![1]);
+        let doomed = dock_state.add_window(vec![2]);
+        let survivor = dock_state.add_window(vec![3]);
+        assert_eq!((doomed, survivor), (SurfaceIndex(1), SurfaceIndex(2)));
+
+        // Drops the middle window entirely, keeps one tab on either side of it.
+        dock_state.retain_tabs(|tab| *tab != 2);
+
+        assert_eq!(dock_state.validate(), Ok(()));
+        assert!(
+            !dock_state.is_surface_valid(doomed),
+            "the emptied window is gone"
+        );
+        assert!(
+            dock_state.is_surface_valid(survivor),
+            "the surviving window kept its index instead of sliding into the hole"
+        );
+        assert_eq!(
+            dock_state[survivor].tabs().copied().collect::<Vec<_>>(),
+            vec![3],
+            "and it is still the same window, not a renumbered neighbour"
+        );
+    }
+
+    /// Filtering every tab away must leave an empty dock, not a dock without a main surface.
+    ///
+    /// Found by the `tree_ops` fuzz target one run after the oracle learned to look at
+    /// surfaces: `Surface::retain_tabs` nulls out any surface whose tree it empties, and the
+    /// main surface got the same treatment — after which `main_surface()` panicked and
+    /// `remove_surface` happily pointed focus back at a surface that was not there.
+    #[test]
+    fn retain_tabs_keeps_the_main_surface() {
+        let mut dock_state = DockState::new(vec![1, 2]);
+        dock_state.retain_tabs(|_| false);
+
+        assert_eq!(dock_state.validate(), Ok(()));
+        assert_eq!(
+            dock_state.main_surface().num_tabs(),
+            0,
+            "an emptied dock still has a main surface, it just holds nothing"
+        );
+        assert_eq!(dock_state.focused_leaf(), None);
+    }
+
+    /// The oracle must name a missing main surface, or the fix above is guarded by nothing.
+    #[test]
+    fn oracle_bites_on_a_missing_main_surface() {
+        let mut dock_state = DockState::new(vec![1]);
+        dock_state.surfaces[0] = crate::Surface::Empty;
+
+        let violations = dock_state.validate().unwrap_err();
+        assert!(
+            violations.contains(&DockViolation::MainSurfaceMissing),
+            "expected a missing-main-surface report, got {violations:?}"
+        );
+    }
+
+    /// The panic itself: focus inside a window that `retain_tabs` empties, then a push.
+    #[test]
+    fn retain_tabs_that_drops_the_focused_window_leaves_focus_resolvable() {
+        let mut dock_state = DockState::new(vec![1]);
+        let window = dock_state.add_window(vec![2]);
+        let root = dock_state[window].root().unwrap();
+        dock_state.set_focused_node_and_surface(NodePath {
+            surface: window,
+            node: root,
+        });
+
+        dock_state.retain_tabs(|tab| *tab != 2);
+        assert_eq!(dock_state.validate(), Ok(()));
+
+        // Used to panic with "index out of bounds" inside `ensure_tree`.
+        dock_state.push_to_focused_leaf(4);
+        assert_eq!(dock_state.validate(), Ok(()));
+        assert_eq!(
+            dock_state[SurfaceIndex::main()].num_tabs(),
+            2,
+            "with nothing focused the tab lands in the main surface"
+        );
+    }
+
+    /// The same thing end to end, the way a user reaches it: drag the only tab of a window
+    /// onto an empty dock, asking for a split.
+    #[test]
+    fn dropping_a_tab_onto_an_empty_dock_leaves_no_phantom_pane() {
+        use crate::{Split, TabInsert, TabPath};
+
+        let mut dock_state = DockState::<u32>::new(vec![]);
+        let window = dock_state.add_window(vec![1]);
+        let source = dock_state[window].root().unwrap();
+        let target = dock_state[SurfaceIndex::main()].root().unwrap();
+
+        dock_state.move_tab(
+            TabPath::new(window, source, TabIndex(0)),
+            (
+                NodePath {
+                    surface: SurfaceIndex::main(),
+                    node: target,
+                },
+                TabInsert::Split(Split::Left),
+            ),
+        );
+
+        assert_eq!(dock_state.validate(), Ok(()));
+        assert_eq!(dock_state.main_surface().num_tabs(), 1);
+        assert_eq!(
+            dock_state.main_surface().len(),
+            1,
+            "the empty pane took the tab instead of being split next to it"
+        );
     }
 
     /// The split direction should not matter to well-formedness; this catches an oracle that

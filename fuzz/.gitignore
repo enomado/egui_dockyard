@@ -1,0 +1,7 @@
+target
+artifacts
+coverage
+Cargo.lock
+# The fuzzer's own working corpus grows without bound and is machine-local. What is
+# checked in is `seeds/`, built by `corpus_tool` and passed to libFuzzer read-only.
+corpus

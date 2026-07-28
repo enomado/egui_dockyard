@@ -1,0 +1,47 @@
+(
+    surfaces: [
+        Main((
+            root: Some(Horizontal(
+                fraction: 0.49937966,
+                fully_collapsed: false,
+                collapsed_leaf_count: 0,
+                children: (Leaf(
+                    tabs: [
+                        "t0",
+                    ],
+                    active: (0),
+                    prev_active: None,
+                    scroll: 0.0,
+                    collapsed: false,
+                ), Vertical(
+                    fraction: 0.5,
+                    fully_collapsed: false,
+                    collapsed_leaf_count: 0,
+                    children: (Leaf(
+                        tabs: [
+                            "t0",
+                        ],
+                        active: (0),
+                        prev_active: None,
+                        scroll: 0.0,
+                        collapsed: false,
+                    ), Leaf(
+                        tabs: [
+                            "t0",
+                        ],
+                        active: (0),
+                        prev_active: None,
+                        scroll: 0.0,
+                        collapsed: false,
+                    )),
+                )),
+            )),
+            focused: Some([
+                Left,
+            ]),
+            collapsed: false,
+            collapsed_leaf_count: 0,
+        )),
+    ],
+    focused_surface: Some((0)),
+)

@@ -90,3 +90,18 @@ cargo fmt --check
 ```
 
 See [examples/README.md](examples/README.md) for the example programs.
+
+## Fuzzing
+
+`fuzz/` holds two `cargo-fuzz` targets that use the structural oracle (`Tree::validate` /
+`DockState::validate`) as their pass/fail criterion: `tree_ops` drives sequences of dock
+operations, `tree_persist` feeds saved layouts to the reader. The seed corpus is harvested from
+real saved layouts rather than invented.
+
+```
+cargo fuzz run -s none tree_ops fuzz/corpus/tree_ops
+cargo fuzz run -s none tree_persist fuzz/corpus/tree_persist fuzz/seeds/tree_persist
+```
+
+Details, the reasoning behind the seed corpus, and the list of what has been found so far are
+in [fuzz/README.md](fuzz/README.md).

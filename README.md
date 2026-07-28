@@ -7,15 +7,23 @@
 
 Originally created by [@lain-dono](https://github.com/lain-dono), this library provides a docking system for `egui`.
 
+> **This is a fork** of [anhosh/egui_dock](https://github.com/anhosh/egui_dock), carrying four
+> patches on top of upstream `main`. Why it exists, what is patched, and how contributions work
+> here (short version: AI-friendly, no vouch gate) — see [FORK.md](FORK.md).
+
 ## Contributing
 
-Before contributing, please read the [contribution guide](CONTRIBUTING.md) _and_ the [AI usage policy](AI_POLICY.md).
+Contributions are welcome here, on the terms described in [FORK.md](FORK.md) — read that first,
+since it supersedes the upstream rules below for this fork.
+
+The upstream [contribution guide](CONTRIBUTING.md) and [AI usage policy](AI_POLICY.md) are kept
+in the tree as they are useful context and apply if you take your work to upstream instead.
 
 This library is a collaborative project developed with direct involvement of its users.
 
 Please feel free to open new issues and pull requests, and participate in discussions!
-A lot of our discussions take place on [`egui`'s official Discord server](https://discord.gg/JFcEma9bJq), in the
-`#egui_dock` channel.
+A lot of upstream's discussions take place on
+[`egui`'s official Discord server](https://discord.gg/JFcEma9bJq), in the `#egui_dock` channel.
 
 ## Features
 

@@ -1,5 +1,11 @@
 # Contribution guide
 
+> **Fork note.** This file is upstream's, kept verbatim. In *this* fork there is no vouch gate
+> and the AI rules below do not apply — see [FORK.md](FORK.md). Everything else here (formatting,
+> tests, changelog, documented public API) is good practice and we follow it too. If you are
+> taking your work to [upstream](https://github.com/anhosh/egui_dock) instead, this guide is the
+> one that applies.
+
 Before contributing to this project, please follow the guide below.
 
 ## Vouch

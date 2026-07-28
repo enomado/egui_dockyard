@@ -1,5 +1,11 @@
 # AI Usage Policy
 
+> **Fork note.** This is upstream's policy, kept verbatim because it is worth reading and because
+> it applies if you contribute to [upstream](https://github.com/anhosh/egui_dock). It does *not*
+> govern this fork: we are AI-friendly and ask for demonstrable evidence — a test that fails
+> without the fix, property tests, fuzzing, a reproduction — rather than for a human who can
+> explain the diff. See [FORK.md](FORK.md).
+
 This policy is a modified version of [Ghostty](https://github.com/ghostty-org/ghostty/)'s AI Usage policy. I chose it
 because it closely aligns with my beliefs.
 

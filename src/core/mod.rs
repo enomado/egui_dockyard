@@ -25,8 +25,9 @@ pub use window_state::WindowState;
 
 use crate::core::geom::{Rect, Size};
 
-use crate::{
-    Node, NodeId, NodePath, Split, TabDestination, TabIndex, TabInsert, TabPath, Translations, Tree,
+use crate::core::translations::Translations;
+use crate::core::tree::{
+    Node, NodeId, NodePath, Split, TabDestination, TabIndex, TabInsert, TabPath, Tree,
 };
 
 /// The heart of `egui_dock`.

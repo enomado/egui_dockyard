@@ -1,4 +1,5 @@
-use crate::{NodeId, NodePath, SurfaceIndex};
+use crate::core::SurfaceIndex;
+use crate::core::tree::{NodeId, NodePath};
 
 /// Position of a tab inside a [`Node`](crate::Node).
 ///

@@ -54,14 +54,14 @@ impl NodeId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NodePath {
     /// Index of the surface owning the node.
-    pub surface: crate::SurfaceIndex,
+    pub surface: crate::core::SurfaceIndex,
     /// Identity of the node in the surface tree.
     pub node: NodeId,
 }
 
 impl NodePath {
     /// Creates a fully qualified new path to a node.
-    pub const fn new(surface: crate::SurfaceIndex, node: NodeId) -> Self {
+    pub const fn new(surface: crate::core::SurfaceIndex, node: NodeId) -> Self {
         Self { surface, node }
     }
 }

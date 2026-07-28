@@ -1,4 +1,4 @@
-use crate::{NodeId, TabIndex, Tree};
+use crate::core::tree::{NodeId, TabIndex, Tree};
 
 /// Iterates over all tabs in a [`Tree`], node by node in breadth-first order.
 pub struct TabIter<'a, Tab> {

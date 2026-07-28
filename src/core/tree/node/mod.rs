@@ -1,4 +1,4 @@
-use crate::TabIndex;
+use crate::core::tree::TabIndex;
 
 mod leaf;
 mod split;

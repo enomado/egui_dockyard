@@ -29,7 +29,8 @@
 
 use std::collections::HashSet;
 
-use crate::{Node, NodeId, SurfaceIndex, TabIndex, Tree};
+use crate::core::SurfaceIndex;
+use crate::core::tree::{Node, NodeId, TabIndex, Tree};
 
 /// A single way in which a [`Tree`] fails to be well-formed.
 ///
@@ -301,7 +302,7 @@ impl<Tab> Tree<Tab> {
     }
 }
 
-impl<Tab> crate::DockState<Tab> {
+impl<Tab> crate::core::DockState<Tab> {
     /// Runs [`Tree::validate`] over every surface, and checks the state that spans them.
     pub fn validate(&self) -> Result<(), Vec<DockViolation>> {
         let mut violations = Vec::new();
@@ -339,7 +340,8 @@ impl<Tab> crate::DockState<Tab> {
 #[cfg(test)]
 mod tests {
     use super::{DockViolation, TreeViolation};
-    use crate::{DockState, Node, NodePath, Split, SurfaceIndex, TabIndex, Tree};
+    use crate::core::tree::{Node, NodePath, Split, TabIndex, Tree};
+    use crate::core::{DockState, SurfaceIndex};
 
     /// The oracle must accept trees built through the public API — otherwise every later test
     /// that uses it is just measuring the oracle's own false positives.
@@ -652,7 +654,7 @@ mod tests {
     /// onto an empty dock, asking for a split.
     #[test]
     fn dropping_a_tab_onto_an_empty_dock_leaves_no_phantom_pane() {
-        use crate::{Split, TabInsert, TabPath};
+        use crate::core::tree::{Split, TabInsert, TabPath};
 
         let mut dock_state = DockState::<u32>::new(vec![]);
         let window = dock_state.add_window(vec![1]);

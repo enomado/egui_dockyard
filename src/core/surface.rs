@@ -1,4 +1,5 @@
-use crate::{Node, NodeId, TabIndex, Tree, WindowState};
+use crate::core::WindowState;
+use crate::core::tree::{Node, NodeId, TabIndex, Tree};
 
 /// A borrowed view of one surface of a [`DockState`](crate::DockState).
 ///

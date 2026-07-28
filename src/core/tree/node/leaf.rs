@@ -1,6 +1,7 @@
 use std::ops;
 
-use crate::{Error, Result, TabIndex};
+use crate::core::tree::TabIndex;
+use crate::core::{Error, Result};
 
 /// Stable identity of a tab inside one [`LeafNode`].
 ///
@@ -418,7 +419,7 @@ impl<Tab> ops::IndexMut<TabIndex> for LeafNode<Tab> {
 #[cfg(test)]
 mod prev_active_tests {
     use super::LeafNode;
-    use crate::{TabIndex, Tree};
+    use crate::core::tree::{TabIndex, Tree};
 
     /// Build a leaf with the given tabs and active index set *via the public path*
     /// (`set_active_tab`) so the history is initialised the same way the real UI does.

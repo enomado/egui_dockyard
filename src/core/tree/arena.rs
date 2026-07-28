@@ -12,7 +12,7 @@
 //! and resolves to `None` — a stale id fails loudly instead of silently naming whichever
 //! node moved into the slot afterwards.
 
-use crate::{Node, NodeId};
+use crate::core::tree::{Node, NodeId};
 
 /// A node plus its place in the tree above it.
 #[derive(Clone, Debug)]
@@ -186,7 +186,7 @@ impl<Tab> Arena<Tab> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Node;
+    use crate::core::tree::Node;
 
     fn entry(tab: i32) -> NodeEntry<i32> {
         NodeEntry {

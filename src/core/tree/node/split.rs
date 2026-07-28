@@ -1,4 +1,4 @@
-use crate::{NodeId, Side};
+use crate::core::tree::{NodeId, Side};
 
 /// The inner data of a [`Node::Horizontal`](crate::Node) / [`Node::Vertical`](crate::Node),
 /// which splits into two further nodes.

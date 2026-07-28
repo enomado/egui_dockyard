@@ -51,7 +51,7 @@ pub use tab_iter::TabIter;
 pub use validate::{DockViolation, SurfaceViolation, TreeViolation};
 
 use crate::core::geom::Rect;
-use crate::{Error, Result, SurfaceIndex};
+use crate::core::{Error, Result, SurfaceIndex};
 use arena::{Arena, NodeEntry};
 
 // ----------------------------------------------------------------------------

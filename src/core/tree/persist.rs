@@ -29,7 +29,7 @@ use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
-use crate::{LeafNode, Node, NodeId, Side, SplitNode, TabIndex, Tree};
+use crate::core::tree::{LeafNode, Node, NodeId, Side, SplitNode, TabIndex, Tree};
 
 use super::arena::NodeEntry;
 
@@ -456,7 +456,7 @@ impl<'de, Tab: Deserialize<'de>> Deserialize<'de> for Tree<Tab> {
 enum WireSurface<Tab> {
     Empty,
     Main(Tree<Tab>),
-    Window(Tree<Tab>, crate::WindowState),
+    Window(Tree<Tab>, crate::core::WindowState),
 }
 
 /// The same, borrowed, for writing — so saving a layout does not clone every tree.
@@ -467,7 +467,7 @@ enum WireSurface<Tab> {
 enum WireSurfaceRef<'a, Tab> {
     Empty,
     Main(&'a Tree<Tab>),
-    Window(&'a Tree<Tab>, &'a crate::WindowState),
+    Window(&'a Tree<Tab>, &'a crate::core::WindowState),
 }
 
 /// The stored form of a surface index: a position in the flat vector above.
@@ -478,18 +478,18 @@ struct WireSurfaceIndex(usize);
 
 impl WireSurfaceIndex {
     /// The stored position of `index`: main is 0, window *n* is *n + 1*.
-    fn of(index: crate::SurfaceIndex) -> Self {
+    fn of(index: crate::core::SurfaceIndex) -> Self {
         match index {
-            crate::SurfaceIndex::Main => Self(0),
-            crate::SurfaceIndex::Window(window) => Self(window.0 + 1),
+            crate::core::SurfaceIndex::Main => Self(0),
+            crate::core::SurfaceIndex::Window(window) => Self(window.0 + 1),
         }
     }
 
     /// What a stored position names.
-    fn resolve(self) -> crate::SurfaceIndex {
+    fn resolve(self) -> crate::core::SurfaceIndex {
         match self.0 {
-            0 => crate::SurfaceIndex::Main,
-            position => crate::SurfaceIndex::window(position - 1),
+            0 => crate::core::SurfaceIndex::Main,
+            position => crate::core::SurfaceIndex::window(position - 1),
         }
     }
 }
@@ -509,16 +509,16 @@ struct DockOut<'a, Tab> {
     focused_surface: Option<WireSurfaceIndex>,
 }
 
-impl<Tab: Serialize> Serialize for crate::DockState<Tab> {
+impl<Tab: Serialize> Serialize for crate::core::DockState<Tab> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         // Translations are not state a layout carries; they were `#[serde(skip)]` under the
         // derived impl and are simply absent here, which renders the same.
         let mut surfaces = Vec::with_capacity(self.surfaces_count());
         for (_, surface) in self.iter_surfaces_indexed() {
             surfaces.push(match surface {
-                crate::SurfaceRef::Empty => WireSurfaceRef::Empty,
-                crate::SurfaceRef::Main(tree) => WireSurfaceRef::Main(tree),
-                crate::SurfaceRef::Window(tree, state) => WireSurfaceRef::Window(tree, state),
+                crate::core::SurfaceRef::Empty => WireSurfaceRef::Empty,
+                crate::core::SurfaceRef::Main(tree) => WireSurfaceRef::Main(tree),
+                crate::core::SurfaceRef::Window(tree, state) => WireSurfaceRef::Window(tree, state),
             });
         }
         DockOut {
@@ -529,7 +529,7 @@ impl<Tab: Serialize> Serialize for crate::DockState<Tab> {
     }
 }
 
-impl<'de, Tab: Deserialize<'de>> Deserialize<'de> for crate::DockState<Tab> {
+impl<'de, Tab: Deserialize<'de>> Deserialize<'de> for crate::core::DockState<Tab> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let DockIn {
             surfaces,
@@ -555,11 +555,11 @@ impl<'de, Tab: Deserialize<'de>> Deserialize<'de> for crate::DockState<Tab> {
             .map(|surface| match surface {
                 WireSurface::Empty => None,
                 WireSurface::Window(tree, state) => Some((tree, state)),
-                WireSurface::Main(tree) => Some((tree, crate::WindowState::default())),
+                WireSurface::Main(tree) => Some((tree, crate::core::WindowState::default())),
             })
             .collect();
 
-        let mut state = crate::DockState {
+        let mut state = crate::core::DockState {
             main,
             windows,
             // Focus into a surface that the file does not actually contain is dropped by
@@ -568,7 +568,7 @@ impl<'de, Tab: Deserialize<'de>> Deserialize<'de> for crate::DockState<Tab> {
             focused_surface: focused_surface.map(WireSurfaceIndex::resolve),
             // Translations are not state a layout carries; a freshly read dock gets the
             // defaults, as it did under the derived impl.
-            translations: crate::Translations::default(),
+            translations: crate::core::translations::Translations::default(),
         };
         state.normalize_surfaces();
 
@@ -578,7 +578,8 @@ impl<'de, Tab: Deserialize<'de>> Deserialize<'de> for crate::DockState<Tab> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{DockState, Node, Split, SurfaceIndex, TabIndex, Tree};
+    use crate::core::tree::{Node, Split, TabIndex, Tree};
+    use crate::core::{DockState, SurfaceIndex};
 
     fn shape(tree: &Tree<String>) -> Vec<(usize, Vec<String>)> {
         tree.breadth_first()
@@ -869,7 +870,7 @@ mod tests {
         let mut dock_state = DockState::new(vec!["a".to_string()]);
         let window = dock_state.add_window(vec!["b".to_string()]);
         let root = dock_state[window].root().unwrap();
-        dock_state.set_focused_node_and_surface(crate::NodePath {
+        dock_state.set_focused_node_and_surface(crate::core::tree::NodePath {
             surface: window,
             node: root,
         });

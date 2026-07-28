@@ -70,9 +70,8 @@ think receipts are a better filter for it than authorship.
 
 | branch | what |
 |---|---|
-| `dock-0.35-main` | our line: upstream `main` plus the four patches — the default branch here |
-| `main` | plain mirror of upstream `main`, kept for rebasing |
-| `fix/active-tab-history` | the branch behind upstream PR #325 |
+| `dock-0.35-main` | our line: upstream `main` plus the four patches — the default branch here, and the only one we develop on |
+| `fix/active-tab-history` | dead: the head of upstream PR #325. Kept only so the PR stays open; do not build on it |
 
 We rebase onto upstream `main` periodically. We do not track upstream pull requests, and this
 fork carries no release cadence of its own — consume it as a git dependency or vendor it.

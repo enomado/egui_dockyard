@@ -158,8 +158,12 @@ impl<Tab> Node<Tab> {
     }
 
     /// Sets the collapsing state of the node.
+    ///
+    /// Deliberately not public: on its own it makes the tree inconsistent, because every
+    /// split above the node derives its bookkeeping from what it contains. The operation
+    /// callers want is [`Tree::set_leaf_collapsed`](crate::Tree::set_leaf_collapsed).
     #[inline]
-    pub fn set_collapsed(&mut self, collapsed: bool) {
+    pub(crate) fn set_collapsed(&mut self, collapsed: bool) {
         match self {
             Node::Leaf(leaf) => leaf.collapsed = collapsed,
             Node::Vertical(split) | Node::Horizontal(split) => split.fully_collapsed = collapsed,
@@ -168,12 +172,15 @@ impl<Tab> Node<Tab> {
 
     /// Sets the number of layers of collapsed leaf subnodes.
     ///
+    /// Deliberately not public: this number is derived from the node's children, so the
+    /// only correct writer is the tree's own recomputation.
+    ///
     /// # Panics
     ///
     /// Panics if `self` is neither a [`Vertical`](Node::Vertical) nor a [`Horizontal`](Node::Horizontal) node.
     #[track_caller]
     #[inline]
-    pub fn set_collapsed_leaf_count(&mut self, count: i32) {
+    pub(crate) fn set_collapsed_leaf_count(&mut self, count: i32) {
         match self {
             Node::Horizontal(split) | Node::Vertical(split) => split.collapsed_leaf_count = count,
             _ => panic!("node was neither vertical nor horizontal"),

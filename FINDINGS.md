@@ -12,6 +12,53 @@ Ordered newest first.
 
 ---
 
+## Collapsing a pane was two calls, and the public API let you make only the first
+
+**Status upstream:** not submitted. No bug is being fixed here — the two collapsed-count bugs
+below are already fixed. This removes the shape that produced both of them.
+
+**Symptom.** None, today. That is the point: the two findings below (the gesture counting the
+rows, the reader believing the file) were the same omission arriving from two directions, and
+after fixing them the tree was correct while the *interface* still asked every caller to
+remember the same two-step ritual:
+
+```rust
+self.dock_state[path].set_collapsed(!collapsed);
+self.dock_state[path.surface].node_update_collapsed(path.node);
+```
+
+Three call sites did this by hand — the tab bar's collapse button, the property test's collapse
+gesture, and the unit tests' `collapse` helper. Two of them exist only because the first one had
+to be reproduced; a fuzzer having to imitate a caller's ritual is the symptom, not the test.
+
+**Root cause.** `LeafNode::collapsed` is the only decision in the collapsing scheme: the user
+makes it, and every number a split or the tree itself stores is derived from the leaves under
+it. `Node::set_collapsed` wrote that flag and stopped, so it was a public method that leaves the
+tree describing a shape it no longer has — correct only in combination with a second call that
+nothing in the type system asks for. `Node::set_collapsed_leaf_count` was public in the same
+way, and it writes a number no caller outside the recomputation is entitled to choose.
+
+**Fix.** One operation on the tree, which is the level where the invariant lives:
+
+```rust
+pub fn set_leaf_collapsed(&mut self, node: NodeId, collapsed: bool) {
+    assert!(self[node].is_leaf(), "…");
+    self[node].set_collapsed(collapsed);
+    self.node_update_collapsed(node);
+}
+```
+
+Both half-operations on `Node` become `pub(crate)`. The assertion is not defensive noise: a
+split's collapsing is derived from its children, so "collapse this split" names a decision that
+does not exist, and the argument type could not say so.
+
+**Evidence.** `collapsing_a_leaf_settles_its_ancestors_in_one_call` checks that the ancestors
+and the tree agree by the time the call returns, in both directions;
+`a_split_cannot_be_collapsed_directly` pins the assertion. Mutation — drop
+`node_update_collapsed` from inside the new operation — fails five tests, including the property
+`collapsed_counts_stay_derived`, which now exercises the same single entry point the UI uses
+instead of a copy of it.
+
 ## Loading believed the collapsed counts in the file, including for the nodes it had just dropped
 
 **Status upstream:** not submitted. The fix is three lines and one deletion; it is written up

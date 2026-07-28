@@ -807,8 +807,7 @@ impl<Tab> DockArea<'_, Tab> {
             if on_secondary_button {
                 self.window_toggle_minimized(path.surface);
             } else {
-                self.dock_state[path].set_collapsed(!collapsed);
-                self.dock_state[path.surface].node_update_collapsed(path.node);
+                self.dock_state[path.surface].set_leaf_collapsed(path.node, !collapsed);
                 self.window_update_collapsed(path);
                 self.events.push(DockEvent::LayoutCommitted);
             }

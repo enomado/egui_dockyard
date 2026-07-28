@@ -1057,7 +1057,10 @@ mod tests {
 
         let tree: Tree<String> = serde_json::from_str(json).unwrap();
         assert_eq!(tree.validate(), Ok(()));
-        assert!(tree.root_node().unwrap().is_leaf(), "the split collapsed onto its surviving child");
+        assert!(
+            tree.root_node().unwrap().is_leaf(),
+            "the split collapsed onto its surviving child"
+        );
         assert_eq!(
             tree.collapsed_leaf_count(),
             1,

@@ -848,6 +848,30 @@ impl<Tab> Tree<Tab> {
     // Collapsing
     // ------------------------------------------------------------------------
 
+    /// Collapses or expands a leaf, and settles everything that follows from it.
+    ///
+    /// This is the only entry point into collapsing, and it is one call on purpose.
+    /// [`LeafNode::collapsed`] is the single decision in the whole scheme — the user makes
+    /// it; every number a split or the tree itself stores is *derived* from the leaves
+    /// below. Setting the flag without recomputing the ancestors leaves the tree describing
+    /// a shape it no longer has, and nothing in the type system asks for the second step:
+    /// that exact omission was found and fixed twice (see `FINDINGS.md`, the collapsed-rows
+    /// entries) before it became a single operation here.
+    ///
+    /// # Panics
+    ///
+    /// If `node` is not a live leaf of this tree.
+    #[track_caller]
+    pub fn set_leaf_collapsed(&mut self, node: NodeId, collapsed: bool) {
+        assert!(
+            self[node].is_leaf(),
+            "set_leaf_collapsed on a node that is not a leaf: collapsing is a decision about \
+             a leaf, and every split above it is derived from its children"
+        );
+        self[node].set_collapsed(collapsed);
+        self.node_update_collapsed(node);
+    }
+
     /// Sets the collapsing state of the [`Tree`].
     pub(crate) fn set_collapsed(&mut self, collapsed: bool) {
         self.collapsed = collapsed;
@@ -1088,8 +1112,7 @@ mod test {
 
     /// Collapses a leaf the way the tab bar's button does.
     fn collapse(tree: &mut Tree<Tab>, leaf: NodeId) {
-        tree[leaf].set_collapsed(true);
-        tree.node_update_collapsed(leaf);
+        tree.set_leaf_collapsed(leaf, true);
     }
 
     /// A stack of three leaves, the lower two collapsed: `V(top, V(mid, low))`.
@@ -1159,6 +1182,44 @@ mod test {
             1,
             "one collapsed leaf, one collapsed row"
         );
+    }
+
+    /// Collapsing is one operation, not a pair a caller has to remember to complete: the
+    /// ancestors must already agree by the time `set_leaf_collapsed` returns.
+    #[test]
+    fn collapsing_a_leaf_settles_its_ancestors_in_one_call() {
+        let mut tree = Tree::new(vec![Tab(0)]);
+        let root = tree.root().unwrap();
+        let [top, bottom] = tree.split_below(root, 0.5, vec![Tab(1)]);
+        let split = tree.parent(top).unwrap();
+
+        tree.set_leaf_collapsed(bottom, true);
+        assert_eq!(tree[split].collapsed_leaf_count(), 1);
+        assert_eq!(tree.collapsed_leaf_count(), 1, "the tree mirrors its root");
+
+        tree.set_leaf_collapsed(top, true);
+        assert!(
+            tree[split].is_collapsed(),
+            "both children collapsed makes the split collapsed"
+        );
+
+        // Expanding walks the same path back down.
+        tree.set_leaf_collapsed(bottom, false);
+        assert!(!tree[split].is_collapsed());
+        assert_eq!(tree[split].collapsed_leaf_count(), 1);
+    }
+
+    /// A split's collapsing is derived, so there is nothing to *set* on it — the argument
+    /// names a decision only a leaf can hold.
+    #[test]
+    #[should_panic(expected = "not a leaf")]
+    fn a_split_cannot_be_collapsed_directly() {
+        let mut tree = Tree::new(vec![Tab(0)]);
+        let root = tree.root().unwrap();
+        let [top, _] = tree.split_below(root, 0.5, vec![Tab(1)]);
+        let split = tree.parent(top).unwrap();
+
+        tree.set_leaf_collapsed(split, true);
     }
 
     /// The copying sweeps rebuild the tree, so a split they copy carries the count of the

@@ -235,8 +235,9 @@ fn apply(dock_state: &mut DockState<u32>, op: Op, next_tab: &mut u32) -> Option<
         Op::ToggleCollapsed { leaf } => {
             let node = leaves[leaf % leaves.len()];
             let collapsed = dock_state.main_surface()[node].is_collapsed();
-            dock_state.main_surface_mut()[node].set_collapsed(!collapsed);
-            dock_state.main_surface_mut().node_update_collapsed(node);
+            dock_state
+                .main_surface_mut()
+                .set_leaf_collapsed(node, !collapsed);
             // Collapsing hides a leaf's tabs; it does not touch which tabs are where.
             vec![]
         }

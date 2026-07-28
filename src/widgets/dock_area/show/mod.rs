@@ -335,7 +335,7 @@ impl<Tab> DockArea<'_, Tab> {
                 node: node_index,
             };
             if self.dock_state[surf_index][node_index].is_parent() {
-                self.show_separator(ui, path, fade_style);
+                self.show_separator(ui, path, fade_style, state);
             }
         }
     }
@@ -471,7 +471,13 @@ impl<Tab> DockArea<'_, Tab> {
         }
     }
 
-    fn show_separator(&mut self, ui: &mut Ui, path: NodePath, fade_style: Option<&Style>) {
+    fn show_separator(
+        &mut self,
+        ui: &mut Ui,
+        path: NodePath,
+        fade_style: Option<&Style>,
+        state: &mut State,
+    ) {
         assert!(self.dock_state[path.surface][path.node].is_parent());
 
         // If either of the children is collapsed, we don't want the user to interact with the separator
@@ -572,6 +578,18 @@ impl<Tab> DockArea<'_, Tab> {
                 //
                 // Arrow-key nudges (`arrow_key_offset.is_some()`) are atomic
                 // per keypress, so each one is a finalised event right away.
+                //
+                // Remember the starting fraction in explicit state (see
+                // `State::separator_drag_start`): on `drag_stopped` it lets us
+                // tell a real move from "grabbed and released with no effective
+                // motion" (clicking a separator that is already clamped) and
+                // skip `LayoutCommitted` in the latter case — otherwise
+                // consumers that diff a layout snapshot receive a commit event
+                // with no mutation behind it.
+                if response.drag_started() {
+                    state.separator_drag_start = Some((response.id, split.fraction));
+                }
+
                 let range = rect.max.dim_point - rect.min.dim_point;
                 if range > 0.0 {
                     let min = (style.separator.extra / range).min(1.0);
@@ -591,10 +609,20 @@ impl<Tab> DockArea<'_, Tab> {
                 }
 
                 // egui only flips `drag_stopped` after `drag_started`, so a
-                // simple click without motion does not reach this branch:
-                // one `LayoutCommitted` per completed mouse drag.
+                // simple click without motion does not reach this branch.
+                // Additionally check that the fraction really changed since
+                // `drag_started`: a grab-and-release with no effective motion
+                // would otherwise emit a commit event with no mutation behind
+                // it, which breaks snapshot-diffing consumers.
                 if response.drag_stopped() {
-                    self.events.push(DockEvent::LayoutCommitted);
+                    let start = state
+                        .separator_drag_start
+                        .take_if(|(id, _)| *id == response.id)
+                        .map(|(_, f)| f);
+                    let moved = start.is_none_or(|f| f != split.fraction);
+                    if moved {
+                        self.events.push(DockEvent::LayoutCommitted);
+                    }
                 }
 
                 if response.double_clicked() && split.fraction != 0.5 {

@@ -9,6 +9,21 @@ pub(super) struct State {
     pub last_hover_pos: Option<Pos2>,
     pub dnd: Option<DragDropState>,
     pub window_fade: Option<(f64, SurfaceIndex)>,
+    /// `(separator id, its `fraction` at `drag_started()`)`, kept until
+    /// `drag_stopped()`. Lets us tell a real move from "grabbed and released with
+    /// no effective motion" (a click while the split is already clamped to its
+    /// min/max, so the accumulated delta is zero) and skip `LayoutCommitted` in
+    /// the latter case.
+    ///
+    /// Semantic note: these are conceptually two levels — (1) *interaction*, "the
+    /// user touched the separator" (always fires on release), and (2) *state
+    /// change*, "the layout actually changed" (only when
+    /// `fraction_end != fraction_start`). They are currently merged into a single
+    /// `LayoutCommitted`, and this guard deliberately drops level (1) in favour of
+    /// (2): consumers that diff a layout snapshot get a commit event with nothing
+    /// to diff otherwise. If level (1) is ever needed (telemetry, focus-on-grab),
+    /// split it into a separate event rather than removing the guard.
+    pub separator_drag_start: Option<(Id, f32)>,
 }
 
 impl State {
@@ -19,6 +34,7 @@ impl State {
             last_hover_pos: None,
             dnd: None,
             window_fade: None,
+            separator_drag_start: None,
         })
     }
 

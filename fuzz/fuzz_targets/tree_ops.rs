@@ -54,14 +54,79 @@ enum Op {
     /// Drop every tab whose value is odd — a destructive sweep that touches every surface at
     /// once, which no other op does.
     RetainOdd,
+    /// Rebuild the whole dock through the copying sweep (`map_tabs`) with an identity
+    /// function. Structurally this is the widest operation there is — every surface and every
+    /// node is rebuilt — and it must still be invisible: same tabs, in the same surfaces,
+    /// under the same indices.
+    Remap,
+    /// The copying sibling of `RetainOdd`: same sweep, but through `filter_tabs`, which builds
+    /// a new dock instead of editing this one. The two paths keep the surface vector in
+    /// different code, so a fix to one says nothing about the other.
+    FilterOddCopying,
 }
 
 /// Whether an operation is allowed to reduce the total number of tabs.
 fn is_destructive(op: Op) -> bool {
     matches!(
         op,
-        Op::RemoveLeaf { .. } | Op::RemoveTab { .. } | Op::RemoveSurface { .. } | Op::RetainOdd
+        Op::RemoveLeaf { .. }
+            | Op::RemoveTab { .. }
+            | Op::RemoveSurface { .. }
+            | Op::RetainOdd
+            | Op::FilterOddCopying
     )
+}
+
+/// The layout of one subtree, written down: split orientations, nesting, and the tabs of each
+/// leaf in order.
+///
+/// Node *ids* are deliberately not part of it. A copying sweep builds a fresh arena and hands
+/// out fresh ids, so slot order is an implementation detail — whereas which split holds what,
+/// and in which order, is exactly what the user sees.
+fn shape_of(tree: &egui_dock::Tree<u32>, id: egui_dock::NodeId, out: &mut String) {
+    match &tree[id] {
+        Node::Leaf(leaf) => {
+            out.push('[');
+            for tab in leaf.iter_tabs() {
+                out.push_str(&format!("{tab},"));
+            }
+            out.push(']');
+        }
+        node => {
+            out.push(if matches!(node, Node::Vertical(_)) { 'V' } else { 'H' });
+            let [first, second] = tree.children(id).unwrap();
+            out.push('(');
+            shape_of(tree, first, out);
+            out.push('|');
+            shape_of(tree, second, out);
+            out.push(')');
+        }
+    }
+}
+
+/// The layout of every surface that holds a tab, keyed by its index.
+///
+/// Surfaces without tabs are skipped, for two independent reasons:
+///
+/// * trailing holes may legally be popped, and that shifts nothing that has tabs in it;
+/// * an empty dock has more than one legal shape — a tree with an empty root leaf (what
+///   `ensure_tree` rebuilds) and a tree with no root at all (what a copying sweep leaves).
+///   `filter_none_then_push` pins that the difference is invisible to the next operation, so
+///   it is not something this oracle should be reporting.
+fn layout_by_surface(state: &DockState<u32>) -> Vec<(SurfaceIndex, String)> {
+    state
+        .iter_surfaces_indexed()
+        .filter_map(|(index, surface)| {
+            let tree = surface.node_tree()?;
+            let root = tree.root()?;
+            if surface.iter_all_tabs().next().is_none() {
+                return None;
+            }
+            let mut shape = String::new();
+            shape_of(tree, root, &mut shape);
+            Some((index, shape))
+        })
+        .collect()
 }
 
 fn split_from(index: u8) -> Split {
@@ -226,6 +291,19 @@ fn apply(state: &mut DockState<u32>, op: Op, next_tab: &mut u32) -> bool {
         }
 
         Op::RetainOdd => state.retain_tabs(|tab| *tab % 2 == 1),
+
+        Op::Remap => {
+            let before = layout_by_surface(state);
+            let mapped = state.map_tabs(|tab| *tab);
+            assert_eq!(
+                layout_by_surface(&mapped),
+                before,
+                "an identity map must rename nothing"
+            );
+            *state = mapped;
+        }
+
+        Op::FilterOddCopying => *state = state.filter_tabs(|tab| *tab % 2 == 1),
     }
 
     true

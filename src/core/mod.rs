@@ -332,7 +332,24 @@ impl<Tab> DockState<Tab> {
                 }
             }
             TabDestination::EmptySurface(dst_surface) => {
-                assert!(self[dst_surface].is_empty());
+                // Which "empty" this is matters: the destination must be a surface that
+                // *holds a tree with no root* — not a hole in the surface vector
+                // (`Surface::Empty`), which the index below panics on rather than filling.
+                // The UI only ever produces this destination for the first kind, under the
+                // very same condition (`show_root_surface_inside` offers the whole area as a
+                // drop target exactly when `main_surface().is_empty()`), so the assert is a
+                // guard for hand-built calls.
+                assert!(
+                    self.get_surface(dst_surface)
+                        .is_some_and(|surface| surface.node_tree().is_some()),
+                    "{dst_surface:?} is not a surface with a tree; \
+                     TabDestination::EmptySurface means an empty *tree*, not an empty slot"
+                );
+                assert!(
+                    self[dst_surface].is_empty(),
+                    "{dst_surface:?} still holds a layout; a tab may only be dropped onto a \
+                     surface whose tree is empty"
+                );
                 let tab = self[src.node_path()].remove_tab(src.tab).unwrap();
                 self[dst_surface] = Tree::new(vec![tab])
             }
@@ -616,8 +633,40 @@ impl<Tab> DockState<Tab> {
             .filter_map(|(index, node)| node.get_leaf_mut().map(|leaf| (index, leaf)))
     }
 
+    /// Restores the bookkeeping that spans surfaces after a sweep emptied some of them.
+    ///
+    /// Any operation that can null out surfaces has to run this, and it is deliberately one
+    /// function: the three rules below are not independent, and each of them has already been
+    /// a bug once (see `FINDINGS.md`).
+    ///
+    /// * **holes stay holes.** `SurfaceIndex` is a position in the vector, so compacting it
+    ///   renumbers every surface after the one that went away — `focused_surface` and any index
+    ///   a caller was holding then name a different window. Only *trailing* holes are popped,
+    ///   and those can shift nothing that survived.
+    /// * **the main surface always holds a tree.** Indexing, [`main_surface`](Self::main_surface)
+    ///   and focus resolution all assume it without asking. Emptying every tab leaves an empty
+    ///   dock, not a dock with no main surface.
+    /// * **focus points somewhere real.** It may have been inside a window that is now gone.
+    fn normalize_surfaces(&mut self) {
+        while self.surfaces.len() > 1 && self.surfaces.last().is_some_and(Surface::is_empty) {
+            self.surfaces.pop();
+        }
+
+        self.ensure_tree(SurfaceIndex::main());
+
+        if !self
+            .focused_surface
+            .is_some_and(|surface| self.is_surface_valid(surface))
+        {
+            self.focused_surface = None;
+        }
+    }
+
     /// Returns a new [`DockState`] while mapping and filtering the tab type.
-    /// Any remaining empty [`Node`]s and [`Surface`]s are removed.
+    ///
+    /// Any remaining empty [`Node`]s are removed, and a [`Surface`] left without tabs becomes
+    /// [`Empty`](Surface::Empty) — a hole in place, not a gap: see
+    /// [`normalize_surfaces`](Self::normalize_surfaces) for why the vector is not compacted.
     ///
     /// ```
     /// # use egui_dock::{DockState, Node};
@@ -638,16 +687,15 @@ impl<Tab> DockState<Tab> {
         } = self;
         let surfaces = surfaces
             .iter()
-            .filter_map(|surface| {
-                let surface = surface.filter_map_tabs(&mut function);
-                (!surface.is_empty()).then_some(surface)
-            })
+            .map(|surface| surface.filter_map_tabs(&mut function))
             .collect();
-        DockState {
+        let mut mapped = DockState {
             surfaces,
             focused_surface: *focused_surface,
             translations: translations.clone(),
-        }
+        };
+        mapped.normalize_surfaces();
+        mapped
     }
 
     /// Returns a new [`DockState`] while mapping the tab type.
@@ -668,7 +716,9 @@ impl<Tab> DockState<Tab> {
     }
 
     /// Returns a new [`DockState`] while filtering the tab type.
-    /// Any remaining empty [`Node`]s and [`Surface`]s are removed.
+    ///
+    /// Any remaining empty [`Node`]s are removed, and a [`Surface`] left without tabs becomes
+    /// [`Empty`](Surface::Empty) in place — see [`filter_map_tabs`](Self::filter_map_tabs).
     ///
     /// ```
     /// # use egui_dock::{DockState, Node};
@@ -687,7 +737,10 @@ impl<Tab> DockState<Tab> {
     }
 
     /// Removes all tabs for which `predicate` returns `false`.
-    /// Any remaining empty [`Node`]s and [`Surface`]s are also removed.
+    ///
+    /// Any remaining empty [`Node`]s are also removed, and a [`Surface`] left without tabs
+    /// becomes [`Empty`](Surface::Empty) in place — see
+    /// [`normalize_surfaces`](Self::normalize_surfaces).
     ///
     /// ```
     /// # use egui_dock::{DockState, Node};
@@ -705,32 +758,10 @@ impl<Tab> DockState<Tab> {
             surface.retain_tabs(&mut predicate);
         }
 
-        // A window that lost its last tab leaves a *hole*, not a gap. `SurfaceIndex` is a
-        // position in this vector, so compacting it (which is what this used to do) silently
-        // renumbered every window after the one that went away: `focused_surface` and any
-        // index a caller was holding then named a different window — or none, which is how
-        // this was found, as a panic in `ensure_tree` on an index past the end.
-        //
-        // `remove_surface` already leaves holes for exactly this reason; only *trailing*
-        // holes are popped, and those can shift nothing that survived.
-        while self.surfaces.len() > 1 && self.surfaces.last().is_some_and(Surface::is_empty) {
-            self.surfaces.pop();
-        }
-
-        // `Surface::retain_tabs` nulls out a surface whose tree it emptied, and it cannot know
-        // that the main surface is the one surface that must always hold a tree: indexing the
-        // dock state, `main_surface()` and `focused_leaf()` all resolve it without asking. So
-        // it is rebuilt here, empty but present — filtering every tab away leaves an empty
-        // dock, not a dock with no main surface.
-        self.ensure_tree(SurfaceIndex::main());
-
-        // Focus may have been inside a window that no longer exists.
-        if !self
-            .focused_surface
-            .is_some_and(|surface| self.is_surface_valid(surface))
-        {
-            self.focused_surface = None;
-        }
+        // `Surface::retain_tabs` nulls out a surface whose tree it emptied, but it can neither
+        // see the vector it sits in nor know that surface 0 is special. Both — plus focus that
+        // may have been inside a window that is now gone — are settled one level up.
+        self.normalize_surfaces();
     }
 
     /// Find a tab based on the conditions of a function.
@@ -785,6 +816,125 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// Tabs held by one surface, addressed by index — the thing that must not move.
+    fn tabs_of<Tab: Clone>(state: &DockState<Tab>, surface: SurfaceIndex) -> Vec<Tab> {
+        state
+            .iter_all_tabs()
+            .filter(|(path, _)| path.surface == surface)
+            .map(|(_, tab)| tab.clone())
+            .collect()
+    }
+
+    /// A hole in the surface vector must survive `map_tabs`, which renames nothing.
+    ///
+    /// `remove_surface` leaves `Surface::Empty` behind rather than compacting, because
+    /// `SurfaceIndex` is a *position*. A map that drops those holes renumbers every window
+    /// after them — the same bug that was fixed in `retain_tabs`, one function over.
+    #[test]
+    fn map_tabs_keeps_window_indices() {
+        let mut state = DockState::new(vec![0u32]);
+        let hole = state.add_window(vec![1]);
+        let kept = state.add_window(vec![2]);
+        state.remove_surface(hole);
+
+        let mapped = state.map_tabs(|tab| tab.to_string());
+
+        let tabs = tabs_of(&mapped, kept);
+        assert_eq!(
+            tabs,
+            vec!["2".to_string()],
+            "window {kept:?} must still be window {kept:?}"
+        );
+    }
+
+    /// Same, for a window emptied *by the filter itself*.
+    #[test]
+    fn filter_tabs_keeps_indices_of_surviving_windows() {
+        let mut state = DockState::new(vec![0u32]);
+        let dropped = state.add_window(vec![1]);
+        let kept = state.add_window(vec![2]);
+
+        let filtered = state.filter_tabs(|tab| *tab != 1);
+
+        assert!(
+            filtered.get_surface(dropped).is_some_and(Surface::is_empty),
+            "the emptied window must leave a hole, not a gap"
+        );
+        assert_eq!(tabs_of(&filtered, kept), vec![2]);
+    }
+
+    /// Focus copied verbatim into a state whose windows are gone names a surface that
+    /// isn't there — the dock's own oracle rejects it.
+    #[test]
+    fn filter_tabs_does_not_carry_focus_into_nothing() {
+        let mut state = DockState::new(vec![0u32]);
+        let window = state.add_window(vec![1]);
+        let leaf = state[window].root().unwrap();
+        state.set_focused_node_and_surface(NodePath {
+            surface: window,
+            node: leaf,
+        });
+
+        let filtered = state.filter_tabs(|tab| *tab != 1);
+
+        assert_eq!(filtered.validate(), Ok(()));
+    }
+
+    /// Dropping a tab onto an emptied main surface — the one path that reaches
+    /// [`TabDestination::EmptySurface`] from the UI.
+    ///
+    /// The dock gets there by losing its last tab, which leaves the main surface holding a
+    /// tree with no root; that, and not a hole in the surface vector, is the "empty" this
+    /// destination means.
+    #[test]
+    fn move_tab_onto_an_emptied_main_surface() {
+        let mut state = DockState::new(vec![0u32]);
+        let window = state.add_window(vec![1]);
+        let main_leaf = state.main_surface().root().unwrap();
+        state.remove_leaf(NodePath {
+            surface: SurfaceIndex::main(),
+            node: main_leaf,
+        });
+        assert!(
+            state.main_surface().is_empty(),
+            "the drop target is only offered for a rootless main surface"
+        );
+
+        let source = state.find_tab(&1).unwrap();
+        state.move_tab(source, TabDestination::EmptySurface(SurfaceIndex::main()));
+
+        assert_eq!(tabs_of(&state, SurfaceIndex::main()), vec![1]);
+        assert!(
+            tabs_of(&state, window).is_empty(),
+            "the window that gave up its last tab is gone"
+        );
+        assert_eq!(
+            state.surfaces_count(),
+            1,
+            "and being the last surface, its slot is popped rather than kept as a hole"
+        );
+        assert_eq!(state.validate(), Ok(()));
+    }
+
+    /// The copying twin of `retain_none_then_push`.
+    ///
+    /// The two sweeps leave the main surface in *different* shapes of empty: `retain_tabs`
+    /// rebuilds it as a tree with an empty root leaf (its surface was nulled, so `ensure_tree`
+    /// runs), while `filter_tabs` leaves a tree with no root at all (`Surface::Main` is never
+    /// nulled, so nothing rebuilds it). Both are legal empty docks — this pins that the
+    /// difference stays invisible to the next push.
+    #[test]
+    fn filter_none_then_push() {
+        let state = DockState::new(vec![0u32]);
+        let mut filtered = state.filter_tabs(|_| false);
+        assert_eq!(filtered.validate(), Ok(()));
+
+        filtered.push_to_focused_leaf(1);
+
+        assert_eq!(filtered.validate(), Ok(()));
+        assert_eq!(filtered.iter_all_tabs().count(), 1);
+    }
 
     #[test]
     fn retain_none_then_push() {

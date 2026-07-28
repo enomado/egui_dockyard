@@ -12,6 +12,72 @@ Ordered newest first.
 
 ---
 
+## Surfaces are addressed by position too, and every sweep repaired them differently
+
+**Status upstream:** not submitted.
+
+**Symptom.** Four separate failures, found by fuzzing dock operations against
+`DockState::validate`:
+
+- closing the last tab of a window by filtering (`retain_tabs`) renumbered every *later*
+  window. Loudly, this was a panic in `ensure_tree` once `focused_surface` pointed past the
+  end of the vector; quietly, a window the user had left alone became a different window;
+- the same sweep could leave the dock with **no main surface at all** — a state that
+  indexing, `main_surface()` and focus resolution all assume cannot happen;
+- a stored `focused_surface` naming a surface the file does not contain was handed back as
+  read, so a layout on disk could panic the frame that loaded it;
+- `filter_map_tabs` (and with it `map_tabs` / `filter_tabs`, which are one line each on top
+  of it) had *both* of the first two bugs, in its own copy of the code, still unfixed after
+  the others were. An identity `map_tabs` — an operation that renames nothing by definition —
+  moved windows to different indices whenever an earlier surface was a hole.
+
+**Root cause.** `SurfaceIndex` is a *position* in `DockState::surfaces`, exactly as `NodeIndex`
+used to be a position in the node vector (see the finding below). `remove_surface` knows this
+and leaves `Surface::Empty` behind rather than compacting — but every other sweep that could
+empty a surface was written independently, and each made its own choice: `retain_tabs`
+compacted with `retain_mut`, `filter_map_tabs` compacted with `filter_map`, and neither knew
+that surface 0 is not like the others or that focus might have been inside what they removed.
+Three rules, four call sites, no shared code — so fixing one said nothing about the next.
+
+**Fix.** One private `DockState::normalize_surfaces`, called by every sweep, spelling out the
+three rules that are not independent:
+
+- holes stay holes; only *trailing* holes are popped, since those can shift nothing that
+  survived;
+- the main surface always holds a tree — filtering every tab away leaves an empty dock, not a
+  dock without a main surface;
+- focus points at a surface that is still there, or at nothing.
+
+`DockState::deserialize` is hand-written for the same reason: a file is just another way to
+arrive at a state, and a derived `Deserialize` hands back whatever was written.
+
+**Evidence.** Regression tests next to the code: `retain_tabs_does_not_renumber_surviving_windows`,
+`retain_tabs_keeps_the_main_surface`,
+`retain_tabs_that_drops_the_focused_window_leaves_focus_resolvable`,
+`map_tabs_keeps_window_indices`, `filter_tabs_keeps_indices_of_surviving_windows`,
+`filter_tabs_does_not_carry_focus_into_nothing`. The oracle grew two checks of its own —
+`FocusedSurfaceInvalid` and `MainSurfaceMissing` — because surface bookkeeping is state that no
+per-tree check can see; both are themselves tested by corrupting a state on purpose.
+
+Mutation-checked: restoring the compaction fails the renumbering tests, dropping the focus
+repair fails the panic test.
+
+The fuzz target `tree_ops` now carries the copying sweeps as operations of their own, with the
+oracle that an identity `map_tabs` must leave every tab-holding surface at the same index with
+the same layout. It found the `filter_map_tabs` half of this finding in under a minute.
+
+**Not fixed, worth knowing.** "Empty" means three different things here — a null slot in the
+surface vector (`Surface::Empty`), a tree with no root (`Tree::is_empty`), and a root leaf
+holding no tabs — and the sweeps do not agree on which one an emptied dock ends up in:
+`retain_tabs` rebuilds the main surface with an empty root leaf, `filter_tabs` leaves it
+rootless. Both are legal empty docks and the difference is invisible to the next operation
+(`filter_none_then_push`, `retain_none_then_push`), but the same ambiguity has a sharper edge
+in `move_tab`: its `TabDestination::EmptySurface` branch asserts `self[dst].is_empty()` through
+an index that panics on `Surface::Empty`, so the branch is reachable only for a surface with an
+empty *tree*, never for a hole.
+
+---
+
 ## The tree addressed nodes by position, so every structural edit renamed them
 
 **Status upstream:** not submitted. This is a representation change, not a patch — it is

@@ -639,9 +639,20 @@ impl<Tab> DockArea<'_, Tab> {
 
                 let range = rect.max.dim_point - rect.min.dim_point;
                 if range > 0.0 {
-                    let min = (style.separator.extra / range).min(1.0);
+                    // `separator.extra` is a margin in *pixels* that each child must keep, so as
+                    // a fraction it is `extra / range` — and on a node shorter than twice that
+                    // margin there is no position honouring both sides.
+                    //
+                    // Capping the margin at half the node is what makes that case degrade
+                    // sensibly: the band shrinks to a point and the separator pins to the centre,
+                    // an equal split, which is the least-bad answer when there is no room to
+                    // give. The previous normalisation `(min.min(max), max.max(min))` instead
+                    // *swapped* the inverted pair, and `extra/range >= 1` therefore produced the
+                    // interval `(0, 1)` — no clamp at all, exactly on the nodes where the clamp
+                    // was the only thing standing between a child and zero size. Found by the
+                    // frame harness: a drag on a 175 px node drove `fraction` to 0.0.
+                    let min = (style.separator.extra / range).min(0.5);
                     let max = 1.0 - min;
-                    let (min, max) = (min.min(max), max.max(min));
                     let is_arrow = arrow_key_offset.is_some();
                     let delta = arrow_key_offset.unwrap_or(response.drag_delta()).dim_point;
                     let new_fraction = (split.fraction + delta / range).clamp(min, max);

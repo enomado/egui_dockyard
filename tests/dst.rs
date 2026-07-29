@@ -108,6 +108,16 @@ enum Step {
     Split { leaf: usize, split: usize },
     /// Close a leaf through the model.
     CloseLeaf { leaf: usize },
+    /// Drag the separator of a split node, moving the boundary between its two children.
+    ///
+    /// The only gesture here that edits a number rather than the shape — and that number,
+    /// `fraction`, is persisted state. Nothing else in this harness ever moves it.
+    DragSeparator { node: usize, by: i16 },
+    /// Press a separator and let it go without moving. Nothing may happen, and — the part that
+    /// needs a frame to judge — the dock must not *say* anything happened.
+    GrabSeparator { node: usize },
+    /// Double-click a separator, which centres it.
+    CentreSeparator { node: usize },
     /// Let a frame pass with no input at all.
     Idle,
 }
@@ -269,10 +279,37 @@ struct Sim {
     /// fired blind, and a harness that skips everything is green and useless — so these are
     /// counted next to the successes rather than dropped on the floor.
     refused: [usize; REFUSALS],
-    /// Whether any frame since the last [`Sim::take_committed`] reported a finalised layout
-    /// change. Accumulated rather than read per frame because one gesture spans several frames
-    /// and only one of them carries the event.
-    committed: bool,
+    /// Finalised layout changes reported since the last [`Sim::take_commits`].
+    ///
+    /// Accumulated rather than read per frame because one gesture spans several frames and only
+    /// one of them carries the event — and *counted* rather than flagged, because the separator's
+    /// contract is about the number: a drag that lasts six frames must produce exactly one
+    /// commit, not one per frame. A boolean cannot tell those apart.
+    commits: usize,
+    /// How much the separator gestures actually got to do — see [`SeparatorWatch`].
+    separator: SeparatorWatch,
+}
+
+/// Coverage of the separator gestures, counted while the run happens.
+///
+/// Every one of these can be zero in a perfectly green run, and each zero means a different
+/// property was never put to the test — so the sweep asserts them rather than printing them.
+#[derive(Clone, Copy, Default, Debug)]
+struct SeparatorWatch {
+    /// Drags that found a separator to grab at all.
+    drags: usize,
+    /// ...of which moved the boundary. A sweep whose every drag ran into the clamp would leave
+    /// the "one completed gesture, one commit" rule judged only on drags that changed nothing.
+    moves: usize,
+    /// ...and of which found the boundary already against the clamp and moved it nowhere. The
+    /// other half of the same rule: with no drag in this state, "a gesture that changed nothing
+    /// announces nothing" is never asked of the drag path, and the fraction oracle never sees a
+    /// fraction under pressure. The generator draws offsets big enough to reach it on purpose.
+    clamped: usize,
+    /// Grabs pressed and released without motion — the regime where the dock must stay silent.
+    grabs: usize,
+    /// Double-clicks that re-centred an off-centre separator.
+    centrings: usize,
 }
 
 /// What a step actually did to the dock — measured after the fact, not assumed from its name.
@@ -288,11 +325,12 @@ enum Outcome {
     SurfaceClosed,
     LeafClosed,
     Refocused,
+    SeparatorMoved,
     Nothing,
 }
 
 /// Width of the coverage counter.
-const OUTCOMES: usize = 6;
+const OUTCOMES: usize = 7;
 
 /// Slot of the coverage counter, or `None` for "nothing happened", which is not coverage.
 fn outcome_index(outcome: Outcome) -> Option<usize> {
@@ -303,6 +341,7 @@ fn outcome_index(outcome: Outcome) -> Option<usize> {
         Outcome::SurfaceClosed => 3,
         Outcome::LeafClosed => 4,
         Outcome::Refocused => 5,
+        Outcome::SeparatorMoved => 6,
         Outcome::Nothing => return None,
     })
 }
@@ -331,6 +370,31 @@ struct Effect {
     /// Named up front rather than derived from the diff: "whatever changed was allowed to
     /// change" is not a property, it is a tautology.
     touched: Vec<NodePath>,
+    /// How many finalised layout changes the dock was allowed to announce for this step, and how
+    /// many it did.
+    ///
+    /// The lie this catches lives *between* the mutation and the event, so neither side can see
+    /// it alone — the same shape as the drop that used to announce a commit while moving nothing
+    /// (P14). Here the number matters as well as the fact: a separator drag spans six frames and
+    /// updates `fraction` on every one of them, so "at least one commit" would be satisfied by
+    /// the very behaviour the dock deliberately avoids (a commit per frame, leaving consumers to
+    /// dedupe an interaction in progress).
+    commits: CommitRule,
+    /// A rule the step broke about itself, in its own words — reported like any other failure so
+    /// that it arrives with a step index and a shrunk scenario.
+    forbidden: Option<String>,
+}
+
+/// What the dock was allowed to announce for a step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommitRule {
+    /// Exactly one finalised event, no more: one completed gesture, one undo entry.
+    Once,
+    /// None at all: nothing changed, so nothing may be announced.
+    Never,
+    /// Not this stage's business — the step goes through the model, or spans gestures whose event
+    /// contract is judged elsewhere.
+    Unjudged,
 }
 
 /// Every live leaf's identities, in tree order. See [`Sim::identities`].
@@ -360,6 +424,7 @@ const OUTCOME_NAMES: [&str; OUTCOMES] = [
     "SurfaceClosed",
     "LeafClosed",
     "Refocused",
+    "SeparatorMoved",
 ];
 
 impl Sim {
@@ -373,7 +438,8 @@ impl Sim {
             effective: [0; OUTCOMES],
             aimed: 0,
             refused: [0; REFUSALS],
-            committed: false,
+            commits: 0,
+            separator: SeparatorWatch::default(),
         };
         // One frame before anything else: gestures aim with geometry, and geometry does not
         // exist until a pass has run.
@@ -401,22 +467,30 @@ impl Sim {
 
         let state = &mut self.state;
         let style = &self.style;
-        let mut committed = false;
+        let mut commits = 0usize;
         let _ = self.ctx.run_ui(input, |ctx| {
             CentralPanel::default().show(ctx, |ui| {
                 let response = DockArea::new(state)
                     .style(style.clone())
                     .show_inside_with_response(ui, &mut Viewer);
-                committed |= response.layout_committed();
+                // One per *frame* that carried a finalised event, which is the unit the contract
+                // is written in: a live separator drag reports `SeparatorDragging` on every frame
+                // it moves and a single `LayoutCommitted` on release.
+                commits += usize::from(response.layout_committed());
             });
         });
-        self.committed |= committed;
+        self.commits += commits;
     }
 
-    /// Whether the dock reported a finalised layout change since this was last called, and
-    /// resets the flag.
+    /// How many finalised layout changes the dock reported since this was last called, and resets
+    /// the counter.
+    fn take_commits(&mut self) -> usize {
+        std::mem::take(&mut self.commits)
+    }
+
+    /// Whether the dock reported any finalised layout change since this was last called.
     fn take_committed(&mut self) -> bool {
-        std::mem::take(&mut self.committed)
+        self.take_commits() > 0
     }
 
     /// Geometry left behind by the last frame.
@@ -601,6 +675,116 @@ impl Sim {
         })
     }
 
+    /// Every split node of every surface, in tree order, with the point to grab its separator and
+    /// the fraction it currently sits at.
+    ///
+    /// The point to press is the middle of the **gap between the two children**, read out of the
+    /// geometry map rather than re-derived from the fraction. That is not a shortcut, it is the
+    /// whole difference between a clean gesture and a muddled one: the layout pass carves the
+    /// separator's width out of both children, so the gap belongs to no leaf, while the midpoint
+    /// computed from the fraction lands *on the edge* of the left child — `Rect::contains` is
+    /// inclusive — and a press there focuses that leaf as well. Measured, not reasoned: the first
+    /// version aimed at the fraction and the sweep failed on a commit that turned out to be a
+    /// focus move nobody had asked for.
+    ///
+    /// Splits whose children abut with no gap are left out, and so are the ones whose separator
+    /// the dock does not draw at all (a vertical split with a collapsed child): a press there is
+    /// not "a separator grab that did nothing", it is a press on whatever lies underneath.
+    fn separators(&self) -> Vec<(NodePath, Pos2, f32)> {
+        let layout = self.layout();
+        self.state
+            .iter_all_nodes()
+            .filter_map(|(path, node)| {
+                let split = node.get_split()?;
+                let vertical = matches!(node, Node::Vertical(_));
+
+                let [first, second] = self.state[path.surface].children(path.node)?;
+                let child_path = |child: NodeId| NodePath::new(path.surface, child);
+                if vertical
+                    && (self.state[child_path(first)].is_collapsed()
+                        || self.state[child_path(second)].is_collapsed())
+                {
+                    return None;
+                }
+
+                let before = layout.get(child_path(first))?.rect;
+                let after = layout.get(child_path(second))?.rect;
+                let (lo, hi) = if vertical {
+                    (before.max.y, after.min.y)
+                } else {
+                    (before.max.x, after.min.x)
+                };
+                if hi <= lo {
+                    return None;
+                }
+                let across = layout.get(path)?.rect.center();
+                let at = if vertical {
+                    Pos2::new(across.x, (lo + hi) * 0.5)
+                } else {
+                    Pos2::new((lo + hi) * 0.5, across.y)
+                };
+                Some((path, at, split.fraction))
+            })
+            .collect()
+    }
+
+    /// The fraction of every split node, in tree order — the state a separator gesture changes and
+    /// the trace could not see.
+    ///
+    /// Written into the trace as well as the snapshot, and that is a deliberate reversal: P11 kept
+    /// fractions *out* of this trace because the trace answers "does a seed replay the same way"
+    /// and nothing in the harness moved a fraction. Now something does, so a trace without them
+    /// would be blind to precisely the gesture this stage adds.
+    fn fraction_trace(&self) -> String {
+        let mut out = String::new();
+        for (path, _, fraction) in self.separators() {
+            let _ = write!(out, "{}:{fraction:.4} ", surface_label(path.surface));
+        }
+        out
+    }
+
+    /// Presses a separator and releases it without moving the pointer.
+    fn grab(&mut self, at: Pos2) {
+        self.run_frame(vec![Event::PointerMoved(at)]);
+        self.run_frame(vec![Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        }]);
+        // Held for a frame, so that egui has every chance to call it a drag if it is going to.
+        self.run_frame(vec![Event::PointerMoved(at)]);
+        self.run_frame(vec![Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }]);
+        self.run_frame(vec![]);
+    }
+
+    /// Double-clicks at a point.
+    ///
+    /// Preceded by a pause, because egui counts clicks in a window: a third click soon after a
+    /// double-click is a *triple* click, not the start of a second pair. Two double-clicks in a
+    /// row without this are two clicks and two nothings — a test written that way passes without
+    /// the second gesture ever reaching the dock, which is the "green for free" the mutation
+    /// below caught.
+    fn double_click(&mut self, at: Pos2) {
+        self.pause();
+        self.click(at);
+        self.click(at);
+    }
+
+    /// Frames enough for egui to forget the last click. **Measured, not looked up:** at 24 frames
+    /// a second double-click still came through as two singles, at 30 it registered, so the real
+    /// boundary is somewhere near half a second and this leaves a full second of margin.
+    fn pause(&mut self) {
+        for _ in 0..60 {
+            self.run_frame(vec![]);
+        }
+    }
+
     /// How the dock differs from `before`, in the terms coverage is counted in.
     ///
     /// The order of the tests is the order of how much a change says: a drop that both opened a
@@ -613,6 +797,10 @@ impl Sim {
             () if now.surfaces < before.surfaces => Outcome::SurfaceClosed,
             () if now.leaves > before.leaves => Outcome::LeafSplit,
             () if now.leaves < before.leaves => Outcome::LeafClosed,
+            // Checked before the shape, because a moved separator leaves the shape *identical* —
+            // it is the one outcome the layout trace cannot see, which is why it needed its own
+            // snapshot field rather than a widening of the trace.
+            () if now.fractions != before.fractions => Outcome::SeparatorMoved,
             // Same shape, same counts, but the tabs are arranged differently: a tab landed in
             // another leaf that already had one.
             () if now.layout != before.layout => Outcome::Appended,
@@ -657,6 +845,7 @@ impl Sim {
             leaves: self.state.iter_leaves().count(),
             layout: self.layout_trace(),
             focus: self.focus_trace(),
+            fractions: self.fraction_trace(),
         }
     }
 
@@ -719,14 +908,24 @@ impl Sim {
                 return Some(Effect {
                     must_change_nothing: false,
                     touched: self.live_leaves(),
+                    commits: CommitRule::Unjudged,
+                    forbidden: None,
                 });
             }
             return None;
         }
         let before = self.snapshot();
+        // Anything the previous step left on the counter belongs to the previous step.
+        self.take_commits();
 
-        // Set by the two steps that are supposed to be no-ops; see `Effect`.
+        // Set by the steps that are supposed to be no-ops; see `Effect`.
         let mut must_change_nothing = false;
+        // Separator gestures are the ones whose event contract is judged here; everything else
+        // announces on its own terms and is judged by the tests that own it.
+        let mut commits = CommitRule::Unjudged;
+        // A rule a step can break about *itself*, in its own words. Reported by `run` so the
+        // failure names the step and its shrunk scenario like any other.
+        let mut forbidden: Option<String> = None;
 
         let touched = match step {
             Step::Drag { from, to, aim } => {
@@ -784,10 +983,119 @@ impl Sim {
                 vec![target]
             }
 
+            Step::DragSeparator { node, by } => {
+                let separators = self.separators();
+                if separators.is_empty() {
+                    return None;
+                }
+                let (path, at, fraction) = separators[node % separators.len()];
+                if self.window_over(at, path.surface) {
+                    // A separator under a floating window is not the thing the pointer would
+                    // reach; the same refusal the tab aims make, for the same reason.
+                    self.refused[refused_index(Refused::Contested)] += 1;
+                    return None;
+                }
+                // The offset is in pixels, and every value the generator draws clears egui's drag
+                // threshold. That is not fussiness: **measured**, a press-and-release spanning
+                // 6 px or less is a *click*, not a drag — the separator never moves and the leaf
+                // the pointer was released over gets focused instead. 8 px and up moves the
+                // boundary and commits exactly once. A generator that drew smaller offsets would
+                // be testing the click path under the name of the drag one.
+                let vertical = matches!(self.state[path], Node::Vertical(_));
+                let delta = f32::from(by);
+                let to = if vertical {
+                    at + Vec2::new(0.0, delta)
+                } else {
+                    at + Vec2::new(delta, 0.0)
+                };
+                let focus_before = self.focus_trace();
+                self.drag(at, to);
+                self.separator.drags += 1;
+
+                // The rule is read off the model, not predicted from the delta: a drag that ran
+                // into the clamp moved nothing, and a dock that announces a commit for it is
+                // exactly the fault this judges.
+                commits = if self.fraction_of(path) == Some(fraction) {
+                    self.separator.clamped += 1;
+                    CommitRule::Never
+                } else {
+                    self.separator.moves += 1;
+                    CommitRule::Once
+                };
+                // The assumption above, asserted where it is made rather than left to fail as a
+                // confusing commit count later: a drag that focused something was read as a click.
+                if self.focus_trace() != focus_before {
+                    forbidden = Some(format!(
+                        "a separator drag of {delta} px moved the focus ({focus_before} -> {}), \
+                         which is what happens when egui reads the gesture as a click rather than \
+                         a drag — the offsets this generator draws are supposed to clear that \
+                         threshold",
+                        self.focus_trace()
+                    ));
+                }
+                // A separator belongs to a split; the leaves either side keep every identity they
+                // had, so none of them is exempt. That is the point of listing nothing here.
+                Vec::new()
+            }
+
+            Step::GrabSeparator { node } => {
+                let separators = self.separators();
+                if separators.is_empty() {
+                    return None;
+                }
+                let (path, at, fraction) = separators[node % separators.len()];
+                if self.window_over(at, path.surface) {
+                    self.refused[refused_index(Refused::Contested)] += 1;
+                    return None;
+                }
+                self.grab(at);
+                self.separator.grabs += 1;
+
+                // A press without motion may not move a boundary. Not a matter of what the dock
+                // announced — this one is about the state itself, so it is judged whatever the
+                // events say.
+                if self.fraction_of(path) != Some(fraction) {
+                    forbidden = Some(format!(
+                        "a separator was pressed and released without the pointer moving, and the \
+                         boundary went from {fraction} to {:?}",
+                        self.fraction_of(path)
+                    ));
+                }
+
+                // Nothing moved and nothing was focused — the press landed in the gap, which is
+                // no leaf's — so the dock has nothing to announce. Stated flatly rather than
+                // measured after the fact: an exemption computed from the diff would make the
+                // rule agree with whatever happened.
+                commits = CommitRule::Never;
+                must_change_nothing = true;
+                Vec::new()
+            }
+
+            Step::CentreSeparator { node } => {
+                let separators = self.separators();
+                if separators.is_empty() {
+                    return None;
+                }
+                let (path, at, fraction) = separators[node % separators.len()];
+                if self.window_over(at, path.surface) {
+                    self.refused[refused_index(Refused::Contested)] += 1;
+                    return None;
+                }
+                self.double_click(at);
+                commits = if self.fraction_of(path) == Some(fraction) {
+                    CommitRule::Never
+                } else {
+                    self.separator.centrings += 1;
+                    CommitRule::Once
+                };
+                Vec::new()
+            }
+
             // A frame with no input at all: it is allowed to change nothing whatsoever, which
             // is why nothing is listed as touched.
             Step::Idle => {
                 must_change_nothing = true;
+                commits = CommitRule::Never;
                 self.run_frame(vec![]);
                 Vec::new()
             }
@@ -799,7 +1107,31 @@ impl Sim {
         Some(Effect {
             must_change_nothing,
             touched,
+            commits,
+            forbidden,
         })
+    }
+
+    /// The fraction of a split node, if it is still there and still a split.
+    fn fraction_of(&self, path: NodePath) -> Option<f32> {
+        self.state
+            .node(path)
+            .ok()
+            .and_then(|node| node.get_split())
+            .map(|split| split.fraction)
+    }
+
+    /// Whether a floating window other than `owner` sits over `point`.
+    ///
+    /// The leaf-shaped reading in [`Sim::interpret`] cannot answer this one: a separator is not
+    /// inside any leaf, so the question is only about what covers it.
+    fn window_over(&self, point: Pos2, owner: SurfaceIndex) -> bool {
+        let layout = self.layout();
+        self.state
+            .iter_all_nodes()
+            .filter(|(path, _)| path.surface != SurfaceIndex::main() && path.surface != owner)
+            .filter_map(|(path, _)| layout.get(path).map(|geometry| geometry.rect))
+            .any(|rect| rect.expand(WINDOW_FRAME_MARGIN).contains(point))
     }
 
     /// The dock's shape, written down: surfaces, splits, tabs per leaf.
@@ -824,22 +1156,43 @@ impl Sim {
 
     /// Which leaf is focused and which tab is active in it — the state a click changes without
     /// touching the shape.
+    ///
+    /// The focused leaf is named by its **position in tree order**, not by its surface. Naming
+    /// only the surface was wrong and quietly so: focus moving between two leaves of the same
+    /// surface — the ordinary case, since most docks are one surface — read as no change at all.
+    /// Everything downstream inherited the blindness: the replay comparison, `Outcome::Refocused`
+    /// (undercounted since P4), and any step judged to have "changed nothing". A position rather
+    /// than a `NodeId` because a rerun may legitimately hand out different ids.
     fn focus_trace(&self) -> String {
         let focused = self.state.focused_leaf();
+        let where_ = focused.map(|path| {
+            let position = self
+                .state
+                .iter_leaves()
+                .position(|(other, _)| other == path)
+                .expect("the focused leaf is one of the leaves");
+            format!("{}#{position}", surface_label(path.surface))
+        });
         let active = focused
             .and_then(|path| self.state.node(path).ok())
             .and_then(|node| node.get_leaf())
             .and_then(|leaf| leaf.active_index());
-        format!(
-            "focus:{:?} active:{:?}",
-            focused.map(|path| surface_label(path.surface)),
-            active
-        )
+        format!("focus:{where_:?} active:{active:?}")
     }
 
     /// Everything a step can change, in one string: the unit of comparison for replay.
+    ///
+    /// The fractions are in here as of P16. Before that nothing in the harness moved one, so the
+    /// trace could answer "does a seed replay the same way" without them; a separator gesture is
+    /// invisible in the shape, so leaving them out would make the replay check blind to precisely
+    /// the gesture that was just added.
     fn trace(&self) -> String {
-        format!("{} {}", self.layout_trace(), self.focus_trace())
+        format!(
+            "{} {} {}",
+            self.layout_trace(),
+            self.focus_trace(),
+            self.fraction_trace()
+        )
     }
 }
 
@@ -849,6 +1202,9 @@ struct Snapshot {
     leaves: usize,
     layout: String,
     focus: String,
+    /// Kept apart from `layout` on purpose: a separator gesture changes only this, so folding it
+    /// into the shape string would report a moved boundary as a rearranged tab.
+    fractions: String,
 }
 
 /// A short, stable number for a surface in traces.
@@ -896,8 +1252,20 @@ fn shape_of(tree: &Tree<String>, id: NodeId, out: &mut String) {
 /// machine — that is what makes a failure here a reproducible bug report.
 fn scenario(seed: u64, len: usize) -> Vec<Step> {
     let mut rng = Rng::new(seed);
-    (0..len)
-        .map(|_| match rng.below(12) {
+    let mut steps: Vec<Step> = Vec::with_capacity(len);
+    while steps.len() < len {
+        // Sometimes do the same thing again. Independent draws almost never reach a *saturated*
+        // state — a separator only sits against its clamp after something shoved it there, and the
+        // second shove is where "a gesture that changes nothing announces nothing" lives. Measured:
+        // without this, 24 separator drags across the sweep produced not one that found the
+        // boundary already at the limit.
+        if rng.below(6) == 0
+            && let Some(&previous) = steps.last()
+        {
+            steps.push(previous);
+            continue;
+        }
+        steps.push(match rng.below(16) {
             0..=4 => Step::Drag {
                 from: rng.below(8),
                 to: rng.below(8),
@@ -932,9 +1300,19 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
                     aim: Aim::Append,
                 }
             }
+            // The separator gestures. Drawn often enough that a sweep reaches the clamp at both
+            // ends: `by` spans a wide range on purpose, so some drags move the boundary a little
+            // and some try to shove it out of the node entirely.
+            10..=11 => Step::DragSeparator {
+                node: rng.below(6),
+                by: [-2000i16, -120, -16, 16, 120, 2000][rng.below(6)],
+            },
+            12 => Step::GrabSeparator { node: rng.below(6) },
+            13 => Step::CentreSeparator { node: rng.below(6) },
             _ => Step::Idle,
-        })
-        .collect()
+        });
+    }
+    steps
 }
 
 /// How a run ended.
@@ -948,6 +1326,8 @@ struct Run {
     refused: [usize; REFUSALS],
     /// How much the identity property actually got to check — see [`IdentityWatch`].
     identity: IdentityWatch,
+    /// How much the separator gestures got to do — see [`SeparatorWatch`].
+    separator: SeparatorWatch,
     /// The first step that left the dock invalid, if any.
     failure: Option<Failure>,
 }
@@ -1083,6 +1463,30 @@ fn run(steps: &[Step]) -> Run {
                     reason: complaint,
                 });
             }
+
+            if let Some(complaint) = effect.forbidden.clone() {
+                break 'scenario Some(Failure {
+                    step_index,
+                    step,
+                    reason: complaint,
+                });
+            }
+
+            if let Some(complaint) = commit_complaint(&effect, sim.take_commits()) {
+                break 'scenario Some(Failure {
+                    step_index,
+                    step,
+                    reason: complaint,
+                });
+            }
+
+            if let Some(complaint) = fraction_complaint(&sim) {
+                break 'scenario Some(Failure {
+                    step_index,
+                    step,
+                    reason: complaint,
+                });
+            }
         }
         None
     };
@@ -1093,8 +1497,51 @@ fn run(steps: &[Step]) -> Run {
         aimed: sim.aimed,
         refused: sim.refused,
         identity,
+        separator: sim.separator,
         failure,
     }
+}
+
+/// Checks what the dock *said* about a step against what it did.
+///
+/// Returns the complaint, or `None` if the announcement was in order. The rule comes from the
+/// step (see [`CommitRule`]) and the count from the frames, so neither side can quietly agree
+/// with itself: this is the seam where a commit with no mutation behind it, or a mutation that
+/// announced itself six times, becomes visible.
+fn commit_complaint(effect: &Effect, observed: usize) -> Option<String> {
+    match effect.commits {
+        CommitRule::Unjudged => None,
+        CommitRule::Never if observed > 0 => Some(format!(
+            "the dock reported {observed} finalised layout change(s) for a step that changed \
+             nothing — a consumer would write an undo entry and a file for an interaction that \
+             never happened"
+        )),
+        CommitRule::Once if observed != 1 => Some(format!(
+            "one completed gesture must be one finalised event, and the dock reported {observed}. \
+             Zero means a real change nobody will persist; more than one means the live frames of \
+             the drag are being announced as commits"
+        )),
+        _ => None,
+    }
+}
+
+/// Every split's fraction, checked for the one thing a gesture must never do to it.
+///
+/// `fraction` is clamped by `show_separator` so that neither child is squeezed out of existence;
+/// nothing in the model enforces that, and nothing in `validate()` should — a fraction is a
+/// number the model is happy to carry, and the invariant belongs to the gesture that writes it.
+/// So it is judged here, where the gesture runs.
+fn fraction_complaint(sim: &Sim) -> Option<String> {
+    sim.state
+        .iter_all_nodes()
+        .filter_map(|(path, node)| node.get_split().map(|split| (path, split.fraction)))
+        .find(|(_, fraction)| !(fraction.is_finite() && *fraction > 0.0 && *fraction < 1.0))
+        .map(|(path, fraction)| {
+            format!(
+                "the split at {path:?} sits at fraction {fraction}, which gives one of its \
+                 children no room at all — a panel the user can neither see nor drag back"
+            )
+        })
 }
 
 /// The text of a caught panic, for the report.
@@ -1153,6 +1600,289 @@ fn shrink(steps: &[Step], fails: &dyn Fn(&[Step]) -> bool) -> Vec<Step> {
 // ---------------------------------------------------------------------------------------
 // The harness itself
 // ---------------------------------------------------------------------------------------
+
+/// A dock split in two, with the separator between them found and reported.
+fn split_scene(split: Split) -> (Sim, NodePath, Pos2) {
+    let mut sim = Sim::new();
+    let root = sim.state.main_surface().root().unwrap();
+    sim.state.split(
+        NodePath::new(SurfaceIndex::main(), root),
+        split,
+        0.5,
+        Node::leaf("t1".to_string()),
+    );
+    sim.run_frame(vec![]);
+
+    let separators = sim.separators();
+    assert_eq!(
+        separators.len(),
+        1,
+        "one split, one separator to grab: {separators:?}"
+    );
+    let (path, at, _) = separators[0];
+    (sim, path, at)
+}
+
+/// Focus moving between two leaves of the same surface is a change the trace must show.
+///
+/// A gate on the harness rather than on the dock, and it earns its place: the trace used to name
+/// the *surface* of the focused leaf and nothing more, so the ordinary case — a dock with one
+/// surface and several panels — reported every focus move as no change at all. Everything built on
+/// the trace inherited that: the replay comparison, the `Refocused` counter (undercounted from P4
+/// until P16), and every judgement of the form "this step changed nothing". Weakening an
+/// observation is invisible by construction — nothing fails when a test stops looking — so the
+/// looking itself has to be asserted.
+#[test]
+fn focus_moving_between_leaves_of_one_surface_shows_in_the_trace() {
+    let mut sim = Sim::new();
+    let root = sim.state.main_surface().root().unwrap();
+    sim.state.split(
+        NodePath::new(SurfaceIndex::main(), root),
+        Split::Right,
+        0.5,
+        Node::leaf("t1".to_string()),
+    );
+    sim.run_frame(vec![]);
+
+    let leaves = sim.live_leaves();
+    assert_eq!(leaves.len(), 2, "two leaves of the same surface");
+
+    sim.click(sim.tab_rect(leaves[0], 0).expect("a tab to click").center());
+    let first = sim.trace();
+    sim.click(sim.tab_rect(leaves[1], 0).expect("a tab to click").center());
+    let second = sim.trace();
+
+    assert_ne!(
+        first, second,
+        "focus moved from one leaf to the other and the trace did not notice — every property \
+         judged on this trace is now blind to focus"
+    );
+    assert_eq!(sim.state.validate(), Ok(()));
+}
+
+/// The point a separator gesture aims at belongs to no leaf.
+///
+/// The whole no-op regime rests on this: a press that reaches a leaf body focuses it, which is a
+/// real change and a legitimate commit, and then "grabbing a separator changes nothing" is simply
+/// false. The gap between the children exists because the layout pass carves the separator's width
+/// out of both — a fact about the dock's geometry, so it is checked against the dock's geometry
+/// rather than trusted.
+#[test]
+fn the_point_a_separator_gesture_aims_at_belongs_to_no_leaf() {
+    for split in [Split::Right, Split::Below] {
+        let (sim, _, at) = split_scene(split);
+        let layout = sim.layout();
+
+        for leaf in sim.live_leaves() {
+            let rect = layout.get(leaf).expect("a laid-out leaf").rect;
+            assert!(
+                !rect.contains(at),
+                "the separator aim {at:?} is inside leaf {leaf:?} at {rect:?}: a press there \
+                 focuses the leaf, so every \"this gesture changed nothing\" below is a lie"
+            );
+        }
+    }
+}
+
+/// Dragging a separator moves the boundary, and says so exactly once.
+///
+/// The event is the whole point. `fraction` updates on *every frame* of the drag — that is what
+/// makes the panel follow the cursor — and the dock reports those frames as `SeparatorDragging`,
+/// keeping `LayoutCommitted` for the release. A consumer turns the latter into an undo entry and a
+/// write to disk, so "one completed gesture, one commit" is a contract, not a detail: six commits
+/// would mean six undo entries for one motion of the hand.
+#[test]
+fn dragging_a_separator_moves_the_boundary_and_commits_once() {
+    let (mut sim, path, at) = split_scene(Split::Right);
+    let before = sim.fraction_of(path).expect("a split to drag");
+    sim.take_commits();
+
+    sim.drag(at, at + Vec2::new(120.0, 0.0));
+
+    let after = sim.fraction_of(path).expect("the split is still there");
+    assert!(
+        after > before,
+        "dragging the separator right must move the boundary right: {before} -> {after}"
+    );
+    assert_eq!(
+        sim.take_commits(),
+        1,
+        "one completed drag is one finalised event, however many frames it spanned"
+    );
+    assert_eq!(sim.state.validate(), Ok(()));
+}
+
+/// A separator grabbed and released without motion changes nothing — and the dock says nothing.
+///
+/// The same class as the tab dropped where it came from: the lie lives *between* the gesture and
+/// the event, so neither the model nor the event alone can see it. A consumer that diffs a layout
+/// snapshot on every commit would find nothing to write and would have written an undo entry
+/// anyway.
+#[test]
+fn a_separator_grabbed_and_released_commits_nothing() {
+    let (mut sim, path, at) = split_scene(Split::Below);
+    let before = sim.trace();
+    let fraction = sim.fraction_of(path).expect("a split to grab");
+    sim.take_commits();
+
+    sim.grab(at);
+
+    assert_eq!(
+        sim.fraction_of(path),
+        Some(fraction),
+        "a press without motion may not move the boundary"
+    );
+    assert_eq!(sim.trace(), before, "nor anything else");
+    assert_eq!(
+        sim.take_commits(),
+        0,
+        "and an unchanged dock may not report a finalised layout change"
+    );
+    assert_eq!(sim.state.validate(), Ok(()));
+}
+
+/// Double-clicking a separator centres it — and doing it again says nothing, because there is
+/// nothing left to do.
+///
+/// The second half is the interesting one, and it is the same rule as everywhere else in this
+/// file: a gesture that finds the dock already in the state it asks for is not a layout change.
+#[test]
+fn double_clicking_a_separator_centres_it_once() {
+    let (mut sim, path, at) = split_scene(Split::Right);
+    sim.drag(at, at + Vec2::new(150.0, 0.0));
+    let moved = sim.fraction_of(path).expect("a split to centre");
+    assert!(
+        (moved - 0.5).abs() > 0.01,
+        "the scene must start off-centre for the gesture to have anything to do: {moved}"
+    );
+
+    // The separator has moved, so the gap has moved with it.
+    let (_, at, _) = sim.separators()[0];
+    sim.take_commits();
+    sim.double_click(at);
+
+    assert_eq!(
+        sim.fraction_of(path),
+        Some(0.5),
+        "a double-click centres the separator"
+    );
+    assert_eq!(sim.take_commits(), 1, "and reports it once");
+
+    let (_, at, _) = sim.separators()[0];
+    sim.double_click(at);
+    assert_eq!(
+        sim.fraction_of(path),
+        Some(0.5),
+        "centring an already centred separator leaves it where it is"
+    );
+    assert_eq!(
+        sim.take_commits(),
+        0,
+        "and there is nothing to announce about it"
+    );
+    assert_eq!(sim.state.validate(), Ok(()));
+}
+
+/// A separator cannot be shoved out of its node: neither child may be squeezed to nothing.
+///
+/// This regime is *not* reached by the sweep — every drag there moved the boundary — so it is
+/// pinned here instead: drag far past the edge, twice, and the second one has nothing left to do.
+/// Without the clamp a panel would end up with no room at all, and no way for the user to drag it
+/// back, since there would be no separator left to grab.
+#[test]
+fn a_separator_cannot_squeeze_a_child_to_nothing() {
+    let (mut sim, path, at) = split_scene(Split::Right);
+
+    // Well past the left edge of the node, in one motion.
+    sim.drag(at, at + Vec2::new(-4000.0, 0.0));
+    let clamped = sim.fraction_of(path).expect("a split to clamp");
+    assert!(
+        clamped > 0.0,
+        "the boundary was shoved out of the node: fraction {clamped}"
+    );
+    assert!(
+        sim.live_leaves().len() == 2,
+        "and both children must still be laid out: {}",
+        sim.trace()
+    );
+
+    let (_, at, _) = sim.separators()[0];
+    sim.take_commits();
+    sim.drag(at, at + Vec2::new(-4000.0, 0.0));
+
+    assert_eq!(
+        sim.fraction_of(path),
+        Some(clamped),
+        "a drag that is already against the clamp moves nothing"
+    );
+    assert_eq!(
+        sim.take_commits(),
+        0,
+        "so there is no finalised layout change to report"
+    );
+    assert_eq!(sim.state.validate(), Ok(()));
+}
+
+/// A node too small to honour the separator's margin still may not lose a child.
+///
+/// `separator.extra` is a margin in pixels each child must keep (175 by default), so as a fraction
+/// it is `extra / range`. On a node shorter than twice that there is no position satisfying both
+/// sides — and the guard used to *switch itself off* there: it normalised the inverted pair by
+/// swapping it, turning `extra / range >= 1` into the interval `(0, 1)`, which permits everything.
+/// The clamp evaporated exactly on the nodes where it was the only thing standing between a child
+/// and zero size.
+///
+/// Found by the sweep, not by reading: a drag on a 175 px node drove `fraction` to 0.0, and the
+/// change was not even announced — the leaf that lost its height changed the widget count, the
+/// separator's auto-generated id shifted with it, and egui dropped the drag before it could
+/// report `drag_stopped`. Both halves are pinned here.
+#[test]
+fn a_node_too_small_for_the_margin_keeps_both_children() {
+    let mut sim = Sim::new();
+    // Split down four times. The node that matters is the deepest *split*, not the deepest leaf,
+    // and the pathological case is `extra / range >= 1` — a node no taller than the margin
+    // itself. 784 px halves down to roughly 97, which is where the old guard evaporated.
+    for _ in 0..4 {
+        let leaf = *sim.live_leaves().last().expect("a leaf to split");
+        let tab = sim.fresh_tab();
+        sim.state.split(leaf, Split::Below, 0.5, Node::leaf(tab));
+        sim.run_frame(vec![]);
+    }
+
+    let layout = sim.layout();
+    let (path, at, fraction) = sim
+        .separators()
+        .into_iter()
+        .min_by(|a, b| {
+            let height = |p: NodePath| layout.get(p).map_or(f32::MAX, |g| g.rect.height());
+            height(a.0).total_cmp(&height(b.0))
+        })
+        .expect("a separator to drag");
+    let range = layout.get(path).expect("a laid-out split").rect.height();
+    assert!(
+        range <= sim.style.separator.extra,
+        "the scene must contain a node no taller than the margin itself — that is where the old \
+         guard inverted and switched itself off — and this one is {range} px against a margin \
+         of {}",
+        sim.style.separator.extra
+    );
+
+    sim.drag(at, at + Vec2::new(0.0, -4000.0));
+
+    let after = sim.fraction_of(path).expect("the split is still there");
+    assert!(
+        after > 0.0 && after < 1.0,
+        "the boundary was driven to {after}, which leaves one child with no height at all \
+         (it started at {fraction}, on a {range} px node)"
+    );
+    assert_eq!(
+        sim.live_leaves().len(),
+        5,
+        "and every leaf must still be laid out: {}",
+        sim.trace()
+    );
+    assert_eq!(sim.state.validate(), Ok(()));
+}
 
 #[test]
 fn a_frame_runs_without_a_window() {
@@ -1434,6 +2164,7 @@ const STEPS: usize = 24;
 fn seeded_scenarios_keep_the_dock_well_formed() {
     let mut coverage = [0usize; OUTCOMES];
     let mut identity = IdentityWatch::default();
+    let mut separator = SeparatorWatch::default();
     let mut aimed = 0usize;
     let mut refused = [0usize; REFUSALS];
 
@@ -1449,6 +2180,11 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         }
         identity.idle_frames += outcome.identity.idle_frames;
         identity.bystanders += outcome.identity.bystanders;
+        separator.drags += outcome.separator.drags;
+        separator.moves += outcome.separator.moves;
+        separator.clamped += outcome.separator.clamped;
+        separator.grabs += outcome.separator.grabs;
+        separator.centrings += outcome.separator.centrings;
 
         if let Some(failure) = outcome.failure {
             let minimal = quietly(|| shrink(&steps, &|candidate| run(candidate).failure.is_some()));
@@ -1530,6 +2266,41 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         identity.bystanders > 0,
         "no leaf was ever a bystander to a step that changed something — the property only \
          ever looked at leaves the step was allowed to change"
+    );
+
+    println!("separator watch: {separator:?}");
+
+    // The separator gestures, each with its own zero to guard against. A sweep that never grabbed
+    // a separator satisfies the commit rule trivially; one that grabbed but never *moved* one
+    // judges the rule only on gestures that changed nothing, which is the easy half.
+    assert!(
+        separator.drags > 0,
+        "no separator was ever dragged across {SEEDS} seeds — the scenes never grew a split the \
+         pointer could reach, so `fraction` was never written by a gesture at all"
+    );
+    assert!(
+        separator.moves > 0,
+        "{} separator drags all failed to move the boundary — every one ran into the clamp or \
+         missed, so \"one completed gesture, one commit\" was never tested on a gesture that \
+         committed",
+        separator.drags
+    );
+    assert!(
+        separator.clamped > 0,
+        "{} separator drags all moved the boundary — none ever found it already against the \
+         clamp, so neither the fraction oracle nor \"a drag that changed nothing announces \
+         nothing\" was ever put to the drag path",
+        separator.drags
+    );
+    assert!(
+        separator.grabs > 0,
+        "no separator was ever grabbed and released without motion, so the rule that the dock \
+         must stay silent about a gesture that changed nothing was never exercised"
+    );
+    assert!(
+        separator.centrings > 0,
+        "no double-click ever re-centred an off-centre separator — either the sweep never \
+         offset one, or the gesture stopped working"
     );
 }
 

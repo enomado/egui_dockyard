@@ -12,6 +12,57 @@ Ordered newest first.
 
 ---
 
+## The separator's clamp switched itself off on small nodes, so a panel could be squeezed to nothing
+
+**Status upstream:** not submitted.
+
+**Symptom.** In a node whose extent along the split axis is no larger than
+`SeparatorStyle::extra` (175 px by default), dragging the separator drives `fraction` all the way
+to `0.0` or `1.0`. One child is left with no room at all. On the way out, the change is not even
+announced: the leaf that lost its height changes the number of widgets allocated that frame, the
+separator's auto-generated id shifts with it, and egui drops the in-flight drag before it can
+report `drag_stopped` — so no `LayoutCommitted` is emitted for a layout that really did change,
+and a consumer persisting on that signal never writes it.
+
+**Root cause.** The guard that is supposed to keep both children on screen:
+
+```rust
+let min = (style.separator.extra / range).min(1.0);
+let max = 1.0 - min;
+let (min, max) = (min.min(max), max.max(min));   // <- normalises by swapping
+let new_fraction = (split.fraction + delta / range).clamp(min, max);
+```
+
+`extra` is a margin in pixels, so as a fraction it is `extra / range`. On a node shorter than
+twice that margin, `min` exceeds `max` and the pair is inverted — and the normalisation *swaps*
+it. For `range <= extra` the first line saturates at `min = 1.0`, `max` becomes `0.0`, and the
+swap turns the interval into `(0.0, 1.0)`: no clamp at all. The guard evaporated precisely on the
+nodes where it was the only thing between a child and zero size, and grew stricter, not weaker, as
+the node got bigger.
+
+**Fix.** Cap the margin at half the node instead of normalising an inverted pair:
+
+```rust
+let min = (style.separator.extra / range).min(0.5);
+let max = 1.0 - min;
+```
+
+On a node too small to honour the margin on both sides the band shrinks to a point and the
+separator pins to the centre — an equal split, which is the least-bad answer when there is no room
+to give — rather than permitting everything.
+
+**Evidence.** Found by a deterministic frame-level simulation, not by reading: a seeded scenario
+drove `fraction` to `0.0` on a 175 px node and the run reported no finalised event for it.
+Regression test `a_node_too_small_for_the_margin_keeps_both_children` builds a 97 px node and drags
+its separator 4000 px; reverting the fix fails it and the sweep together.
+
+**Design note.** The second half — a drag silently detaching because a separator is identified by
+allocation order — is not fixed here and is worth knowing about on its own: any change to the
+number of widgets drawn during a drag can orphan the gesture. The clamp fix removes the case that
+provoked it, not the fragility.
+
+---
+
 ## Dragging a tab along its own bar destroyed it and built a new one
 
 **Status upstream:** not submitted. The remaining half of the finding below: that one fixed the

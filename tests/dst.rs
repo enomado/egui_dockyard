@@ -112,7 +112,7 @@ enum Step {
     Idle,
 }
 
-/// Where inside the target leaf a drop is aimed, in the dock's own terms.
+/// What a drop somewhere means, in the dock's own terms.
 ///
 /// The default overlay is [`OverlayType::Widgets`](egui_dock::OverlayType): five buttons in a
 /// plus shape over the hovered leaf decide what a drop means, and *anywhere else over the leaf*
@@ -120,15 +120,134 @@ enum Step {
 /// wrong in both directions — the fractions that looked like "the left edge" were over the
 /// left *button* (so a split, not an edge), and a drop past the screen edge resolved to nothing
 /// at all, since with no leaf under the pointer there is no hover data.
+///
+/// This type is used in both directions: a step names the meaning it wants, and
+/// [`Sim::interpret`] reads a point back into one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Aim {
     /// The centre button: append to the leaf under the pointer.
     Append,
     /// One of the four split buttons.
-    Split(usize),
-    /// A corner, clear of every button: tear the tab off into a floating window.
+    Split(Split),
+    /// Anywhere over the leaf that no button answers to: tear the tab off into a floating window.
     Window,
 }
+
+/// The overlay buttons over `rect`, in the order [`resolve_icon_based`] walks them, each with the
+/// point to aim at and the area that actually answers to a pointer.
+///
+/// Two facts about the real thing that eyeballing does not give you, and both matter:
+///
+/// * the walk is `[centre, Below, Right, Above, Left]` and **later hits win** — the destination is
+///   simply reassigned, so a point inside two buttons means whichever comes last;
+/// * a button's hit area is its square *grown by* `feel.interact_expansion` (20 px by default)
+///   while only `button_spacing` (10 px) separates the squares. Neighbouring buttons therefore
+///   overlap by 30 px of hit area, and for a leaf small enough that the side falls below 20 px
+///   they swallow the centre button whole.
+///
+/// `None` when the leaf is too small for the arithmetic to mean anything (a degenerate rect gives
+/// a negative side). Everything else — including "the buttons are on top of one another" — is left
+/// for [`Sim::interpret`] to notice, because that is a fact about a *point*, not about the leaf.
+///
+/// [`resolve_icon_based`]: https://docs.rs/egui_dock
+fn overlay_buttons(rect: Rect, style: &Style) -> Option<Vec<(Aim, Pos2, Rect)>> {
+    let spacing = style.overlay.button_spacing;
+    let inner = rect.shrink(spacing);
+    let side = ((inner.width() - spacing * 2.0) / 3.0)
+        .min((inner.height() - spacing * 2.0) / 3.0)
+        .min(style.overlay.max_button_size);
+    if side < MIN_BUTTON_SIDE {
+        return None;
+    }
+    let center = inner.center();
+    let offset = side + spacing;
+    let expansion = style.overlay.feel.interact_expansion;
+
+    let button = |aim: Aim, at: Pos2| {
+        (
+            aim,
+            at,
+            Rect::from_center_size(at, Vec2::splat(side)).expand(expansion),
+        )
+    };
+
+    Some(vec![
+        button(Aim::Append, center),
+        button(Aim::Split(Split::Below), center + Vec2::new(0.0, offset)),
+        button(Aim::Split(Split::Right), center + Vec2::new(offset, 0.0)),
+        button(Aim::Split(Split::Above), center + Vec2::new(0.0, -offset)),
+        button(Aim::Split(Split::Left), center + Vec2::new(-offset, 0.0)),
+    ])
+}
+
+/// Below this the overlay buttons are not worth aiming at: the dock still draws them, but a
+/// square this small is mostly its own interaction padding.
+const MIN_BUTTON_SIDE: f32 = 16.0;
+
+/// How far past its nodes a floating window is assumed to reach.
+///
+/// Deliberately generous — the frame and the title bar around a window's nodes belong to the
+/// window too, and this harness has no business re-deriving egui's window geometry. Erring
+/// towards "contested" costs a skipped step; erring the other way costs a false failure.
+const WINDOW_FRAME_MARGIN: f32 = 48.0;
+
+/// What the dock will make of a release at some point, as far as this harness can tell.
+///
+/// The reason this exists is written in the plan's backlog for P14: an aim in a frame harness is a
+/// consumable resource. Both misses of that stage — a window sitting over another window, a leaf
+/// closing mid-drag — were not oracle bugs but *stale assumptions about where a gesture would
+/// land*, and both surfaced as a property failing somewhere else entirely. A point that carries
+/// its own reading turns that into a refusal at the aiming site, with a name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Landing {
+    /// One leaf claims the point, and this is what a drop there means.
+    On(NodePath, Aim),
+    /// The point is over a leaf's tab bar. A drop there is an insertion at a position in the bar
+    /// and the overlay buttons never get a say — a different resolution path entirely.
+    Bar(NodePath),
+    /// More than one floating window could claim the point. Windows are drawn over the main
+    /// surface *and over each other*, and the topmost one wins; this harness does not model
+    /// z-order among them, so any such overlap is treated as unreadable rather than guessed at.
+    Contested,
+    /// A leaf claims the point but its overlay is too small to aim inside.
+    Unreadable(NodePath),
+    /// No leaf claims the point.
+    Nowhere,
+}
+
+/// Why an aim declined to produce a point.
+///
+/// Counted per kind by the sweep: an aim that quietly stopped being aimable is exactly how this
+/// harness would go silent without going red.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refused {
+    /// The leaf was never laid out (collapsed, or zero-sized).
+    NoGeometry,
+    /// Its overlay buttons are too small to tell apart.
+    TooSmall,
+    /// Windows overlap over the point.
+    Contested,
+    /// The point lands on a tab bar instead.
+    Bar,
+    /// The point lands on another leaf, or on the right leaf but means something else.
+    Elsewhere,
+}
+
+/// Width of the refusal counter.
+const REFUSALS: usize = 5;
+
+fn refused_index(refused: Refused) -> usize {
+    match refused {
+        Refused::NoGeometry => 0,
+        Refused::TooSmall => 1,
+        Refused::Contested => 2,
+        Refused::Bar => 3,
+        Refused::Elsewhere => 4,
+    }
+}
+
+/// Names for the refusal report, in the order of [`refused_index`].
+const REFUSAL_NAMES: [&str; REFUSALS] = ["NoGeometry", "TooSmall", "Contested", "Bar", "Elsewhere"];
 
 /// A dock area running frames without a window.
 struct Sim {
@@ -144,6 +263,12 @@ struct Sim {
     /// What the dock actually did, counted per outcome. An outcome that stays at zero was never
     /// exercised, however green the run looks — so this is asserted, not printed.
     effective: [usize; OUTCOMES],
+    /// Drags that found a point meaning what the step asked for.
+    aimed: usize,
+    /// Drags that did not, per [`Refused`]. A step that cannot be aimed is skipped rather than
+    /// fired blind, and a harness that skips everything is green and useless — so these are
+    /// counted next to the successes rather than dropped on the floor.
+    refused: [usize; REFUSALS],
     /// Whether any frame since the last [`Sim::take_committed`] reported a finalised layout
     /// change. Accumulated rather than read per frame because one gesture spans several frames
     /// and only one of them carries the event.
@@ -246,6 +371,8 @@ impl Sim {
             next_tab: 1,
             style: Style::default(),
             effective: [0; OUTCOMES],
+            aimed: 0,
+            refused: [0; REFUSALS],
             committed: false,
         };
         // One frame before anything else: gestures aim with geometry, and geometry does not
@@ -332,74 +459,145 @@ impl Sim {
             .map(|response| response.rect)
     }
 
-    /// Whether some floating window other than `aimed_at` may be sitting over `point`.
+    /// The band at the top of a leaf where the tab bar lives.
     ///
-    /// Floating windows are drawn above the main surface *and above each other*, so a drop lands
-    /// on whatever is topmost under the pointer rather than on the surface the step named. When
-    /// that happens the gesture means something else entirely and the scenario is aiming blind.
-    ///
-    /// This is measured, not reasoned: the identity property below caught a drag whose source
-    /// and target were the same leaf of window 0 moving a tab into window 3 — the aim point sat
-    /// inside window 2, which overlapped both. The first version of this check only looked for
-    /// windows over the *main* surface and missed exactly that case.
-    ///
-    /// Deliberately generous — the union of a window's node rects grown by a margin, since the
-    /// frame and title bar around them belong to the window too, and this harness has no
-    /// business re-deriving egui's window geometry. Erring towards "covered" costs a skipped
-    /// step; erring the other way costs a false failure. The z-order among windows is not
-    /// modelled at all: any overlap is treated as ambiguous.
-    fn window_covers(&self, point: Pos2, aimed_at: SurfaceIndex) -> bool {
-        const FRAME_MARGIN: f32 = 48.0;
-
-        let layout = self.layout();
-        self.state
-            .iter_all_nodes()
-            .filter(|(path, _)| path.surface != SurfaceIndex::main() && path.surface != aimed_at)
-            .filter_map(|(path, _)| layout.get(path).map(|geometry| geometry.rect))
-            .any(|rect| rect.expand(FRAME_MARGIN).contains(point))
+    /// A drop here does not go through the overlay buttons at all: `show/leaf.rs` reports the
+    /// hover as a tab bar and the drop resolves to an insertion at a position in the bar. Modelled
+    /// from the same style the sim handed the dock, and held against reality by
+    /// `the_modelled_tab_bar_covers_the_tabs_the_dock_drew` — the band is a claim about where the
+    /// dock drew something, so it is checked against what the dock drew.
+    fn tab_bar_band(&self, rect: Rect) -> Rect {
+        Rect::from_min_size(rect.min, Vec2::new(rect.width(), self.style.tab_bar.height))
     }
 
-    /// Where to release the pointer so that a drop on `leaf` means `aim`.
+    /// What a release at `point` would mean, read off the scene as it stands.
     ///
-    /// The button geometry mirrors `resolve_icon_based`: the hovered rect is shrunk by the
-    /// button spacing, the button side is a third of the shorter dimension (capped), and the
-    /// four split buttons sit one side plus one spacing away from the centre. Every input is
-    /// read from the style this sim passed to the dock, and the arithmetic is checked by the
-    /// scripted tests below — if it drifts, they fail loudly instead of the sweep quietly
-    /// degrading into "a lot of frames where nothing happens".
-    fn aim_point(&self, leaf: NodePath, aim: Aim) -> Option<Pos2> {
-        let rect = self.layout().get(leaf)?.rect;
-        let spacing = self.style.overlay.button_spacing;
-        let inner = rect.shrink(spacing);
-        let side = ((inner.width() - spacing * 2.0) / 3.0)
-            .min((inner.height() - spacing * 2.0) / 3.0)
-            .min(self.style.overlay.max_button_size);
-        if side < 16.0 {
-            // Too small to aim at reliably; the step is skipped rather than fired blind.
-            return None;
-        }
-        let center = inner.center();
+    /// Deliberately intent-free: it is not told what the step wanted, so [`Sim::aim`] can compare
+    /// the two rather than assume they agree.
+    ///
+    /// The one thing it cannot see is a scene that changes *during* the gesture: lifting the only
+    /// tab out of a leaf closes that leaf mid-drag and everything reflows into the space. The
+    /// reading is therefore of the frame the drag starts from, which is also the frame the dock
+    /// itself hit-tests against on every frame but the last. Steps are exempted accordingly —
+    /// see [`Effect::touched`].
+    fn interpret(&self, point: Pos2) -> Landing {
+        let layout = self.layout();
 
-        Some(match aim {
-            Aim::Append => center,
-            Aim::Split(direction) => {
-                let offset = side + spacing;
-                center
-                    + match direction % 4 {
-                        0 => Vec2::new(-offset, 0.0),
-                        1 => Vec2::new(offset, 0.0),
-                        2 => Vec2::new(0.0, -offset),
-                        _ => Vec2::new(0.0, offset),
-                    }
+        // Which surface owns the point. Floating windows are drawn after the main surface and
+        // after each other, and each leaf under the pointer overwrites the same hover slot, so
+        // "topmost wins" is really "last drawn wins". Two windows over the point means this
+        // harness cannot say which, and says so.
+        let mut windows: Vec<SurfaceIndex> = Vec::new();
+        for (path, _) in self.state.iter_all_nodes() {
+            if path.surface == SurfaceIndex::main() {
+                continue;
             }
+            let Some(geometry) = layout.get(path) else {
+                continue;
+            };
+            if geometry.rect.expand(WINDOW_FRAME_MARGIN).contains(point)
+                && !windows.contains(&path.surface)
+            {
+                windows.push(path.surface);
+            }
+        }
+        if windows.len() > 1 {
+            return Landing::Contested;
+        }
+        let owner = windows.first().copied().unwrap_or(SurfaceIndex::main());
+
+        // The leaf of that surface under the point. Leaves of one tree never overlap, so there is
+        // at most one; a point inside a window's frame but outside all of its leaves belongs to
+        // the window all the same, and there is nothing there to aim at.
+        let leaf = self
+            .state
+            .iter_leaves()
+            .filter(|(path, _)| path.surface == owner)
+            .find(|(path, _)| {
+                layout
+                    .get(*path)
+                    .is_some_and(|geometry| geometry.rect.contains(point))
+            })
+            .map(|(path, _)| path);
+        let Some(leaf) = leaf else {
+            return if owner == SurfaceIndex::main() {
+                Landing::Nowhere
+            } else {
+                // Over a window, but on its frame rather than on anything droppable.
+                Landing::Contested
+            };
+        };
+
+        let rect = layout
+            .get(leaf)
+            .expect("the leaf that claimed the point")
+            .rect;
+        if self.tab_bar_band(rect).contains(point) {
+            return Landing::Bar(leaf);
+        }
+        let Some(buttons) = overlay_buttons(rect, &self.style) else {
+            return Landing::Unreadable(leaf);
+        };
+
+        // Anywhere over the leaf that no button answers to means "tear it off into a window";
+        // buttons override that as they are walked, and later ones override earlier ones.
+        let mut meaning = Aim::Window;
+        for (aim, _, hit) in buttons {
+            if hit.contains(point) {
+                meaning = aim;
+            }
+        }
+        Landing::On(leaf, meaning)
+    }
+
+    /// Where to release the pointer so that a drop on `leaf` means `want` — or why there is no
+    /// such point.
+    ///
+    /// The point is *constructed* from the button table and then *read back* through
+    /// [`Sim::interpret`], and only returned if the reading is the meaning that was asked for.
+    /// The two share the table on purpose (one copy of a rule, not one per caller), so their
+    /// agreeing proves nothing about the dock — that is what
+    /// `every_overlay_meaning_is_what_the_dock_does` is for. What the round trip does catch is
+    /// everything the table alone cannot know: another window over the point, a button swallowed
+    /// by its neighbour's interaction padding, a cluster centred so high in a short leaf that an
+    /// arm of it lies on the tab bar.
+    fn aim(&self, leaf: NodePath, want: Aim) -> Result<Pos2, Refused> {
+        let rect = self.layout().get(leaf).ok_or(Refused::NoGeometry)?.rect;
+        let buttons = overlay_buttons(rect, &self.style).ok_or(Refused::TooSmall)?;
+
+        let candidates: Vec<Pos2> = match want {
             Aim::Window => {
-                // A corner, diagonally clear of the plus-shaped button cluster.
-                let reach = Vec2::new(inner.width(), inner.height()) * 0.45;
-                if reach.x < side + spacing || reach.y < side + spacing {
-                    return None;
-                }
-                center + reach
+                // The corners are what is farthest from the plus-shaped cluster. Which of them is
+                // actually clear of it is not worth deriving — every one is offered and the
+                // reading below decides. The top two are offered last: they are the ones the tab
+                // bar eats.
+                let inset = rect.shrink(2.0);
+                vec![
+                    inset.left_bottom(),
+                    inset.right_bottom(),
+                    inset.left_top(),
+                    inset.right_top(),
+                ]
             }
+            _ => buttons
+                .iter()
+                .filter(|(aim, ..)| *aim == want)
+                .map(|(_, at, _)| *at)
+                .collect(),
+        };
+
+        let mut last = Landing::Nowhere;
+        for point in candidates {
+            last = self.interpret(point);
+            if last == Landing::On(leaf, want) {
+                return Ok(point);
+            }
+        }
+        Err(match last {
+            Landing::Contested => Refused::Contested,
+            Landing::Bar(_) => Refused::Bar,
+            Landing::Unreadable(_) => Refused::TooSmall,
+            Landing::On(..) | Landing::Nowhere => Refused::Elsewhere,
         })
     }
 
@@ -534,16 +732,20 @@ impl Sim {
             Step::Drag { from, to, aim } => {
                 let source = leaves[from % leaves.len()];
                 let target = leaves[to % leaves.len()];
-                let (Some(grab), Some(drop)) =
-                    (self.tab_rect(source, 0), self.aim_point(target, aim))
-                else {
-                    return None;
+                let grab = self.tab_rect(source, 0)?;
+                // A point that would mean something other than what the step says is not fired:
+                // the step is skipped, and the refusal is counted so that a scenario which stopped
+                // being aimable stops being green too.
+                let drop = match self.aim(target, aim) {
+                    Ok(point) => {
+                        self.aimed += 1;
+                        point
+                    }
+                    Err(refused) => {
+                        self.refused[refused_index(refused)] += 1;
+                        return None;
+                    }
                 };
-                // A drop some other window may intercept means something other than the step
-                // says, so the step is skipped rather than fired at a target it will not hit.
-                if self.window_covers(drop, target.surface) {
-                    return None;
-                }
                 self.drag(grab.center(), drop);
                 // The source may have been emptied and removed, which collapses its parent
                 // split and lifts its sibling one level — the sibling keeps its id (that is
@@ -702,7 +904,10 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
                 aim: match rng.below(6) {
                     0 => Aim::Append,
                     1 => Aim::Window,
-                    other => Aim::Split(other - 2),
+                    2 => Aim::Split(Split::Left),
+                    3 => Aim::Split(Split::Right),
+                    4 => Aim::Split(Split::Above),
+                    _ => Aim::Split(Split::Below),
                 },
             },
             5 => Step::ClickTab {
@@ -738,6 +943,9 @@ struct Run {
     traces: Vec<String>,
     /// What the dock actually did, per outcome.
     effective: [usize; OUTCOMES],
+    /// Drags that fired, and drags that were refused a point, per [`Refused`].
+    aimed: usize,
+    refused: [usize; REFUSALS],
     /// How much the identity property actually got to check — see [`IdentityWatch`].
     identity: IdentityWatch,
     /// The first step that left the dock invalid, if any.
@@ -828,69 +1036,64 @@ fn run(steps: &[Step]) -> Run {
     let mut traces = Vec::with_capacity(steps.len());
     let mut identity = IdentityWatch::default();
 
-    for (step_index, &step) in steps.iter().enumerate() {
-        let before_identities = sim.identities();
-        let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sim.apply(step)));
+    // One exit, so that everything the run has to report — traces, coverage, refusals — is
+    // gathered in a single place. Four copies of the same construction is how a counter gets
+    // added to the happy path and forgotten on the three failing ones, which is precisely when
+    // the numbers are worth having.
+    let failure = 'scenario: {
+        for (step_index, &step) in steps.iter().enumerate() {
+            let before_identities = sim.identities();
+            let applied =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sim.apply(step)));
 
-        let applied = match applied {
-            Ok(applied) => applied,
-            Err(payload) => {
-                return Run {
-                    traces,
-                    effective: sim.effective,
-                    identity,
-                    failure: Some(Failure {
+            let applied = match applied {
+                Ok(applied) => applied,
+                Err(payload) => {
+                    break 'scenario Some(Failure {
                         step_index,
                         step,
                         reason: format!("panicked: {}", panic_message(&payload)),
-                    }),
-                };
-            }
-        };
+                    });
+                }
+            };
 
-        let Some(effect) = applied else {
-            traces.push(String::from("skipped"));
-            continue;
-        };
-        traces.push(sim.trace());
+            let Some(effect) = applied else {
+                traces.push(String::from("skipped"));
+                continue;
+            };
+            traces.push(sim.trace());
 
-        if let Err(violations) = sim.state.validate() {
-            return Run {
-                traces,
-                effective: sim.effective,
-                identity,
-                failure: Some(Failure {
+            if let Err(violations) = sim.state.validate() {
+                break 'scenario Some(Failure {
                     step_index,
                     step,
                     reason: format!("{violations:?}"),
-                }),
-            };
-        }
+                });
+            }
 
-        if let Some(complaint) = identity_complaint(
-            &before_identities,
-            &sim.identities(),
-            &effect,
-            &mut identity,
-        ) {
-            return Run {
-                traces,
-                effective: sim.effective,
-                identity,
-                failure: Some(Failure {
+            if let Some(complaint) = identity_complaint(
+                &before_identities,
+                &sim.identities(),
+                &effect,
+                &mut identity,
+            ) {
+                break 'scenario Some(Failure {
                     step_index,
                     step,
                     reason: complaint,
-                }),
-            };
+                });
+            }
         }
-    }
+        None
+    };
 
     Run {
         traces,
         effective: sim.effective,
+        aimed: sim.aimed,
+        refused: sim.refused,
         identity,
-        failure: None,
+        failure,
     }
 }
 
@@ -964,82 +1167,110 @@ fn a_frame_runs_without_a_window() {
     );
 }
 
-/// The other gesture the sweep leans on: a drop in the window band opens a floating window.
+/// Every meaning this harness can aim at is what the dock actually does with the point.
 ///
-/// Pinned separately from the sweep for the same reason as the drag above — "the trace changed"
-/// is not proof that the gesture did what its name says.
+/// **This is where the mirror is held against reality.** [`Sim::aim`] and [`Sim::interpret`] share
+/// one button table on purpose, so the two of them agreeing says nothing whatsoever about the
+/// dock: a table that drifted from `resolve_icon_based` would keep aiming and reading in perfect
+/// self-consistent nonsense, and the sweep would degrade into a lot of frames where nothing
+/// happens — green, and measuring its own arithmetic. Six meanings, six real drags, each judged by
+/// the shape the dock came out in.
+///
+/// It also pins what the *directions* mean, which nothing did before: a split button on the left
+/// puts the arriving tab in the left child, and so on around the cluster. Previously only the one
+/// below the centre was ever checked, so three quarters of the cluster could have been transposed
+/// without a single test noticing.
 #[test]
-fn dropping_a_tab_in_the_window_band_opens_a_window() {
-    let mut sim = Sim::new();
-    let root = sim.state.main_surface().root().unwrap();
-    sim.state.split(
-        NodePath::new(SurfaceIndex::main(), root),
-        Split::Right,
-        0.5,
-        Node::leaf("t1".to_string()),
-    );
-    sim.run_frame(vec![]);
+fn every_overlay_meaning_is_what_the_dock_does() {
+    // The scene is two leaves side by side; the tab of the first is dragged onto the second. The
+    // source is emptied by the drag, so its leaf is removed and its parent split collapses —
+    // which is why every expected shape below is rooted at the target.
+    let table = [
+        (Aim::Append, "s0:[t1,t0,] "),
+        (Aim::Split(Split::Left), "s0:H([t0,]|[t1,]) "),
+        (Aim::Split(Split::Right), "s0:H([t1,]|[t0,]) "),
+        (Aim::Split(Split::Above), "s0:V([t0,]|[t1,]) "),
+        (Aim::Split(Split::Below), "s0:V([t1,]|[t0,]) "),
+        (Aim::Window, "s0:[t1,] s1:[t0,] "),
+    ];
 
-    let leaves = sim.live_leaves();
-    let grab = sim.tab_rect(leaves[0], 0).expect("a tab to grab");
-    let drop = sim
-        .aim_point(leaves[1], Aim::Window)
-        .expect("a corner clear of the buttons");
+    for (aim, expected) in table {
+        let mut sim = Sim::new();
+        let root = sim.state.main_surface().root().unwrap();
+        sim.state.split(
+            NodePath::new(SurfaceIndex::main(), root),
+            Split::Right,
+            0.5,
+            Node::leaf("t1".to_string()),
+        );
+        sim.run_frame(vec![]);
 
-    sim.drag(grab.center(), drop);
+        let leaves = sim.live_leaves();
+        assert_eq!(
+            leaves.len(),
+            2,
+            "the scene must have two leaves to drag between"
+        );
+        let grab = sim.tab_rect(leaves[0], 0).expect(
+            "no widget answered to the tab id — the id scheme in show/leaf.rs moved, and every \
+             gesture in this harness is now aiming at empty space",
+        );
+        let drop = sim.aim(leaves[1], aim).unwrap_or_else(|refused| {
+            panic!("{aim:?}: no point over the target means it, {refused:?}")
+        });
 
-    assert_eq!(
-        sim.state.surfaces_count(),
-        2,
-        "the tab should have been torn off into a window: {}",
-        sim.trace()
-    );
-    assert_eq!(
-        sim.state.iter_all_tabs().count(),
-        2,
-        "and no tab may be lost on the way"
-    );
-    assert_eq!(sim.state.validate(), Ok(()));
+        sim.drag(grab.center(), drop);
+
+        assert_eq!(
+            sim.layout_trace(),
+            expected,
+            "a drop this harness reads as {aim:?} made the dock do something else"
+        );
+        assert_eq!(
+            sim.state.iter_all_tabs().count(),
+            2,
+            "{aim:?}: the drag must not lose or duplicate a tab"
+        );
+        assert_eq!(sim.state.validate(), Ok(()));
+    }
 }
 
-/// The third gesture: a drop on a split button splits the leaf.
+/// The modelled tab bar covers the tabs the dock drew.
 ///
-/// This is the one that checks the button arithmetic in [`Sim::aim_point`] against the real
-/// layout — the aiming mirrors private code, and a mirror nobody looks into is how the sweep
-/// would quietly stop testing splits.
+/// [`Sim::tab_bar_band`] is a claim about where the dock put something, and the whole point of the
+/// band is to keep an aim off it — a cluster arm landing on the bar resolves through a completely
+/// different path (an insertion at a position in the bar), which is a silent way for a step to
+/// mean something other than its name. A claim about the dock's drawing is checked against the
+/// dock's drawing.
 #[test]
-fn dropping_a_tab_on_a_split_button_splits_the_leaf() {
+fn the_modelled_tab_bar_covers_the_tabs_the_dock_drew() {
     let mut sim = Sim::new();
     let root = sim.state.main_surface().root().unwrap();
     sim.state.split(
         NodePath::new(SurfaceIndex::main(), root),
-        Split::Right,
+        Split::Below,
         0.5,
         Node::leaf("t1".to_string()),
     );
     sim.run_frame(vec![]);
 
     let leaves = sim.live_leaves();
-    let grab = sim.tab_rect(leaves[0], 0).expect("a tab to grab");
-    // Split(3) is the button below the centre.
-    let drop = sim
-        .aim_point(leaves[1], Aim::Split(3))
-        .expect("a split button to drop onto");
-
-    sim.drag(grab.center(), drop);
-
     assert_eq!(
-        sim.state.iter_leaves().count(),
+        leaves.len(),
         2,
-        "the target leaf should have been split in two, and the emptied source removed: {}",
-        sim.trace()
+        "two leaves, so two bars in different places"
     );
-    assert!(
-        sim.layout_trace().contains("V("),
-        "and the split should be vertical, since the drop was below the centre: {}",
-        sim.layout_trace()
-    );
-    assert_eq!(sim.state.validate(), Ok(()));
+
+    for leaf in leaves {
+        let rect = sim.layout().get(leaf).expect("a laid-out leaf").rect;
+        let band = sim.tab_bar_band(rect);
+        let tab = sim.tab_rect(leaf, 0).expect("a tab the dock drew");
+        assert!(
+            band.contains(tab.min) && band.contains(tab.max),
+            "the tab the dock drew at {tab:?} is not inside the band this harness models at \
+             {band:?} — every aim that avoids the bar is avoiding the wrong place"
+        );
+    }
 }
 
 /// The gesture with no name in the dock's vocabulary: pick a tab up, change your mind, and let
@@ -1057,11 +1288,21 @@ fn a_tab_dropped_where_it_came_from_commits_nothing() {
     let leaf = sim.live_leaves()[0];
     let home = sim.tab_rect(leaf, 0).expect("a tab to grab").center();
     // The centre button over the leaf the tab already lives in: "append it to this node", which
-    // for the node it is already in means nothing at all. Aimed with the same arithmetic the
-    // other scripted drops use, so it cannot quietly drift into meaning something else.
+    // for the node it is already in means nothing at all. Aimed through `aim`, so a point that
+    // stopped meaning that is a refusal here rather than a mystery further down.
     let back_home = sim
-        .aim_point(leaf, Aim::Append)
+        .aim(leaf, Aim::Append)
         .expect("the centre button of the leaf");
+    // ...and it is a no-op only because the leaf holds nothing else. Stated rather than assumed:
+    // this scene is the *only* one in which the gesture changes nothing (see the sibling test),
+    // so if it ever stops being that scene, the failure should say so instead of reading as a
+    // bug in the dock.
+    assert_eq!(
+        sim.state[leaf].tabs_count(),
+        1,
+        "appending the only tab of a node to that same node is what makes this a no-op; with a \
+         second tab in the bar it is a real reorder"
+    );
 
     // Focus first, as its own gesture: pressing a tab can move focus, and that *is* a real
     // change. What is under test is the drag that follows it.
@@ -1103,8 +1344,13 @@ fn a_cancelled_drag_leaves_every_identity_alone() {
 
     let home = sim.tab_rect(leaf, 0).expect("a tab to grab").center();
     let back_home = sim
-        .aim_point(leaf, Aim::Append)
+        .aim(leaf, Aim::Append)
         .expect("the centre button of the leaf");
+    assert_eq!(
+        sim.state[leaf].tabs_count(),
+        1,
+        "the single-tab root leaf is what makes this gesture a no-op at all"
+    );
 
     // Press the tab first so that focusing it — a real change, and a legitimate one — is not
     // part of what the drag is judged on.
@@ -1147,7 +1393,7 @@ fn reordering_a_tab_in_the_bar_keeps_it_the_same_tab() {
         .expect("the first tab");
     let grab = sim.tab_rect(leaf, 0).expect("a tab to grab").center();
     let onto_itself = sim
-        .aim_point(leaf, Aim::Append)
+        .aim(leaf, Aim::Append)
         .expect("the centre button of the leaf");
 
     sim.drag(grab, onto_itself);
@@ -1188,11 +1434,17 @@ const STEPS: usize = 24;
 fn seeded_scenarios_keep_the_dock_well_formed() {
     let mut coverage = [0usize; OUTCOMES];
     let mut identity = IdentityWatch::default();
+    let mut aimed = 0usize;
+    let mut refused = [0usize; REFUSALS];
 
     for seed in 0..SEEDS {
         let steps = scenario(seed, STEPS);
         let outcome = run(&steps);
         for (slot, count) in coverage.iter_mut().zip(outcome.effective) {
+            *slot += count;
+        }
+        aimed += outcome.aimed;
+        for (slot, count) in refused.iter_mut().zip(outcome.refused) {
             *slot += count;
         }
         identity.idle_frames += outcome.identity.idle_frames;
@@ -1229,6 +1481,41 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
             OUTCOME_NAMES.iter().zip(coverage).collect::<Vec<_>>()
         );
     }
+
+    println!(
+        "aim: {aimed} fired, refused {:?}",
+        REFUSAL_NAMES.iter().zip(refused).collect::<Vec<_>>()
+    );
+
+    // A drag that cannot be aimed is skipped, and a sweep whose drags are all skipped is green
+    // for free — the outcome counters above would still be fed by the scripted `Split` and
+    // `CloseLeaf` steps, which go through the model and never aim at anything.
+    assert!(
+        aimed > 0,
+        "not one drag across {SEEDS} seeds found a point meaning what it asked for — every \
+         gesture was skipped, and the frame layer was never exercised at all"
+    );
+    // The refusals matter in the other direction: they are the harness noticing that a point
+    // stopped meaning what it used to. They are asserted *per class*, because the classes are not
+    // interchangeable — the first version of this gate summed them all and was satisfied by
+    // `TooSmall` alone, which says nothing about the reading at all. Measured: with the reading
+    // torn out entirely, the sum stayed at three (three leaves too small to hold an overlay) and
+    // the gate stayed green.
+    assert!(
+        refused[refused_index(Refused::Contested)] > 0,
+        "no drag was ever refused for overlapping windows — the sweep either stopped opening \
+         them or stopped stacking them, and the oldest known way for an aim to land somewhere \
+         else went untested"
+    );
+    // The class this stage adds, and the one that used to be fired blind: a point over the right
+    // leaf that the dock reads as something other than what the step asked for — an arm of the
+    // cluster lying on the tab bar, or a button swallowed by its neighbour's interaction padding.
+    assert!(
+        refused[refused_index(Refused::Bar)] + refused[refused_index(Refused::Elsewhere)] > 0,
+        "not one aim across {SEEDS} seeds was refused for meaning something else, so nothing \
+         says the reading can tell one meaning from another. Refusals: {:?}",
+        REFUSAL_NAMES.iter().zip(refused).collect::<Vec<_>>()
+    );
 
     println!("identity watch: {identity:?}");
 
@@ -1294,51 +1581,10 @@ fn the_shrinker_keeps_only_the_steps_that_matter() {
     assert!(fails(&minimal));
 }
 
-/// The gesture layer, end to end: a tab dragged onto another leaf's body moves there.
-///
-/// Asserted on its own because every seeded scenario depends on it. If dragging silently stops
-/// working, the scenarios keep passing while testing nothing at all.
-#[test]
-fn dragging_a_tab_onto_another_leaf_moves_it() {
-    let mut sim = Sim::new();
-    let root = sim.state.main_surface().root().unwrap();
-    sim.state.split(
-        NodePath::new(SurfaceIndex::main(), root),
-        Split::Right,
-        0.5,
-        Node::leaf("t1".to_string()),
-    );
-    sim.run_frame(vec![]);
-
-    let leaves = sim.live_leaves();
-    assert_eq!(
-        leaves.len(),
-        2,
-        "the scene must have two leaves to drag between"
-    );
-    let grab = sim.tab_rect(leaves[0], 0).expect(
-        "no widget answered to the tab id — the id scheme in show/leaf.rs moved, and every \
-         gesture in this harness is now aiming at empty space",
-    );
-    let drop = sim
-        .aim_point(leaves[1], Aim::Append)
-        .expect("a centre button to drop onto");
-
-    sim.drag(grab.center(), drop);
-
-    assert_eq!(
-        sim.state.iter_all_tabs().count(),
-        2,
-        "the drag must not lose or duplicate a tab"
-    );
-    assert_eq!(
-        sim.state.iter_leaves().count(),
-        1,
-        "both tabs must end up in one leaf: {}",
-        sim.trace()
-    );
-    assert_eq!(sim.state.validate(), Ok(()));
-}
+// `dragging_a_tab_onto_another_leaf_moves_it` used to live here. It is the `Aim::Append` row of
+// `every_overlay_meaning_is_what_the_dock_does`, on the same scene and with a stricter assertion
+// (the whole shape rather than two counts), so keeping it would have been a second copy of one
+// claim — the shape of duplication this crate keeps having to undo.
 
 /// The geometry map must name the live nodes and nothing else.
 ///

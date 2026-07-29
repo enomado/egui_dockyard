@@ -18,6 +18,9 @@ pub mod translations;
 /// Window states which tells floating tabs how to be displayed inside their window,
 pub mod window_state;
 
+/// Текстовый дамп формы дока — общий для гейтов, сравнивающих док до и после сохранения.
+pub mod shape;
+
 pub use surface::{SurfaceMut, SurfaceRef};
 pub use surface_index::{SurfaceIndex, WindowIndex};
 use tree::node::LeafNode;

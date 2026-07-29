@@ -24,9 +24,12 @@
 //!   the one the heap representation could not have;
 //! * **derived counts** — the collapsing numbers each split stores are what its subtree says.
 //!
-//! Plus a coverage sweep, which is not a property but a check on the *generator*: it asserts
-//! that windows really do get opened, closed and moved between over a fixed set of seeds. A
-//! sequence that never leaves the main surface would satisfy every property above for free.
+//! Plus a coverage sweep, which is not a property but a check on the *generator*: over a fixed
+//! set of seeds it asserts that windows really do get opened, closed, moved between and lived
+//! in, that something gets collapsed, and that the copying sweeps run. A scene that never
+//! reaches those corners satisfies every property above for free — and asserting the coverage
+//! in one place says *which* corner went missing, where a `prop_assume!` per property would
+//! only discard the cases and go quiet.
 
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
@@ -144,7 +147,6 @@ proptest! {
     fn collapsed_counts_stay_derived(ops in prop::collection::vec(op_strategy(), 1..24)) {
         let mut dock_state = DockState::new(vec![0u32, 1, 2]);
         let mut next_tab = 3u32;
-        let mut collapsed_seen = 0usize;
 
         for (step, op) in ops.into_iter().enumerate() {
             if apply(&mut dock_state, op, &mut next_tab).is_none() {
@@ -184,16 +186,14 @@ proptest! {
                     tree.root_node().map_or(0, |root| root.collapsed_leaf_count()),
                     "the tree disagrees with its root, after step {} ({:?})", step, op
                 );
-
-                collapsed_seen += usize::from(tree.collapsed_leaf_count() > 0);
             }
         }
 
-        // Guards against the property passing on a scene where nothing is ever collapsed:
-        // every count would be zero and every assertion above would hold for free. The
-        // sequence is random, so this only demands that *some* run reaches a collapsed tree —
-        // proptest's shrinking would otherwise happily report a green run over 24 no-ops.
-        prop_assume!(collapsed_seen > 0);
+        // That the generated scenes actually *reach* a collapsed tree — without which every
+        // count above is zero on both sides and the property holds for free — is asserted
+        // once, over fixed seeds, by `the_generator_reaches_what_the_properties_assume`. It
+        // used to be a `prop_assume!` here, which discarded such cases instead of reporting
+        // them: a generator that stopped collapsing anything would have gone unnoticed.
     }
 
     /// A node id keeps naming the same node across operations that are not about it.
@@ -236,24 +236,32 @@ proptest! {
     }
 }
 
-/// The generator must actually reach the window layer — otherwise every property above is
-/// green for free.
+/// The generator must actually reach the corners the properties above are about — otherwise
+/// they are green for free.
 ///
 /// This is not a property but a check on the *scene*: "0 violations" reads the same as
 /// "0 checks", and until the operation vocabulary was shared with the fuzzer these tests
 /// genuinely never left the main surface. Counting the outcomes is what makes the difference
 /// visible; the counts are asserted, not printed.
 ///
+/// It is one sweep rather than a `prop_assume!` inside each property, and the difference is
+/// what a failure says. `prop_assume!` *discards* the cases that did not reach the corner, so
+/// a generator that stopped reaching it altogether just runs quieter — the suite stays green
+/// until proptest gives up on rejections, and then blames the wrong thing. The sweep names
+/// the corner that went missing.
+///
 /// Deterministic on purpose: a fixed set of seeds through proptest's own RNG, so a run that
 /// fails the coverage bar fails it for everybody rather than once in a while.
 #[test]
-fn the_generator_reaches_the_window_layer() {
+fn the_generator_reaches_what_the_properties_assume() {
     let sequence = prop::collection::vec(op_strategy(), 24..25);
 
     let mut windows_opened = 0usize;
     let mut windows_closed = 0usize;
     let mut cross_surface_moves = 0usize;
     let mut tabs_lived_in_windows = 0usize;
+    let mut collapsed_trees = 0usize;
+    let mut copying_sweeps = 0usize;
 
     for seed in 0u64..32 {
         let mut runner = TestRunner::new_with_rng(
@@ -289,6 +297,16 @@ fn the_generator_reaches_the_window_layer() {
                 .iter()
                 .filter(|path| path.surface != SurfaceIndex::Main)
                 .count();
+            // A tree that is collapsed somewhere — the scene `collapsed_counts_stay_derived`
+            // needs. Every count in a tree nobody collapsed is zero, and a property about
+            // them holds without checking anything.
+            collapsed_trees += usize::from(
+                dock_state
+                    .iter_surfaces_indexed()
+                    .filter_map(|(_, surface)| surface.node_tree())
+                    .any(|tree| tree.collapsed_leaf_count() > 0),
+            );
+            copying_sweeps += usize::from(rebuilds_identities(op));
         }
     }
 
@@ -307,5 +325,15 @@ fn the_generator_reaches_the_window_layer() {
     assert!(
         tabs_lived_in_windows > 0,
         "no leaf ever lived in a window — windows were opened and immediately gone"
+    );
+    assert!(
+        collapsed_trees > 0,
+        "nothing was ever collapsed — every count `collapsed_counts_stay_derived` compares \
+         would be zero on both sides"
+    );
+    assert!(
+        copying_sweeps > 0,
+        "no copying sweep ever ran — `map_tabs`/`filter_tabs` rebuild every surface, and that \
+         path is only reached through them"
     );
 }

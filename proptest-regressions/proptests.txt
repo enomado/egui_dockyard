@@ -4,4 +4,25 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
-cc 46170ffebd3b46164f9dc658d285299b856c298bfa0e07cae039c963c6ce3b78 # shrinks to ops = [Split { leaf: 0, split: 0, tabs: 1 }, Split { leaf: 0, split: 0, tabs: 1 }, ToggleCollapsed { leaf: 1 }]
+#
+# READ THIS BEFORE TRUSTING A LINE BELOW.
+#
+# A `cc` line is a seed for the *generator*, not a saved case: proptest replays its RNG with
+# that seed, so the sequence it produces depends on what the strategy looks like today. Edit
+# `op_strategy` — add an operation, reorder the arms — and the same seed produces a *different*
+# sequence, and the line silently stops guarding the regression it was saved for while still
+# reading like protection.
+#
+# That is not a hypothesis, it is measured. The seed saved on P7 (`46170ffe`, property
+# `collapsed_counts_stay_derived`, shrunk to a three-step collapse) was checked on P13 after the
+# vocabulary of operations moved to `core::testkit`: with the P7 fault put back
+# (`node_update_collapsed` walking one ancestor instead of all) and `PROPTEST_CASES=0`, so that
+# only the seeds in this file ran, the property passed. The same fault is caught by random cases
+# and, deterministically, by the named unit test
+# `removing_a_collapsed_leaf_updates_ancestor_counts` — so the seed was deleted rather than left
+# here as a promise the file does not keep.
+#
+# The rule that follows: a seed is cheap insurance, never a substitute for a named `#[test]`.
+# When a property finds something worth keeping, write the case down as a test — as was done on
+# P7 and P8 — and treat whatever lands here as a bonus that expires the next time the generator
+# changes.

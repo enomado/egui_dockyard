@@ -21,6 +21,14 @@ pub mod window_state;
 /// Текстовый дамп формы дока — общий для гейтов, сравнивающих док до и после сохранения.
 pub mod shape;
 
+/// Vocabulary of dock operations shared by the property tests and the fuzzer.
+///
+/// Available to this crate's own tests always, and to outside harnesses (the `fuzz/` crate)
+/// under the `testkit` feature. It is test scaffolding, not part of the dock's API — the
+/// feature is off by default and nothing in the library depends on it.
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit;
+
 pub use surface::{SurfaceMut, SurfaceRef};
 pub use surface_index::{SurfaceIndex, WindowIndex};
 use tree::node::LeafNode;

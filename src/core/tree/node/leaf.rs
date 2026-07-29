@@ -98,6 +98,10 @@ impl<Tab> LeafNode<Tab> {
     /// `active` and `prev_active` are positions in `tabs`; anything out of range is
     /// dropped rather than trusted, because a stored layout is the one input to this type
     /// that no code path of ours is responsible for.
+    ///
+    /// Reading a stored layout is the only caller, so without `serde` this is dead code —
+    /// and said so, as a warning, on every build of the default feature set.
+    #[cfg(feature = "serde")]
     pub(crate) fn from_persisted(
         tabs: Vec<Tab>,
         active: TabIndex,

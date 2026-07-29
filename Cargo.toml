@@ -18,9 +18,17 @@ default = []
 # Enable serialization of `Tree`.
 serde = ["dep:serde", "egui/serde"]
 
+# Expose `core::testkit` — the vocabulary of dock operations the property tests drive the
+# model with — to harnesses outside this crate (today: `fuzz/`). Test scaffolding, off by
+# default; the library itself never depends on it. Inside the crate the module is available
+# under `cfg(test)` without the feature, so an ordinary `cargo test` needs nothing extra.
+testkit = ["dep:arbitrary"]
+
 [dependencies]
 egui = { version = "0.35", default-features = false }
 serde = { version = "1", optional = true, features = ["derive"] }
+# Only for `core::testkit`: a foreign trait cannot be derived on `Op` from the fuzzer crate.
+arbitrary = { version = "1", optional = true, features = ["derive"] }
 
 duplicate = "2.0"
 paste = "1.0"

@@ -16,7 +16,10 @@ ron = "0.12"
 
 [dependencies.egui_dock]
 path = ".."
-features = ["serde"]
+# `testkit` exports the operation vocabulary this target drives the dock with — the same one
+# the property tests use. Without it the operations would have to be written down here a
+# second time, which is exactly how the two harnesses drifted apart before.
+features = ["serde", "testkit"]
 
 [[bin]]
 name = "tree_ops"

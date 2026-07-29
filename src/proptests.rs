@@ -1,271 +1,87 @@
-//! Property tests: random sequences of tree operations must keep the tree well-formed.
+//! Property tests: random sequences of dock operations must keep the dock well-formed.
 //!
-//! The oracle is [`Tree::validate`](crate::Tree::validate). Unit tests pin down the cases
-//! somebody thought of; these cover the ones nobody did — historically the place where the
-//! tree's positional indices bit, since every structural operation renumbered nodes and an
+//! The oracle is [`DockState::validate`](crate::DockState::validate). Unit tests pin down the
+//! cases somebody thought of; these cover the ones nobody did — historically the place where
+//! the tree's positional indices bit, since every structural operation renumbered nodes and an
 //! operation that forgot to shift an index produced a tree that still *type-checked* and still
 //! rendered, just with a subtree quietly detached or an active tab pointing at the wrong place.
 //!
-//! Three families of assertions:
+//! The operations themselves live in [`crate::core::testkit`], shared with the fuzzer. They
+//! used to be written down here a second time, and the second copy stayed on the **main
+//! surface**: detaching a tab into a window, moving tabs out of one, closing a window — none of
+//! that was reached by any property, though `validate()` has rules about exactly that
+//! bookkeeping. Sharing the vocabulary closes the gap by construction rather than by somebody
+//! remembering to add ops in two places.
+//!
+//! Four families of assertions:
 //!
 //! * **structure** — `validate()` after every single operation, so a failure names the operation
 //!   that broke it rather than the end of the sequence;
 //! * **conservation** — operations that are not supposed to destroy anything must not change the
-//!   total number of tabs. Without this, a "well-formed" empty tree would pass happily;
+//!   total number of tabs. Without this, a "well-formed" empty dock would pass happily;
 //! * **identity** — a node id taken before an operation still names the same node afterwards,
 //!   unless that operation was about that node. This is the property the arena exists for, and
-//!   the one the heap representation could not have.
+//!   the one the heap representation could not have;
+//! * **derived counts** — the collapsing numbers each split stores are what its subtree says.
+//!
+//! Plus a coverage sweep, which is not a property but a check on the *generator*: it asserts
+//! that windows really do get opened, closed and moved between over a fixed set of seeds. A
+//! sequence that never leaves the main surface would satisfy every property above for free.
 
 use proptest::prelude::*;
+use proptest::strategy::ValueTree;
+use proptest::test_runner::{Config, TestRunner};
 
 use std::collections::HashMap;
 
-use crate::{
-    DockState, Node, NodeId, NodePath, Split, SurfaceIndex, TabIndex, TabInsert, TabPath, Tree,
-};
-
-/// One operation applied to the dock state.
-///
-/// Leaves are addressed as "the k-th live leaf" rather than by id: ids cannot be generated out
-/// of thin air (they are handed out by the arena), so the operation picks one at apply time.
-/// `k` is taken modulo the number of live leaves.
-#[derive(Clone, Copy, Debug)]
-enum Op {
-    Split {
-        leaf: usize,
-        split: usize,
-        tabs: usize,
-    },
-    RemoveLeaf {
-        leaf: usize,
-    },
-    RemoveTab {
-        leaf: usize,
-        tab: usize,
-    },
-    MoveTab {
-        src_leaf: usize,
-        src_tab: usize,
-        dst_leaf: usize,
-        insert: usize,
-    },
-    SetActive {
-        leaf: usize,
-        tab: usize,
-    },
-    Focus {
-        leaf: usize,
-    },
-    /// The collapse button, spelled the way the tab bar spells it: flip the leaf, then let
-    /// the tree settle the ancestors. Present so that the collapsing counts are exercised
-    /// against a tree that is being reshaped underneath them — without it every count in
-    /// every generated tree is zero, and a property about them proves nothing.
-    ToggleCollapsed {
-        leaf: usize,
-    },
-    PushToFocused,
-}
-
-/// Whether an operation is allowed to reduce the total number of tabs.
-fn is_destructive(op: Op) -> bool {
-    matches!(op, Op::RemoveLeaf { .. } | Op::RemoveTab { .. })
-}
+use crate::core::testkit::{Applied, Op, apply, check_tab_count, leaves, rebuilds_identities};
+use crate::{DockState, NodePath, SurfaceIndex};
 
 fn op_strategy() -> impl Strategy<Value = Op> {
     prop_oneof![
-        (0usize..8, 0usize..4, 1usize..4).prop_map(|(leaf, split, tabs)| Op::Split {
-            leaf,
-            split,
-            tabs
-        }),
-        (0usize..8).prop_map(|leaf| Op::RemoveLeaf { leaf }),
-        (0usize..8, 0usize..4).prop_map(|(leaf, tab)| Op::RemoveTab { leaf, tab }),
-        (0usize..8, 0usize..4, 0usize..8, 0usize..6).prop_map(
-            |(src_leaf, src_tab, dst_leaf, insert)| Op::MoveTab {
+        (0u8..8, 0u8..4, 0u8..3).prop_map(|(leaf, split, tabs)| Op::Split { leaf, split, tabs }),
+        (0u8..8).prop_map(|leaf| Op::RemoveLeaf { leaf }),
+        (0u8..8, 0u8..4).prop_map(|(leaf, tab)| Op::RemoveTab { leaf, tab }),
+        (0u8..8, 0u8..4, 0u8..8, 0u8..6).prop_map(|(src_leaf, src_tab, dst_leaf, insert)| {
+            Op::MoveTab {
                 src_leaf,
                 src_tab,
                 dst_leaf,
-                insert
+                insert,
             }
-        ),
-        (0usize..8, 0usize..4).prop_map(|(leaf, tab)| Op::SetActive { leaf, tab }),
-        (0usize..8).prop_map(|leaf| Op::Focus { leaf }),
-        (0usize..8).prop_map(|leaf| Op::ToggleCollapsed { leaf }),
+        }),
+        (0u8..8, 0u8..4).prop_map(|(leaf, tab)| Op::SetActive { leaf, tab }),
+        (0u8..8).prop_map(|leaf| Op::Focus { leaf }),
+        (0u8..8).prop_map(|leaf| Op::ToggleCollapsed { leaf }),
         Just(Op::PushToFocused),
+        (0u8..8, 0u8..4).prop_map(|(leaf, tab)| Op::Detach { leaf, tab }),
+        (0u8..3).prop_map(|tabs| Op::AddWindow { tabs }),
+        (0u8..4).prop_map(|window| Op::RemoveWindow { window }),
+        Just(Op::RetainOdd),
+        Just(Op::Remap),
+        Just(Op::FilterOddCopying),
     ]
 }
 
-/// Live leaves of the main surface, in tree order.
-fn live_leaves<Tab>(tree: &Tree<Tab>) -> Vec<NodeId> {
-    tree.breadth_first()
-        .into_iter()
-        .filter(|id| tree[*id].is_leaf())
-        .collect()
-}
-
 /// Tabs of every live leaf, keyed by identity. The snapshot the identity property compares.
-fn leaf_contents(tree: &Tree<u32>) -> HashMap<NodeId, Vec<u32>> {
-    live_leaves(tree)
-        .into_iter()
-        .map(|id| (id, tree.leaf(id).unwrap().iter_tabs().copied().collect()))
+fn leaf_contents(state: &DockState<u32>) -> HashMap<NodePath, Vec<u32>> {
+    state
+        .iter_leaves()
+        .map(|(path, leaf)| (path, leaf.iter_tabs().copied().collect()))
         .collect()
 }
 
-fn split_from(index: usize) -> Split {
-    match index % 4 {
-        0 => Split::Left,
-        1 => Split::Right,
-        2 => Split::Above,
-        _ => Split::Below,
-    }
-}
-
-/// Applies one operation. Returns `None` if it could not be applied at all (e.g. the tree has
-/// no leaves left) — such a step is skipped rather than counted as a pass. Otherwise returns
-/// the leaves the operation was *about*, which is what the identity property excludes.
-fn apply(dock_state: &mut DockState<u32>, op: Op, next_tab: &mut u32) -> Option<Vec<NodeId>> {
-    let main = SurfaceIndex::main();
-    let leaves = live_leaves(dock_state.main_surface());
-    if leaves.is_empty() {
-        // Only `PushToFocused` can rebuild a tree from nothing.
-        if let Op::PushToFocused = op {
-            let tab = *next_tab;
-            *next_tab += 1;
-            dock_state.main_surface_mut().push_to_focused_leaf(tab);
-            return Some(
-                dock_state
-                    .main_surface()
-                    .focused_leaf()
-                    .into_iter()
-                    .collect(),
-            );
-        }
-        return None;
-    }
-
-    let touched = match op {
-        Op::Split { leaf, split, tabs } => {
-            let node = leaves[leaf % leaves.len()];
-            let new_tabs: Vec<u32> = (0..tabs)
-                .map(|_| {
-                    let tab = *next_tab;
-                    *next_tab += 1;
-                    tab
-                })
-                .collect();
-            let [_, new] = dock_state.main_surface_mut().split(
-                node,
-                split_from(split),
-                0.5,
-                Node::leaf_with(new_tabs),
-            );
-            vec![node, new]
-        }
-
-        Op::RemoveLeaf { leaf } => {
-            let node = leaves[leaf % leaves.len()];
-            dock_state.main_surface_mut().remove_leaf(node);
-            vec![node]
-        }
-
-        Op::RemoveTab { leaf, tab } => {
-            let node = leaves[leaf % leaves.len()];
-            let tab_count = dock_state.main_surface()[node].tabs_count();
-            if tab_count == 0 {
-                return None;
-            }
-            let _ = dock_state
-                .main_surface_mut()
-                .remove_tab((node, TabIndex(tab % tab_count)));
-            vec![node]
-        }
-
-        Op::MoveTab {
-            src_leaf,
-            src_tab,
-            dst_leaf,
-            insert,
-        } => {
-            let src_node = leaves[src_leaf % leaves.len()];
-            let dst_node = leaves[dst_leaf % leaves.len()];
-            let src_count = dock_state.main_surface()[src_node].tabs_count();
-            let dst_count = dock_state.main_surface()[dst_node].tabs_count();
-            if src_count == 0 {
-                return None;
-            }
-            let src = TabPath::new(main, src_node, TabIndex(src_tab % src_count));
-            let dst_path = NodePath {
-                surface: main,
-                node: dst_node,
-            };
-            // The insertion index is deliberately allowed to reach `dst_count` (append position)
-            // and to be generated against the *pre-removal* count — that is exactly the
-            // out-of-bounds case that had to be clamped in `move_tab`.
-            let insert = match insert % 6 {
-                0 => TabInsert::Append,
-                1 => TabInsert::Insert(TabIndex(dst_count)),
-                2 => TabInsert::Insert(TabIndex(dst_count.saturating_sub(1))),
-                3 => TabInsert::Split(Split::Left),
-                4 => TabInsert::Split(Split::Below),
-                _ => TabInsert::Insert(TabIndex(0)),
-            };
-            // Whether the move changed anything is up to the generated operands (a
-            // generated move can land on the slot the tab is already in); the invariants
-            // checked after every op do not depend on it.
-            let _ = dock_state.move_tab(src, (dst_path, insert));
-            vec![src_node, dst_node]
-        }
-
-        Op::SetActive { leaf, tab } => {
-            let node = leaves[leaf % leaves.len()];
-            let tab_count = dock_state.main_surface()[node].tabs_count();
-            if tab_count == 0 {
-                return None;
-            }
-            let _ = dock_state
-                .main_surface_mut()
-                .set_active_tab(node, TabIndex(tab % tab_count));
-            // Which tab is open does not change *which tabs are there*.
-            vec![]
-        }
-
-        Op::Focus { leaf } => {
-            let node = leaves[leaf % leaves.len()];
-            dock_state.main_surface_mut().set_focused_node(node);
-            vec![]
-        }
-
-        Op::ToggleCollapsed { leaf } => {
-            let node = leaves[leaf % leaves.len()];
-            let collapsed = dock_state.main_surface()[node].is_collapsed();
-            dock_state
-                .main_surface_mut()
-                .set_leaf_collapsed(node, !collapsed);
-            // Collapsing hides a leaf's tabs; it does not touch which tabs are where.
-            vec![]
-        }
-
-        Op::PushToFocused => {
-            let tab = *next_tab;
-            *next_tab += 1;
-            dock_state.main_surface_mut().push_to_focused_leaf(tab);
-            dock_state
-                .main_surface()
-                .focused_leaf()
-                .into_iter()
-                .collect()
-        }
-    };
-
-    Some(touched)
+/// Open windows, by index — the quantity the coverage sweep watches.
+fn open_window_count(state: &DockState<u32>) -> usize {
+    crate::core::testkit::open_windows(state).len()
 }
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(400))]
 
-    /// After every operation the tree must still be a tree.
+    /// After every operation the dock must still be a dock.
     #[test]
-    fn tree_invariants_hold(ops in prop::collection::vec(op_strategy(), 1..24)) {
+    fn dock_invariants_hold(ops in prop::collection::vec(op_strategy(), 1..24)) {
         let mut dock_state = DockState::new(vec![0u32, 1, 2]);
         let mut next_tab = 3u32;
         prop_assert_eq!(dock_state.validate(), Ok(()), "the initial state must be well-formed");
@@ -288,40 +104,31 @@ proptest! {
     ///
     /// This is the half that a structural oracle alone cannot see: an implementation that
     /// "fixed" a broken move by dropping the tab would keep every structural invariant intact.
+    ///
+    /// The count is over the *whole* dock, not the main surface: a detached tab leaves the main
+    /// surface and stays in the dock, and a per-surface count would call that a loss.
     #[test]
     fn non_destructive_ops_conserve_tabs(ops in prop::collection::vec(op_strategy(), 1..24)) {
         let mut dock_state = DockState::new(vec![0u32, 1, 2]);
         let mut next_tab = 3u32;
 
         for (step, op) in ops.into_iter().enumerate() {
-            let before = dock_state.main_surface().num_tabs();
+            let before = crate::core::testkit::total_tabs(&dock_state);
             if apply(&mut dock_state, op, &mut next_tab).is_none() {
                 continue;
             }
-            let after = dock_state.main_surface().num_tabs();
+            let after = crate::core::testkit::total_tabs(&dock_state);
 
-            match op {
-                Op::Split { tabs, .. } => prop_assert_eq!(
-                    after, before + tabs,
-                    "split must add exactly the tabs it was given (step {})", step
-                ),
-                Op::PushToFocused => prop_assert_eq!(
-                    after, before + 1,
-                    "push must add exactly one tab (step {})", step
-                ),
-                op if !is_destructive(op) => prop_assert_eq!(
-                    after, before,
-                    "{:?} must not change the tab count (step {})", op, step
-                ),
-                _ => prop_assert!(
-                    after <= before,
-                    "a destructive op must not invent tabs (step {})", step
-                ),
-            }
+            prop_assert!(
+                check_tab_count(op, before, after).is_ok(),
+                "step {}: {}",
+                step,
+                check_tab_count(op, before, after).unwrap_err()
+            );
         }
     }
 
-    /// Every collapsing number in the tree is what its subtree says it is.
+    /// Every collapsing number in the dock is what its subtree says it is.
     ///
     /// The counts are *derived* — a split is collapsed exactly when both children are, and
     /// its row count is what the children stack up to — but they are stored, so every edit
@@ -343,38 +150,43 @@ proptest! {
             if apply(&mut dock_state, op, &mut next_tab).is_none() {
                 continue;
             }
-            let tree = dock_state.main_surface();
 
-            for id in tree.breadth_first() {
-                let Some(split) = tree[id].get_split() else { continue };
-                let [left, right] = split.children();
-                let expected_count = if tree[id].is_horizontal() {
-                    tree[left].collapsed_leaf_count().max(tree[right].collapsed_leaf_count())
-                } else {
-                    tree[left].collapsed_leaf_count() + tree[right].collapsed_leaf_count()
-                };
+            // Every surface, not just the main one: a detached tab carries its collapsed state
+            // into the window it lands in, and the window reads its height off the tree's count.
+            for (_, surface) in dock_state.iter_surfaces_indexed() {
+                let Some(tree) = surface.node_tree() else { continue };
+
+                for id in tree.breadth_first() {
+                    let Some(split) = tree[id].get_split() else { continue };
+                    let [left, right] = split.children();
+                    let expected_count = if tree[id].is_horizontal() {
+                        tree[left].collapsed_leaf_count().max(tree[right].collapsed_leaf_count())
+                    } else {
+                        tree[left].collapsed_leaf_count() + tree[right].collapsed_leaf_count()
+                    };
+                    prop_assert_eq!(
+                        split.collapsed_leaf_count, expected_count,
+                        "split {} carries a row count its children do not add up to, after step {} ({:?})",
+                        id, step, op
+                    );
+                    prop_assert_eq!(
+                        split.fully_collapsed,
+                        tree[left].is_collapsed() && tree[right].is_collapsed(),
+                        "split {} disagrees with its children about being collapsed, after step {} ({:?})",
+                        id, step, op
+                    );
+                }
+
+                // And the tree mirrors its root — this is the number a floating window's height
+                // is read from, and the one the ordinary collapse path used to skip.
                 prop_assert_eq!(
-                    split.collapsed_leaf_count, expected_count,
-                    "split {} carries a row count its children do not add up to, after step {} ({:?})",
-                    id, step, op
+                    tree.collapsed_leaf_count(),
+                    tree.root_node().map_or(0, |root| root.collapsed_leaf_count()),
+                    "the tree disagrees with its root, after step {} ({:?})", step, op
                 );
-                prop_assert_eq!(
-                    split.fully_collapsed,
-                    tree[left].is_collapsed() && tree[right].is_collapsed(),
-                    "split {} disagrees with its children about being collapsed, after step {} ({:?})",
-                    id, step, op
-                );
+
+                collapsed_seen += usize::from(tree.collapsed_leaf_count() > 0);
             }
-
-            // And the tree mirrors its root — this is the number a floating window's height
-            // is read from, and the one the ordinary collapse path used to skip.
-            prop_assert_eq!(
-                tree.collapsed_leaf_count(),
-                tree.root_node().map_or(0, |root| root.collapsed_leaf_count()),
-                "the tree disagrees with its root, after step {} ({:?})", step, op
-            );
-
-            collapsed_seen += usize::from(tree.collapsed_leaf_count() > 0);
         }
 
         // Guards against the property passing on a scene where nothing is ever collapsed:
@@ -390,29 +202,110 @@ proptest! {
     /// representation could not satisfy: there, a split renumbered every node after the
     /// split point, so an id held across it addressed a different node — silently, and only
     /// sometimes, which is why the two bugs it caused took so long to pin down.
+    ///
+    /// Copying sweeps are skipped, and the reason is stated once in
+    /// [`rebuilds_identities`]: they build a fresh arena, so a slot number may be handed out
+    /// again to a different node — which is not the class this property is about.
     #[test]
     fn ids_keep_naming_the_same_node(ops in prop::collection::vec(op_strategy(), 1..24)) {
         let mut dock_state = DockState::new(vec![0u32, 1, 2]);
         let mut next_tab = 3u32;
 
         for (step, op) in ops.into_iter().enumerate() {
-            let before = leaf_contents(dock_state.main_surface());
-            let Some(touched) = apply(&mut dock_state, op, &mut next_tab) else {
+            let before = leaf_contents(&dock_state);
+            let Some(Applied { touched }) = apply(&mut dock_state, op, &mut next_tab) else {
                 continue;
             };
-            let after = leaf_contents(dock_state.main_surface());
+            if rebuilds_identities(op) {
+                continue;
+            }
+            let after = leaf_contents(&dock_state);
 
-            for (id, tabs) in &before {
-                if touched.contains(id) {
+            for (path, tabs) in &before {
+                if touched.contains(path) {
                     continue;
                 }
-                if let Some(now) = after.get(id) {
+                if let Some(now) = after.get(path) {
                     prop_assert_eq!(
                         now, tabs,
-                        "{:?} at step {} changed the tabs of an unrelated leaf {}", op, step, id
+                        "{:?} at step {} changed the tabs of an unrelated leaf {:?}", op, step, path
                     );
                 }
             }
         }
     }
+}
+
+/// The generator must actually reach the window layer — otherwise every property above is
+/// green for free.
+///
+/// This is not a property but a check on the *scene*: "0 violations" reads the same as
+/// "0 checks", and until the operation vocabulary was shared with the fuzzer these tests
+/// genuinely never left the main surface. Counting the outcomes is what makes the difference
+/// visible; the counts are asserted, not printed.
+///
+/// Deterministic on purpose: a fixed set of seeds through proptest's own RNG, so a run that
+/// fails the coverage bar fails it for everybody rather than once in a while.
+#[test]
+fn the_generator_reaches_the_window_layer() {
+    let sequence = prop::collection::vec(op_strategy(), 24..25);
+
+    let mut windows_opened = 0usize;
+    let mut windows_closed = 0usize;
+    let mut cross_surface_moves = 0usize;
+    let mut tabs_lived_in_windows = 0usize;
+
+    for seed in 0u64..32 {
+        let mut runner = TestRunner::new_with_rng(
+            Config::default(),
+            proptest::test_runner::TestRng::from_seed(
+                proptest::test_runner::RngAlgorithm::ChaCha,
+                &seed.to_le_bytes().repeat(4),
+            ),
+        );
+        let ops = sequence.new_tree(&mut runner).unwrap().current();
+
+        let mut dock_state = DockState::new(vec![0u32, 1, 2]);
+        let mut next_tab = 3u32;
+
+        for op in ops {
+            let windows_before = open_window_count(&dock_state);
+            let Some(Applied { touched }) = apply(&mut dock_state, op, &mut next_tab) else {
+                continue;
+            };
+            let windows_after = open_window_count(&dock_state);
+
+            windows_opened += usize::from(windows_after > windows_before);
+            windows_closed += usize::from(windows_after < windows_before);
+            // A move whose two ends live on different surfaces — the path that has to keep the
+            // surface bookkeeping straight while a tree changes underneath it.
+            if matches!(op, Op::MoveTab { .. })
+                && touched.len() == 2
+                && touched[0].surface != touched[1].surface
+            {
+                cross_surface_moves += 1;
+            }
+            tabs_lived_in_windows += leaves(&dock_state)
+                .iter()
+                .filter(|path| path.surface != SurfaceIndex::Main)
+                .count();
+        }
+    }
+
+    assert!(
+        windows_opened > 0,
+        "no window was ever opened — the properties never left the main surface"
+    );
+    assert!(
+        windows_closed > 0,
+        "no window was ever closed — the surface bookkeeping of `remove_window` went unexercised"
+    );
+    assert!(
+        cross_surface_moves > 0,
+        "no tab was ever moved between surfaces — the cross-surface path went unexercised"
+    );
+    assert!(
+        tabs_lived_in_windows > 0,
+        "no leaf ever lived in a window — windows were opened and immediately gone"
+    );
 }

@@ -20,7 +20,15 @@
 //!    by step. Without this a failure found here would not be a bug report;
 //! 3. **the gestures actually did something** — a scenario whose drags all miss would satisfy
 //!    both of the above and prove nothing, so what the dock *did* (a tab appended, a leaf
-//!    split, a window torn off, a surface closed) is counted per outcome and asserted.
+//!    split, a window torn off, a surface closed) is counted per outcome and asserted;
+//! 4. **a frame disturbs no identity it had no business touching** — the property tests own
+//!    this one at the model level (`ids_keep_naming_the_same_node`), where "an operation" is a
+//!    call. Here "an operation" is a *gesture*, and the frame layer between the two is exactly
+//!    where an identity can be churned without the shape ever changing: the trace compares
+//!    shapes and tab *values*, so a node re-created with the same contents, or a tab removed
+//!    and re-inserted at the same index, reads as "nothing happened". Not a hypothesis: this
+//!    property found the model rebuilding a tab from scratch when it was dragged along its own
+//!    bar, which every model-level test had passed over because the tab list read the same.
 
 use std::fmt::Write as _;
 
@@ -174,6 +182,51 @@ fn outcome_index(outcome: Outcome) -> Option<usize> {
     })
 }
 
+/// What one applied step did, as far as the oracles need to know.
+struct Effect {
+    /// Whether this step had no business changing *anything at all*.
+    ///
+    /// Only a frame with no input qualifies here, and getting to that answer took two wrong
+    /// ones, both corrected by measurement rather than by argument:
+    ///
+    /// * "the trace came out identical" is not it. Dropping the only tab of a leaf onto its
+    ///   sibling's split button removes the emptied leaf and builds a new one — a real change
+    ///   the trace cannot see, since the shape and the titles come out the same;
+    /// * "a tab dropped on its own node's centre button" is not it either. That resolves to
+    ///   *append*, which genuinely reorders the bar unless the tab is already last — and when
+    ///   it is the node's only tab, the node is closed mid-drag and the drop lands on whatever
+    ///   grew into the space.
+    ///
+    /// The cancelled drag is therefore pinned by a scripted test on the one scene where it is
+    /// a no-op (a root leaf holding a single tab) rather than waited for here.
+    must_change_nothing: bool,
+    /// The leaves the step was *about* — the source and target of a gesture, the node a
+    /// scripted call names. Everything else has to come through untouched, identities and all.
+    ///
+    /// Named up front rather than derived from the diff: "whatever changed was allowed to
+    /// change" is not a property, it is a tautology.
+    touched: Vec<NodePath>,
+}
+
+/// Every live leaf's identities, in tree order. See [`Sim::identities`].
+type Identities = Vec<(NodePath, LeafIdentity)>;
+
+/// A leaf's identities, which no gesture that was not about it may disturb.
+///
+/// Deliberately *not* what the trace records. The trace holds shapes and tab titles, so it
+/// cannot tell a leaf from a leaf rebuilt with the same contents, nor a tab from the same tab
+/// removed and re-inserted at the same index. Those are the two ways this layer has actually
+/// gone wrong.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LeafIdentity {
+    /// `(identity, title)` per tab, in order: the pair catches both a renumbered tab and a tab
+    /// whose identity was kept while its content moved.
+    tabs: Vec<(egui_dock::TabId, String)>,
+    active: Option<egui_dock::TabId>,
+    /// The focus history — the field that used to be quietly rewritten by a cancelled drag.
+    prev_active: Option<egui_dock::TabId>,
+}
+
 /// Names for the coverage report, in the order of [`outcome_index`].
 const OUTCOME_NAMES: [&str; OUTCOMES] = [
     "Appended",
@@ -279,6 +332,33 @@ impl Sim {
             .map(|response| response.rect)
     }
 
+    /// Whether some floating window other than `aimed_at` may be sitting over `point`.
+    ///
+    /// Floating windows are drawn above the main surface *and above each other*, so a drop lands
+    /// on whatever is topmost under the pointer rather than on the surface the step named. When
+    /// that happens the gesture means something else entirely and the scenario is aiming blind.
+    ///
+    /// This is measured, not reasoned: the identity property below caught a drag whose source
+    /// and target were the same leaf of window 0 moving a tab into window 3 — the aim point sat
+    /// inside window 2, which overlapped both. The first version of this check only looked for
+    /// windows over the *main* surface and missed exactly that case.
+    ///
+    /// Deliberately generous — the union of a window's node rects grown by a margin, since the
+    /// frame and title bar around them belong to the window too, and this harness has no
+    /// business re-deriving egui's window geometry. Erring towards "covered" costs a skipped
+    /// step; erring the other way costs a false failure. The z-order among windows is not
+    /// modelled at all: any overlap is treated as ambiguous.
+    fn window_covers(&self, point: Pos2, aimed_at: SurfaceIndex) -> bool {
+        const FRAME_MARGIN: f32 = 48.0;
+
+        let layout = self.layout();
+        self.state
+            .iter_all_nodes()
+            .filter(|(path, _)| path.surface != SurfaceIndex::main() && path.surface != aimed_at)
+            .filter_map(|(path, _)| layout.get(path).map(|geometry| geometry.rect))
+            .any(|rect| rect.expand(FRAME_MARGIN).contains(point))
+    }
+
     /// Where to release the pointer so that a drop on `leaf` means `aim`.
     ///
     /// The button geometry mirrors `resolve_icon_based`: the hovered rect is shrunk by the
@@ -343,6 +423,36 @@ impl Sim {
         }
     }
 
+    /// Every live leaf's identities, in tree order, paired with where it lives.
+    ///
+    /// A `Vec` rather than a map, and the order is part of what is compared: leaves come out in
+    /// the order the trees are walked, so a step that reshuffled the walk without changing a
+    /// single leaf would still be visible here.
+    fn identities(&self) -> Identities {
+        self.state
+            .iter_leaves()
+            .map(|(path, leaf)| {
+                let tabs = leaf
+                    .iter_tabs_indexed()
+                    .map(|(index, tab)| {
+                        (
+                            leaf.tab_id_at(index).expect("a tab at its own index"),
+                            tab.clone(),
+                        )
+                    })
+                    .collect();
+                (
+                    path,
+                    LeafIdentity {
+                        tabs,
+                        active: leaf.active_id(),
+                        prev_active: leaf.prev_active_id(),
+                    },
+                )
+            })
+            .collect()
+    }
+
     fn snapshot(&self) -> Snapshot {
         Snapshot {
             surfaces: self.state.iter_surfaces().filter(|s| !s.is_empty()).count(),
@@ -397,8 +507,8 @@ impl Sim {
         self.run_frame(vec![]);
     }
 
-    /// Applies one step. Returns `false` if the scene had nothing for it to act on.
-    fn apply(&mut self, step: Step) -> bool {
+    /// Applies one step. Returns `None` if the scene had nothing for it to act on.
+    fn apply(&mut self, step: Step) -> Option<Effect> {
         let leaves = self.live_leaves();
         if leaves.is_empty() {
             // An empty dock can only be rebuilt through the model.
@@ -406,34 +516,49 @@ impl Sim {
                 let tab = self.fresh_tab();
                 self.state.push_to_focused_leaf(tab);
                 self.run_frame(vec![]);
-                return true;
+                // Whatever it landed in did not exist a moment ago, so nothing survived that
+                // this step could have disturbed.
+                return Some(Effect {
+                    must_change_nothing: false,
+                    touched: self.live_leaves(),
+                });
             }
-            return false;
+            return None;
         }
         let before = self.snapshot();
 
-        match step {
+        // Set by the two steps that are supposed to be no-ops; see `Effect`.
+        let mut must_change_nothing = false;
+
+        let touched = match step {
             Step::Drag { from, to, aim } => {
                 let source = leaves[from % leaves.len()];
                 let target = leaves[to % leaves.len()];
                 let (Some(grab), Some(drop)) =
                     (self.tab_rect(source, 0), self.aim_point(target, aim))
                 else {
-                    return false;
+                    return None;
                 };
+                // A drop some other window may intercept means something other than the step
+                // says, so the step is skipped rather than fired at a target it will not hit.
+                if self.window_covers(drop, target.surface) {
+                    return None;
+                }
                 self.drag(grab.center(), drop);
+                // The source may have been emptied and removed, which collapses its parent
+                // split and lifts its sibling one level — the sibling keeps its id (that is
+                // what the arena is for), so it is not listed here.
+                vec![source, target]
             }
 
             Step::ClickTab { leaf, tab } => {
                 let target = leaves[leaf % leaves.len()];
                 let tabs = self.state[target].tabs_count();
                 if tabs == 0 {
-                    return false;
+                    return None;
                 }
-                let Some(rect) = self.tab_rect(target, tab % tabs) else {
-                    return false;
-                };
-                self.click(rect.center());
+                self.click(self.tab_rect(target, tab % tabs)?.center());
+                vec![target]
             }
 
             Step::Split { leaf, split } => {
@@ -447,20 +572,32 @@ impl Sim {
                 };
                 self.state.split(target, split, 0.5, Node::leaf(tab));
                 self.run_frame(vec![]);
+                vec![target]
             }
 
             Step::CloseLeaf { leaf } => {
-                self.state.remove_leaf(leaves[leaf % leaves.len()]);
+                let target = leaves[leaf % leaves.len()];
+                self.state.remove_leaf(target);
                 self.run_frame(vec![]);
+                vec![target]
             }
 
-            Step::Idle => self.run_frame(vec![]),
-        }
+            // A frame with no input at all: it is allowed to change nothing whatsoever, which
+            // is why nothing is listed as touched.
+            Step::Idle => {
+                must_change_nothing = true;
+                self.run_frame(vec![]);
+                Vec::new()
+            }
+        };
 
         if let Some(slot) = outcome_index(self.outcome_since(&before)) {
             self.effective[slot] += 1;
         }
-        true
+        Some(Effect {
+            must_change_nothing,
+            touched,
+        })
     }
 
     /// The dock's shape, written down: surfaces, splits, tabs per leaf.
@@ -558,7 +695,7 @@ fn shape_of(tree: &Tree<String>, id: NodeId, out: &mut String) {
 fn scenario(seed: u64, len: usize) -> Vec<Step> {
     let mut rng = Rng::new(seed);
     (0..len)
-        .map(|_| match rng.below(10) {
+        .map(|_| match rng.below(12) {
             0..=4 => Step::Drag {
                 from: rng.below(8),
                 to: rng.below(8),
@@ -577,6 +714,19 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
                 split: rng.below(4),
             },
             8 => Step::CloseLeaf { leaf: rng.below(8) },
+            // A tab dropped on the centre button of the node it already lives in, drawn on
+            // purpose rather than waited for: a random pair of leaf indices lands on the same
+            // leaf about once across the whole sweep. It reorders the bar (or focuses the tab,
+            // if it is already last) — the path where a tab used to be destroyed and rebuilt
+            // one slot over.
+            9 => {
+                let leaf = rng.below(8);
+                Step::Drag {
+                    from: leaf,
+                    to: leaf,
+                    aim: Aim::Append,
+                }
+            }
             _ => Step::Idle,
         })
         .collect()
@@ -588,8 +738,75 @@ struct Run {
     traces: Vec<String>,
     /// What the dock actually did, per outcome.
     effective: [usize; OUTCOMES],
+    /// How much the identity property actually got to check — see [`IdentityWatch`].
+    identity: IdentityWatch,
     /// The first step that left the dock invalid, if any.
     failure: Option<Failure>,
+}
+
+/// Coverage of the identity property, counted while the run happens.
+///
+/// Without these numbers the property is the usual green-for-free: a run whose every step
+/// changed everything has no bystanders to protect, and a run with no quiet frames never asks
+/// whether a frame can churn identities on its own. Both are asserted by the sweep.
+#[derive(Clone, Copy, Default, Debug)]
+struct IdentityWatch {
+    /// Frames with no input at all, whose *whole* identity map had to come through unchanged.
+    idle_frames: usize,
+    /// Bystander leaves checked across steps that were about something else.
+    bystanders: usize,
+}
+
+/// Checks that a step disturbed no identity outside the leaves it was about.
+///
+/// Returns the complaint, or `None` if the step behaved. Two regimes, because a step that did
+/// nothing has to answer a stronger question:
+///
+/// * a step that had no business changing anything (a frame with no input; a tab dropped back
+///   onto its own node) — the whole identity map must be equal, keys, order and all. This is
+///   the regime that catches churn under a still picture, and the one the cancelled-drag bug of
+///   P12 would have failed;
+/// * anything else — the leaves the step was about are exempt (they are what it changed), and
+///   every other leaf that still exists must be identical. Leaves that are *gone* are not
+///   checked: a drop can empty a leaf, and a closed window takes its leaves with it.
+///
+/// The first regime is keyed to what the step *was*, not to what the trace shows. Keying it to
+/// `Outcome::Nothing` was tried first and was wrong: dropping the only tab of a leaf onto its
+/// sibling's split button removes the emptied leaf and builds a new one, which is a real change
+/// the trace cannot see — the shape and the tab titles come out identical.
+fn identity_complaint(
+    before: &Identities,
+    after: &Identities,
+    effect: &Effect,
+    watch: &mut IdentityWatch,
+) -> Option<String> {
+    if effect.must_change_nothing {
+        watch.idle_frames += 1;
+        if before != after {
+            return Some(format!(
+                "a step that changed nothing visible still moved identities underneath:\n\
+                 before: {before:?}\nafter:  {after:?}"
+            ));
+        }
+        return None;
+    }
+
+    for (path, identity) in before {
+        if effect.touched.contains(path) {
+            continue;
+        }
+        let Some((_, now)) = after.iter().find(|(other, _)| other == path) else {
+            continue;
+        };
+        watch.bystanders += 1;
+        if now != identity {
+            return Some(format!(
+                "leaf {path:?} was not what the step was about, yet its identities changed:\n\
+                 before: {identity:?}\nafter:  {now:?}"
+            ));
+        }
+    }
+    None
 }
 
 #[derive(Debug)]
@@ -609,8 +826,10 @@ struct Failure {
 fn run(steps: &[Step]) -> Run {
     let mut sim = Sim::new();
     let mut traces = Vec::with_capacity(steps.len());
+    let mut identity = IdentityWatch::default();
 
     for (step_index, &step) in steps.iter().enumerate() {
+        let before_identities = sim.identities();
         let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sim.apply(step)));
 
         let applied = match applied {
@@ -619,6 +838,7 @@ fn run(steps: &[Step]) -> Run {
                 return Run {
                     traces,
                     effective: sim.effective,
+                    identity,
                     failure: Some(Failure {
                         step_index,
                         step,
@@ -628,20 +848,39 @@ fn run(steps: &[Step]) -> Run {
             }
         };
 
-        if !applied {
+        let Some(effect) = applied else {
             traces.push(String::from("skipped"));
             continue;
-        }
+        };
         traces.push(sim.trace());
 
         if let Err(violations) = sim.state.validate() {
             return Run {
                 traces,
                 effective: sim.effective,
+                identity,
                 failure: Some(Failure {
                     step_index,
                     step,
                     reason: format!("{violations:?}"),
+                }),
+            };
+        }
+
+        if let Some(complaint) = identity_complaint(
+            &before_identities,
+            &sim.identities(),
+            &effect,
+            &mut identity,
+        ) {
+            return Run {
+                traces,
+                effective: sim.effective,
+                identity,
+                failure: Some(Failure {
+                    step_index,
+                    step,
+                    reason: complaint,
                 }),
             };
         }
@@ -650,6 +889,7 @@ fn run(steps: &[Step]) -> Run {
     Run {
         traces,
         effective: sim.effective,
+        identity,
         failure: None,
     }
 }
@@ -844,6 +1084,94 @@ fn a_tab_dropped_where_it_came_from_commits_nothing() {
     assert_eq!(sim.state.validate(), Ok(()));
 }
 
+/// The same cancelled gesture, judged by identity rather than by the event it did not send.
+///
+/// Its sibling above asks whether the dock *announced* a change; this asks whether one happened
+/// underneath. They fail to different faults: the old drop handler announced a commit while
+/// changing nothing, and the old move path changed something (a fresh `TabId`, a rewritten
+/// focus history) while the trace showed nothing. A test for one is blind to the other.
+///
+/// The scene is the sim's default — one root leaf holding one tab — and that is the only shape
+/// in which this gesture is a no-op at all. Lift the single tab out of a *non-root* leaf and the
+/// leaf is closed mid-drag, so the point aimed at its centre now lies over whichever leaf grew
+/// into the space, and the drop is a genuine move. Measured, not assumed: the sweep reported it
+/// as churn until the distinction was drawn.
+#[test]
+fn a_cancelled_drag_leaves_every_identity_alone() {
+    let mut sim = Sim::new();
+    let leaf = sim.live_leaves()[0];
+
+    let home = sim.tab_rect(leaf, 0).expect("a tab to grab").center();
+    let back_home = sim
+        .aim_point(leaf, Aim::Append)
+        .expect("the centre button of the leaf");
+
+    // Press the tab first so that focusing it — a real change, and a legitimate one — is not
+    // part of what the drag is judged on.
+    sim.click(home);
+    let before = sim.identities();
+
+    sim.drag(home, back_home);
+
+    assert_eq!(
+        sim.identities(),
+        before,
+        "a tab put back where it came from must leave every node id, tab id, active tab and \
+         focus history exactly as they were: {}",
+        sim.trace()
+    );
+    assert_eq!(sim.state.validate(), Ok(()));
+}
+
+/// Dragging a tab along its own bar moves it — and it is still the same tab afterwards.
+///
+/// The gesture that made this harness worth extending: dropping a tab on the centre button of
+/// the node it already lives in appends it, which is a real reorder when the node holds more
+/// than one tab. The model used to implement that as remove + insert, so the tab came back with
+/// a fresh `TabId` and out of the focus history, and *nothing above the model could see it* —
+/// the shape, the titles and their order all read exactly as they should.
+#[test]
+fn reordering_a_tab_in_the_bar_keeps_it_the_same_tab() {
+    let mut sim = Sim::new();
+    // A second tab in the same node, so that lifting one out leaves the node standing and the
+    // drop lands where it was aimed.
+    let tab = sim.fresh_tab();
+    sim.state.push_to_focused_leaf(tab);
+    sim.run_frame(vec![]);
+
+    let leaf = sim.live_leaves()[0];
+    let dragged = sim.state[leaf]
+        .get_leaf()
+        .unwrap()
+        .tab_id_at(egui_dock::TabIndex(0))
+        .expect("the first tab");
+    let grab = sim.tab_rect(leaf, 0).expect("a tab to grab").center();
+    let onto_itself = sim
+        .aim_point(leaf, Aim::Append)
+        .expect("the centre button of the leaf");
+
+    sim.drag(grab, onto_itself);
+
+    let node = sim.state[leaf].get_leaf().expect("the leaf is still there");
+    assert_eq!(
+        node.iter_tabs().cloned().collect::<Vec<_>>(),
+        vec!["t1".to_string(), "t0".to_string()],
+        "the dragged tab was appended, so it is now last: {}",
+        sim.trace()
+    );
+    assert_eq!(
+        node.tab_id_at(egui_dock::TabIndex(1)),
+        Some(dragged),
+        "and it is the same tab that was picked up, not a copy of it"
+    );
+    assert_eq!(
+        node.active_id(),
+        Some(dragged),
+        "dragging a tab focuses it, by the identity it kept"
+    );
+    assert_eq!(sim.state.validate(), Ok(()));
+}
+
 /// How many seeds the sweep runs, and how long each scenario is.
 ///
 /// Each step is a handful of frames, so this is seconds, not milliseconds — the budget was set
@@ -859,6 +1187,7 @@ const STEPS: usize = 24;
 #[test]
 fn seeded_scenarios_keep_the_dock_well_formed() {
     let mut coverage = [0usize; OUTCOMES];
+    let mut identity = IdentityWatch::default();
 
     for seed in 0..SEEDS {
         let steps = scenario(seed, STEPS);
@@ -866,6 +1195,8 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         for (slot, count) in coverage.iter_mut().zip(outcome.effective) {
             *slot += count;
         }
+        identity.idle_frames += outcome.identity.idle_frames;
+        identity.bystanders += outcome.identity.bystanders;
 
         if let Some(failure) = outcome.failure {
             let minimal = quietly(|| shrink(&steps, &|candidate| run(candidate).failure.is_some()));
@@ -898,6 +1229,21 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
             OUTCOME_NAMES.iter().zip(coverage).collect::<Vec<_>>()
         );
     }
+
+    println!("identity watch: {identity:?}");
+
+    // And the same demand of the identity property, which is checked inside `run` and would
+    // otherwise be satisfied by never having anything to check.
+    assert!(
+        identity.idle_frames > 0,
+        "no frame across {SEEDS} seeds ran without input, so the claim that rendering alone \
+         disturbs nothing was never put to the test"
+    );
+    assert!(
+        identity.bystanders > 0,
+        "no leaf was ever a bystander to a step that changed something — the property only \
+         ever looked at leaves the step was allowed to change"
+    );
 }
 
 /// A seed replays to the same trace, step by step.

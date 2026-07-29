@@ -318,6 +318,37 @@ impl<Tab> LeafNode<Tab> {
         self.active = Some(id);
     }
 
+    /// Moves the tab at `from` so that it sits at `to`, and focuses it.
+    ///
+    /// Reordering a tab bar is deliberately **not** remove + insert. That round trip preserves
+    /// the order and nothing else: the tab comes back with a fresh [`TabId`], which is a new
+    /// tab as far as this type is concerned, and the removal drops it out of the focus history
+    /// on the way through. A tab the user merely dragged along its own bar would stop being the
+    /// tab `prev_active` names, and any identity held across the gesture would go stale — the
+    /// very thing [`TabId`] exists to prevent.
+    ///
+    /// `to` is clamped to the last slot, since it is generally computed against the tab count
+    /// from before the move.
+    ///
+    /// # Panics
+    ///
+    /// If `from` is out of range.
+    #[track_caller]
+    pub(crate) fn reorder_tab(&mut self, from: TabIndex, to: TabIndex) {
+        assert!(
+            from.0 < self.tabs.len(),
+            "no tab at {from:?} to reorder in a leaf of {} tabs",
+            self.tabs.len()
+        );
+        let to = TabIndex(to.0.min(self.tabs.len() - 1));
+
+        let entry = self.tabs.remove(from.0);
+        self.tabs.insert(to.0, entry);
+        // Dragging a tab focuses it, the same way dropping one into another node does — but
+        // through the identity that has been carried along, not a new one.
+        self.activate_tab_remembering(to);
+    }
+
     /// Removes the tab at `tab_index`, returning it, or `None` if there is no such tab.
     ///
     /// If the removed tab was the active one, focus falls back to the previously active

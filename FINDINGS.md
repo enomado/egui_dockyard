@@ -12,6 +12,64 @@ Ordered newest first.
 
 ---
 
+## Dragging a tab along its own bar destroyed it and built a new one
+
+**Status upstream:** not submitted. The remaining half of the finding below: that one fixed the
+drop that resolves to the slot the tab is *already* in, this one fixes the drop that really does
+move it — within the same node.
+
+**Symptom.** Drag a tab a couple of slots along its own tab bar. The bar looks right, and every
+observable except one agrees it is right. The exception: the tab is not the same tab any more.
+`TabId` is reissued, so anything addressed by it now names something else — and the dock itself
+addresses `active` and `prev_active` that way, so the tab drops out of the focus history it was
+part of. "Go back to the tab I came from" quietly forgets a tab the user merely reordered.
+
+**Root cause.** Reordering inside a node went through the generic path:
+
+```rust
+let tab = self[src.node_path()].remove_tab(src.tab).unwrap();
+// ...
+self[dst.surface][dst.node].insert_tab(clamped, tab);
+```
+
+`remove_tab` + `insert_tab` is order-preserving and nothing else. `insert_tab` allocates a fresh
+`TabId` (it has no way to know this is the same tab arriving back), and `remove_tab` prunes the
+focus history of the id it is removing. The special case for "the tab did not actually move" was
+already there and carried a comment saying exactly this about the round trip — the case where the
+tab *does* move within the node simply had no path of its own.
+
+Worth naming why this survived a suite that already had a property for identities: at the model
+level, `move_tab` is *allowed* to change the node it was pointed at, so a property that exempts
+the node an operation was about cannot see this. What it needed was a level where the gesture and
+its effect are visible together.
+
+**Fix.** A reorder is expressed as one:
+
+```rust
+pub(crate) fn reorder_tab(&mut self, from: TabIndex, to: TabIndex) {
+    let entry = self.tabs.remove(from.0);
+    self.tabs.insert(to.0, entry);
+    self.activate_tab_remembering(to);
+}
+```
+
+The entry moves whole, so the identity travels with the tab; focusing it afterwards is the same
+thing dropping a tab into any other node does. `move_tab` routes `Insert`/`Append` onto one's own
+node here. `Split` still falls through to the general path, because splitting a node off itself
+genuinely puts the tab in a node of its own.
+
+**Evidence.** `reordering_a_tab_inside_its_node_keeps_its_identity` at the model level (the id
+survives, it is the active tab afterwards, and the tab the user came from is still what
+`prev_active` names), and `reordering_a_tab_in_the_bar_keeps_it_the_same_tab` in the deterministic
+simulation — a real drag onto the centre button of the node the tab already lives in.
+
+Found by the frame-level identity property added in the same pass (`tests/dst.rs`): after each
+step, every leaf the step was not about must come through with its node id, tab ids, active tab
+and focus history intact. Mutation: routing reorders back through remove + insert fails both
+tests above, and neither the trace comparison nor the structural oracle notices anything.
+
+---
+
 ## A tab dropped back where it came from reported a layout change
 
 **Status upstream:** not submitted. Same event and the same class of lie as the separator-drag

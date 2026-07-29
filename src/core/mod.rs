@@ -381,6 +381,21 @@ impl<Tab> DockState<Tab> {
                             .activate_tab_remembering(src.tab);
                         return !already_active;
                     }
+
+                    // Reordering within the bar, for the same reason: the tab is the same
+                    // tab, so it keeps its identity and its place in the focus history
+                    // instead of being destroyed and rebuilt one slot over. Splitting a node
+                    // off itself is not a reorder — the tab ends up in a node of its own —
+                    // so it falls through to the general path below.
+                    let reorder_to = match &dst_tab {
+                        TabInsert::Insert(index) => Some(*index),
+                        TabInsert::Append => Some(TabIndex(leaf.len())),
+                        TabInsert::Split(_) => None,
+                    };
+                    if let Some(to) = reorder_to {
+                        self[dst].get_leaf_mut().unwrap().reorder_tab(src.tab, to);
+                        return true;
+                    }
                 }
 
                 // Call `Node::remove_tab` to avoid auto remove of the node by `Tree::remove_tab` from Tree.
@@ -1125,6 +1140,63 @@ mod test {
         assert_eq!(
             state[path].get_leaf().unwrap().active_index(),
             Some(TabIndex(2))
+        );
+        assert_eq!(state.validate(), Ok(()));
+    }
+
+    /// Reordering a tab inside its own node carries the tab's identity with it.
+    ///
+    /// The order alone is not the property: remove + insert gets the order right and loses
+    /// everything else. A `TabId` is what `active` and `prev_active` are stored as (that is
+    /// the whole point of P2/A5), so a reorder that hands out a fresh one silently drops the
+    /// dragged tab out of the focus history — the user drags a tab along the bar and the
+    /// "go back to the previous tab" it was part of forgets it.
+    ///
+    /// Found by the frame-level identity property in `tests/dst.rs`, which is what the model
+    /// tests here could not see: the tab list read the same before and after.
+    #[test]
+    fn reordering_a_tab_inside_its_node_keeps_its_identity() {
+        let mut state = DockState::new(vec![0u32, 1, 2]);
+        let main = SurfaceIndex::main();
+        let node = state.main_surface().root().unwrap();
+        let path = NodePath::new(main, node);
+
+        let leaf = state[path].get_leaf().unwrap();
+        let moved = leaf.tab_id_at(TabIndex(0)).unwrap();
+        let stays = leaf.tab_id_at(TabIndex(1)).unwrap();
+        // Tab 1 is what the dock would return to; tab 0 is the one being dragged.
+        state
+            .main_surface_mut()
+            .set_active_tab(node, TabIndex(1))
+            .unwrap();
+        state
+            .main_surface_mut()
+            .set_active_tab(node, TabIndex(0))
+            .unwrap();
+
+        let changed = state.move_tab(
+            TabPath::new(main, node, TabIndex(0)),
+            (path, TabInsert::Append),
+        );
+
+        assert!(changed, "the tab really did travel to the end");
+        assert_eq!(tabs_of(&state, main), vec![1, 2, 0]);
+
+        let leaf = state[path].get_leaf().unwrap();
+        assert_eq!(
+            leaf.tab_id_at(TabIndex(2)),
+            Some(moved),
+            "the tab that moved is the same tab, so it keeps the id it was addressed by"
+        );
+        assert_eq!(
+            leaf.active_id(),
+            Some(moved),
+            "dragging a tab focuses it — by its identity, not by a new one"
+        );
+        assert_eq!(
+            leaf.prev_active_id(),
+            Some(stays),
+            "and the tab to return to is still the one the user came from"
         );
         assert_eq!(state.validate(), Ok(()));
     }

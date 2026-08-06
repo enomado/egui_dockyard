@@ -12,6 +12,27 @@ Ordered newest first.
 
 ---
 
+## `Context::run_ui` output dropped unconsumed textures_delta under egui 0.36
+
+**Status upstream:** not applicable — this is our own headless test harness, not library code.
+
+**Symptom.** Bumping the `egui` dependency to 0.36 turned 16 of the DST tests red with the same
+panic on drop: `Dropped TexturesDelta with 1 unapplied deltas. Deltas need to be handled.`
+
+**Root cause.** `epaint` 0.36 added a drop guard on `TexturesDelta` that panics if it still holds
+entries when dropped — a new safety net against silently discarding GPU upload/free instructions.
+Our `tests/dst.rs` harness runs `Context::run_ui` headless (no GPU backend to hand the delta to)
+and used to just discard the `FullOutput` with `let _ = ...`. Under 0.35 an empty-but-unconsumed
+delta was silently fine; under 0.36 it panics whenever a frame actually produced texture deltas
+(font atlas uploads on first paint, glyph cache growth, …).
+
+**Fix.** Capture the `FullOutput` and call `.textures_delta.clear()` explicitly before it drops —
+correct for a headless harness with nowhere to send the delta. `tests/dst.rs`, `run_frame`.
+
+**Where.** `tests/dst.rs` (`Harness::run_frame`).
+
+---
+
 ## The separator's clamp switched itself off on small nodes, so a panel could be squeezed to nothing
 
 **Status upstream:** not submitted.

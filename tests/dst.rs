@@ -468,7 +468,7 @@ impl Sim {
         let state = &mut self.state;
         let style = &self.style;
         let mut commits = 0usize;
-        let _ = self.ctx.run_ui(input, |ctx| {
+        let mut output = self.ctx.run_ui(input, |ctx| {
             CentralPanel::default().show(ctx, |ui| {
                 let response = DockArea::new(state)
                     .style(style.clone())
@@ -479,6 +479,9 @@ impl Sim {
                 commits += usize::from(response.layout_committed());
             });
         });
+        // Headless harness: no GPU backend to hand the delta to, so it's discarded on purpose —
+        // epaint 0.36 panics on drop otherwise (Dropped TexturesDelta with unapplied deltas).
+        output.textures_delta.clear();
         self.commits += commits;
     }
 

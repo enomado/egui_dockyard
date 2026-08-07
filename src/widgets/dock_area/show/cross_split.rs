@@ -7,7 +7,10 @@
 //! columns-of-rows) — so when it happens we draw a small toggle button at the crossing point
 //! that swaps between the two representations without moving a single pixel on screen.
 
-use egui::{Pos2, Rect, Sense, StrokeKind, Ui, epaint::CornerRadius, pos2, vec2};
+use egui::{
+    CursorIcon, LayerId, Order, Pos2, Rect, Sense, StrokeKind, Ui, UiBuilder, epaint::CornerRadius,
+    pos2, vec2,
+};
 
 use crate::dock_area::events::DockEvent;
 use crate::{DockArea, Node, NodePath, SeparatorStyle, SplitNode};
@@ -134,6 +137,13 @@ impl<Tab> DockArea<'_, Tab> {
 
     /// If `outer` and its children form a cross split (see [`CrossSplit`]), draw a small
     /// toggle button at the crossing point and, on click, transpose the grouping.
+    ///
+    /// Drawn in its own [`Order::Foreground`] layer, on top of the surrounding separators'
+    /// default layer. Layer order is how egui resolves overlapping widgets — a widget in a
+    /// higher-order layer wins hover/click over anything underneath regardless of screen
+    /// position or interact() call order — so this is what stops the resize cursor and the
+    /// separator's own hover highlight from "bubbling" through the button on top of it, with
+    /// no need to carve a hole out of the separator's interact rect.
     pub(super) fn draw_cross_split_toggle(
         &mut self,
         ui: &mut Ui,
@@ -151,35 +161,46 @@ impl<Tab> DockArea<'_, Tab> {
         let button_size = (style.width + style.extra_interact_width).max(14.0);
         let button_rect = Rect::from_center_size(center, vec2(button_size, button_size));
         let button_id = ui.id().with((outer.node, "cross_split_toggle"));
-        let response = ui.interact(button_rect, button_id, Sense::click());
+        let layer_id = LayerId::new(Order::Foreground, button_id);
 
-        let color = if response.hovered() {
-            style.color_hovered
-        } else {
-            style.color_idle
-        };
-        ui.painter().rect(
-            button_rect,
-            CornerRadius::from(button_size * 0.25),
-            color,
-            egui::Stroke::NONE,
-            StrokeKind::Inside,
-        );
-        // A small pinwheel of four arrows pointing outward, hinting at "swap the grouping":
-        let stroke = egui::Stroke::new(1.5, style.color_dragged);
-        let arm = button_size * 0.28;
-        for angle_deg in [45.0_f32, 135.0, 225.0, 315.0] {
-            let angle = angle_deg.to_radians();
-            let dir_vec = vec2(angle.cos(), angle.sin());
-            let tip = center + dir_vec * arm;
-            let base = center + dir_vec * (arm * 0.3);
-            ui.painter().line_segment([base, tip], stroke);
-            let perp = vec2(-dir_vec.y, dir_vec.x) * (arm * 0.25);
-            ui.painter()
-                .line_segment([tip, tip - dir_vec * (arm * 0.35) + perp], stroke);
-            ui.painter()
-                .line_segment([tip, tip - dir_vec * (arm * 0.35) - perp], stroke);
-        }
+        let response = ui
+            .scope_builder(UiBuilder::new().layer_id(layer_id), |ui| {
+                let response = ui
+                    .interact(button_rect, button_id, Sense::click())
+                    .on_hover_cursor(CursorIcon::PointingHand);
+
+                let color = if response.hovered() {
+                    style.color_hovered
+                } else {
+                    style.color_idle
+                };
+                ui.painter().rect(
+                    button_rect,
+                    CornerRadius::from(button_size * 0.25),
+                    color,
+                    egui::Stroke::NONE,
+                    StrokeKind::Inside,
+                );
+                // A small pinwheel of four arrows pointing outward, hinting at "swap the
+                // grouping":
+                let stroke = egui::Stroke::new(1.5, style.color_dragged);
+                let arm = button_size * 0.28;
+                for angle_deg in [45.0_f32, 135.0, 225.0, 315.0] {
+                    let angle = angle_deg.to_radians();
+                    let dir_vec = vec2(angle.cos(), angle.sin());
+                    let tip = center + dir_vec * arm;
+                    let base = center + dir_vec * (arm * 0.3);
+                    ui.painter().line_segment([base, tip], stroke);
+                    let perp = vec2(-dir_vec.y, dir_vec.x) * (arm * 0.25);
+                    ui.painter()
+                        .line_segment([tip, tip - dir_vec * (arm * 0.35) + perp], stroke);
+                    ui.painter()
+                        .line_segment([tip, tip - dir_vec * (arm * 0.35) - perp], stroke);
+                }
+
+                response
+            })
+            .inner;
 
         if response.clicked() {
             self.transpose_cross_split(&cross);

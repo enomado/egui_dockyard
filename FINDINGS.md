@@ -12,6 +12,90 @@ Ordered newest first.
 
 ---
 
+## The DST harness asked the dock for three things it never promised
+
+**Status upstream:** not applicable — this is our own headless test harness, not library code.
+
+All three surfaced within minutes of putting the cross-split toggle into the sweep's vocabulary,
+and none of them was a fault in the dock. They are written down because each is a way a harness
+can be *wrong about the product* while looking like it caught something, and because the third
+one was self-inflicted in a way that is easy to repeat.
+
+**A press without motion may not move a boundary — but two of them in a row are a double-click.**
+The generator repeats the previous step one time in six, on purpose, so two `GrabSeparator`s of
+the same separator land next to each other. Inside egui's click window that is a double click,
+and the dock centres a double-clicked separator: a real feature, tested elsewhere in the same
+file. `Sim::double_click` already paid a 60-frame pause for exactly this reason; `grab` did not,
+and so watched a boundary move under a gesture it believed to be a press. Fixed by pausing there
+too.
+
+**A press in the gap between two leaves can still focus one.** The aim point sits on the boundary
+of a 1 px band, and egui hit-tests it for itself. The dock announces the focus move as a
+finalised change, correctly; the step declared `commits = Never` and reported the dock for it.
+Fixed by reading the rule off the focus rather than declaring it — and `CommitRule` became a
+*count*, because one press can be two changes at once (a centring **and** a focus move) and a
+boolean forced the step to be wrong about one of them.
+
+**A floating window is not still the moment it appears.** The toggle's oracle is a pixel
+comparison, and it failed on a leaf that had moved 24 px — which turned out to be what *four
+idle frames* did to that scene all by themselves, egui still auto-sizing the window. An oracle
+that compares geometry across frames has to be handed a scene that has stopped moving:
+`Sim::settle` runs quiet frames until the rectangles repeat, and a scene that will not settle is
+refused (counted as `Refused::Unsettled`) rather than judged.
+
+**And one that was purely self-inflicted.** The separator steps must not aim at the toggle button
+— on a symmetric cross it sits exactly where they aim — so they refuse a point it covers. The
+same guard was pasted into the toggle step, whose point *is* the button: every press refused
+itself, and the sweep reported "no cross was ever offered" while quietly pressing nothing. The
+counter that made that visible (`CrossWatch::offered` beside `flipped`) is the only reason it was
+a red test instead of a green one.
+
+The refusal was also the wrong answer for the separator steps, for a reason worth keeping: it
+would have made the outer divider of every cross permanently undraggable by the harness, and
+"drag that divider, then press the toggle" is the exact sequence the toggle was reported broken
+on. A guard that keeps a gesture off a button must not also keep it off the thing underneath —
+the grab moves along the divider instead, the way a hand would.
+
+---
+
+## Transposing a cross split rewired the tree by assignment, and left two nodes pointing at the wrong parent
+
+**Status upstream:** not applicable — the cross-split toggle is this fork's own feature.
+
+**Symptom.** None, for a while. The dock kept drawing correctly. Then some later gesture that
+walks *up* from a node — a split, a leaf removal — panicked inside `Tree::split` with
+`a child is known to its parent`, one or more gestures away from the toggle that caused it.
+
+**Root cause.** `transpose_cross_split` performed the regrouping as three assignments:
+
+```rust
+self.dock_state[outer] = new_outer;
+self.dock_state[c0] = new_c0;
+self.dock_state[c1] = new_c1;
+```
+
+Two of the four grandchildren change parent in a transposition — that is what regrouping *is* —
+and a `Node` does not carry the child's back-pointer to its parent, nor the collapsing
+bookkeeping of the subtree. Assigning the new `Node`s therefore left two grandchildren pointing
+at the inner split they had just left, and gave all three rewritten splits a freshly zeroed
+collapsed-leaf count. `validate()` names the first fault exactly (`ParentLinkBroken` /
+`ChildLinkBroken`); nothing in the feature's tests had ever called it.
+
+**Fix.** A core operation, `Tree::regroup_2x2`, that takes the three replacement nodes, asserts
+they name the same four grandchildren the tree has now, and then does the whole edit: the
+assignments, the back-pointers of both inner splits' children, and the collapsed bookkeeping up
+the ancestor chain. The widget layer computes the new grouping and calls it.
+
+**Evidence.** `press_toggle` in the feature's own tests now asserts `DockState::validate()` after
+every press, which fails on the old code; and the DST sweep catches it at seed 1, step 21, with
+the violation list naming both broken links.
+
+**Note.** The two-line lesson is in the name: three assignments *looked* like the whole edit, and
+the cost of that was a corrupt tree that renders perfectly. A tree operation belongs in the type
+that owns the invariants, not in the caller that knows the shape it wants.
+
+---
+
 ## Transposing a cross split mid-pass left the separators reading the old shape, and one divider snapped back
 
 **Status upstream:** not applicable — the cross-split toggle is this fork's own feature.

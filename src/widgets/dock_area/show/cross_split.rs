@@ -312,9 +312,10 @@ impl<Tab> DockArea<'_, Tab> {
             Node::Vertical(SplitNode::new([c0.node, c1.node], row_fraction))
         };
 
-        self.dock_state[outer] = new_outer;
-        self.dock_state[c0] = new_c0;
-        self.dock_state[c1] = new_c1;
+        // Through the tree rather than by three `self.dock_state[id] = node` assignments: two of
+        // the four grandchildren change parent here, and a child's back-pointer and the subtree's
+        // collapsing bookkeeping live outside the `Node` being assigned. See `Tree::regroup_2x2`.
+        self.dock_state[outer.surface].regroup_2x2(outer.node, new_outer, new_c0, new_c1);
 
         // Bring the geometry map back in step with the shape we just wrote (see the note on
         // staleness above). `max_rect` is the surface root's rectangle — the same value
@@ -711,6 +712,16 @@ mod tests {
             state[outer].is_horizontal(),
             !was_horizontal,
             "clicking the toggle did not flip the grouping"
+        );
+        // The rectangles are only half of what a regrouping has to get right: two of the four
+        // grandchildren change parent, and a `Node` carries neither the child's back-pointer to
+        // its parent nor the subtree's collapsing bookkeeping. A tree that draws correctly and
+        // is wired wrong stays quiet until something walks *up* from a moved node — a later
+        // split or leaf removal — and panics there instead, one gesture removed from the cause.
+        assert_eq!(
+            state.validate(),
+            Ok(()),
+            "the toggle left the tree structurally invalid"
         );
     }
 

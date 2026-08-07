@@ -118,6 +118,22 @@ enum Step {
     GrabSeparator { node: usize },
     /// Double-click a separator, which centres it.
     CentreSeparator { node: usize },
+    /// Build a 2x2 cross around a leaf, through the model — scaffolding for the step below.
+    ///
+    /// Not something [`Step::Split`] can be asked for: a cross needs two opposite-orientation
+    /// splits whose inner dividers land on the same line, which takes three splits in a
+    /// particular arrangement, and the leaves the second and third have to name do not exist
+    /// until the first has run. Measured before it was written: across 48 seeds of 24 steps,
+    /// the generator produced exactly zero crosses by chance, so the toggle below had nothing
+    /// to press and every assertion about it was vacuous.
+    BuildCross { leaf: usize },
+    /// Press the toggle the dock offers where two perpendicular dividers cross, which swaps
+    /// the grouping of a 2x2 (rows-of-columns <-> columns-of-rows) in place.
+    ///
+    /// The only gesture here that rewrites the *shape* while promising the picture does not
+    /// change at all — so unlike every other step, its oracle is a pixel comparison rather
+    /// than a claim about the tree.
+    ToggleCrossSplit { cross: usize },
     /// Let a frame pass with no input at all.
     Idle,
 }
@@ -241,10 +257,13 @@ enum Refused {
     Bar,
     /// The point lands on another leaf, or on the right leaf but means something else.
     Elsewhere,
+    /// The scene was still moving of its own accord, so nothing measured across the gesture
+    /// would be about the gesture.
+    Unsettled,
 }
 
 /// Width of the refusal counter.
-const REFUSALS: usize = 5;
+const REFUSALS: usize = 6;
 
 fn refused_index(refused: Refused) -> usize {
     match refused {
@@ -253,11 +272,19 @@ fn refused_index(refused: Refused) -> usize {
         Refused::Contested => 2,
         Refused::Bar => 3,
         Refused::Elsewhere => 4,
+        Refused::Unsettled => 5,
     }
 }
 
 /// Names for the refusal report, in the order of [`refused_index`].
-const REFUSAL_NAMES: [&str; REFUSALS] = ["NoGeometry", "TooSmall", "Contested", "Bar", "Elsewhere"];
+const REFUSAL_NAMES: [&str; REFUSALS] = [
+    "NoGeometry",
+    "TooSmall",
+    "Contested",
+    "Bar",
+    "Elsewhere",
+    "Unsettled",
+];
 
 /// A dock area running frames without a window.
 struct Sim {
@@ -288,6 +315,8 @@ struct Sim {
     commits: usize,
     /// How much the separator gestures actually got to do — see [`SeparatorWatch`].
     separator: SeparatorWatch,
+    /// How much the cross-split toggle got to do — see [`CrossWatch`].
+    cross: CrossWatch,
 }
 
 /// Coverage of the separator gestures, counted while the run happens.
@@ -306,10 +335,31 @@ struct SeparatorWatch {
     /// announces nothing" is never asked of the drag path, and the fraction oracle never sees a
     /// fraction under pressure. The generator draws offsets big enough to reach it on purpose.
     clamped: usize,
-    /// Grabs pressed and released without motion — the regime where the dock must stay silent.
+    /// Grabs pressed and released without motion.
     grabs: usize,
+    /// ...of which left the dock completely alone — the regime where it must stay silent. The
+    /// other grabs moved the focus (a click in the gap can still land in a leaf body), which
+    /// the dock announces, correctly, as a finalised change. Without this second number a sweep
+    /// whose every grab refocused would satisfy "the silent case was tested" while never once
+    /// testing it.
+    quiet_grabs: usize,
     /// Double-clicks that re-centred an off-centre separator.
     centrings: usize,
+}
+
+/// Coverage of the cross-split toggle, counted while the run happens.
+///
+/// Two numbers rather than one, because the two zeros mean opposite things and only the pair
+/// can tell them apart: no cross was ever built, or crosses were found and pressing them did
+/// nothing. The second is what harness drift looks like — this file re-derives where the button
+/// is (see [`Sim::cross_toggles`]), so a change to the crate's detection would leave the sweep
+/// pressing pixels that answer to nobody, and every oracle here would stay green about it.
+#[derive(Clone, Copy, Default, Debug)]
+struct CrossWatch {
+    /// Steps that found a cross to press at all.
+    offered: usize,
+    /// ...of which actually flipped the grouping.
+    flipped: usize,
 }
 
 /// What a step actually did to the dock — measured after the fact, not assumed from its name.
@@ -326,11 +376,12 @@ enum Outcome {
     LeafClosed,
     Refocused,
     SeparatorMoved,
+    CrossTransposed,
     Nothing,
 }
 
 /// Width of the coverage counter.
-const OUTCOMES: usize = 7;
+const OUTCOMES: usize = 8;
 
 /// Slot of the coverage counter, or `None` for "nothing happened", which is not coverage.
 fn outcome_index(outcome: Outcome) -> Option<usize> {
@@ -342,6 +393,7 @@ fn outcome_index(outcome: Outcome) -> Option<usize> {
         Outcome::LeafClosed => 4,
         Outcome::Refocused => 5,
         Outcome::SeparatorMoved => 6,
+        Outcome::CrossTransposed => 7,
         Outcome::Nothing => return None,
     })
 }
@@ -388,10 +440,13 @@ struct Effect {
 /// What the dock was allowed to announce for a step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CommitRule {
-    /// Exactly one finalised event, no more: one completed gesture, one undo entry.
-    Once,
-    /// None at all: nothing changed, so nothing may be announced.
-    Never,
+    /// Exactly this many finalised events, no more and no fewer.
+    ///
+    /// A count rather than the yes/no it started as, because a single press can be two changes
+    /// at once: a click on a separator moves the boundary *and*, if egui hit-tests the point
+    /// into a leaf body, the focus — and each is a real change a consumer has to persist. With
+    /// a boolean the step had to pick one of them to be wrong about.
+    Exactly(usize),
     /// Not this stage's business — the step goes through the model, or spans gestures whose event
     /// contract is judged elsewhere.
     Unjudged,
@@ -425,6 +480,7 @@ const OUTCOME_NAMES: [&str; OUTCOMES] = [
     "LeafClosed",
     "Refocused",
     "SeparatorMoved",
+    "CrossTransposed",
 ];
 
 impl Sim {
@@ -440,6 +496,7 @@ impl Sim {
             refused: [0; REFUSALS],
             commits: 0,
             separator: SeparatorWatch::default(),
+            cross: CrossWatch::default(),
         };
         // One frame before anything else: gestures aim with geometry, and geometry does not
         // exist until a pass has run.
@@ -720,14 +777,166 @@ impl Sim {
                 if hi <= lo {
                     return None;
                 }
-                let across = layout.get(path)?.rect.center();
-                let at = if vertical {
-                    Pos2::new(across.x, (lo + hi) * 0.5)
-                } else {
-                    Pos2::new((lo + hi) * 0.5, across.y)
+                // Where along the divider to grab it. The middle is the natural place, but on a
+                // symmetric cross the middle of the *outer* divider is exactly where the
+                // cross-split toggle sits, and that button takes the pointer (it draws in a
+                // foreground layer). Refusing the separator there would have been the cheap
+                // answer and a bad one: it would make the outer divider of every cross
+                // permanently undraggable by this harness — and "drag that divider, then press
+                // the toggle" is precisely the sequence the toggle was reported broken on. So
+                // the grab moves along the divider instead, the way a hand would.
+                let node_rect = layout.get(path)?.rect;
+                let along = |t: f32| {
+                    if vertical {
+                        Pos2::new(egui::lerp(node_rect.x_range(), t), (lo + hi) * 0.5)
+                    } else {
+                        Pos2::new((lo + hi) * 0.5, egui::lerp(node_rect.y_range(), t))
+                    }
                 };
+                let at = [0.5, 0.25, 0.75]
+                    .into_iter()
+                    .map(along)
+                    .find(|point| !self.toggle_over(*point))
+                    // All three covered: leave the middle, and let the steps refuse it.
+                    .unwrap_or_else(|| along(0.5));
                 Some((path, at, split.fraction))
             })
+            .collect()
+    }
+
+    /// Every cross-split toggle the dock is currently offering, with the point to press.
+    ///
+    /// Re-derived from the published geometry rather than asked of the crate, the same way
+    /// [`Sim::separators`] and [`overlay_buttons`] are: the detection lives behind a private
+    /// function, and a harness that could only aim at what the crate handed it would be unable
+    /// to notice the crate offering a button where it should not.
+    ///
+    /// It is a restatement of `DockArea::detect_cross_split`, tolerance and all, and the two can
+    /// drift apart. That is not left to chance: a point derived here that the crate does not
+    /// answer to produces a press that flips nothing, and the sweep asserts that presses did
+    /// flip things. Drift shows up as a named failure rather than as a quietly idle step.
+    ///
+    /// A split qualifies when both its children are splits of the *opposite* orientation and
+    /// their two inner dividers are collinear within a pixel — that is what makes the four
+    /// rectangles a "+" rather than a staggered "L", and only a "+" has one point to pivot
+    /// around.
+    fn cross_toggles(&self) -> Vec<(NodePath, Pos2)> {
+        /// Same number as `CrossSplit::TOLERANCE` in the crate. Deliberately not looser: a
+        /// harness that accepted near-misses the crate rejects would press empty pixels.
+        const TOLERANCE: f32 = 1.0;
+
+        let layout = self.layout();
+        self.state
+            .iter_all_nodes()
+            .filter_map(|(path, node)| {
+                node.get_split()?;
+                let outer_horizontal = matches!(node, Node::Horizontal(_));
+                let at = |id: NodeId| NodePath::new(path.surface, id);
+
+                let [c0, c1] = self.state[path.surface].children(path.node)?;
+                // The children must both split the other way; anything else is not a 2x2 at all.
+                let inner_matches = |child: NodeId| {
+                    if outer_horizontal {
+                        matches!(self.state[at(child)], Node::Vertical(_))
+                    } else {
+                        matches!(self.state[at(child)], Node::Horizontal(_))
+                    }
+                };
+                if !inner_matches(c0) || !inner_matches(c1) {
+                    return None;
+                }
+
+                let [a, b] = self.state[path.surface].children(c0)?;
+                let [c, d] = self.state[path.surface].children(c1)?;
+                let rect = |id: NodeId| layout.get(at(id)).map(|geometry| geometry.rect);
+                let (a_rect, b_rect) = (rect(a)?, rect(b)?);
+                let (c_rect, d_rect) = (rect(c)?, rect(d)?);
+                let (c0_rect, c1_rect) = (rect(c0)?, rect(c1)?);
+                for r in [a_rect, b_rect, c_rect, d_rect] {
+                    if r.width() <= 0.0 || r.height() <= 0.0 {
+                        return None;
+                    }
+                }
+
+                // The inner dividers run across `outer`'s own axis, so they are measured along
+                // the perpendicular one.
+                let inner_pos_of = |first: Rect, second: Rect| {
+                    if outer_horizontal {
+                        (first.max.y + second.min.y) * 0.5
+                    } else {
+                        (first.max.x + second.min.x) * 0.5
+                    }
+                };
+                let pos0 = inner_pos_of(a_rect, b_rect);
+                let pos1 = inner_pos_of(c_rect, d_rect);
+                if (pos0 - pos1).abs() > TOLERANCE {
+                    return None;
+                }
+                let inner = (pos0 + pos1) * 0.5;
+
+                let outer = if outer_horizontal {
+                    (c0_rect.max.x + c1_rect.min.x) * 0.5
+                } else {
+                    (c0_rect.max.y + c1_rect.min.y) * 0.5
+                };
+                let point = if outer_horizontal {
+                    Pos2::new(outer, inner)
+                } else {
+                    Pos2::new(inner, outer)
+                };
+                Some((path, point))
+            })
+            .collect()
+    }
+
+    /// Whether a cross-split toggle button covers `point`.
+    ///
+    /// It sits *on* the crossing of the two dividers, in an `Order::Foreground` layer, so it
+    /// wins the pointer over the separators underneath it. That matters here because the point
+    /// [`Sim::separators`] aims at is the middle of a divider — and on the symmetric crosses
+    /// this harness builds, the middle of the outer divider *is* the crossing. Found by the
+    /// sweep: a `CentreSeparator` there double-clicked the button instead, transposed the
+    /// grouping twice, and was reported for announcing two commits where a centring announces
+    /// one. The separator gestures refuse such a point, the same way they refuse one under a
+    /// floating window, and for the same reason: it no longer means what the step says.
+    fn toggle_over(&self, point: Pos2) -> bool {
+        // The crate's own arithmetic for the button it draws.
+        let side =
+            (self.style.separator.width + self.style.separator.extra_interact_width).max(14.0);
+        self.cross_toggles()
+            .into_iter()
+            .any(|(_, at)| Rect::from_center_size(at, Vec2::splat(side)).contains(point))
+    }
+
+    /// Runs quiet frames until the geometry stops moving; `false` if it never did.
+    ///
+    /// A floating window is not still the moment it appears: egui animates and auto-sizes it,
+    /// and the dock inside is laid out afresh into a rectangle that is still changing. Any
+    /// pixel-for-pixel oracle run across those frames is measuring the window, not the gesture.
+    /// Measured, not guessed at: on the scene the sweep first failed on, *four idle frames*
+    /// moved all seven leaves by the same 24 px the gesture under test had just been blamed for.
+    ///
+    /// The bound is generous and the result is returned rather than asserted: a scene that will
+    /// not settle is a scene this oracle cannot speak about, which is a refusal, not a failure.
+    fn settle(&mut self) -> bool {
+        let mut previous = self.leaf_rects();
+        for _ in 0..64 {
+            self.run_frame(vec![]);
+            let now = self.leaf_rects();
+            if now == previous {
+                return true;
+            }
+            previous = now;
+        }
+        false
+    }
+
+    /// Every live leaf's rectangle on screen — what a cross-split toggle promises not to move.
+    fn leaf_rects(&self) -> Vec<(NodePath, Rect)> {
+        let layout = self.layout();
+        self.live_leaves()
+            .into_iter()
+            .filter_map(|path| Some((path, layout.get(path)?.rect)))
             .collect()
     }
 
@@ -747,7 +956,16 @@ impl Sim {
     }
 
     /// Presses a separator and releases it without moving the pointer.
+    ///
+    /// Preceded by a pause for the same reason [`Sim::double_click`] is, and found the same way
+    /// — by the sweep, once the generator started drawing enough steps to put two grabs of the
+    /// same separator next to each other (it repeats the previous step one time in six, on
+    /// purpose). Two presses at one point inside egui's click window are a *double* click, and
+    /// the dock centres a double-clicked separator: this step then watched a boundary move under
+    /// a gesture it believed to be a press, and reported the dock for it. The gesture this step
+    /// means is a single click, so it has to make sure that is what it sends.
     fn grab(&mut self, at: Pos2) {
+        self.pause();
         self.run_frame(vec![Event::PointerMoved(at)]);
         self.run_frame(vec![Event::PointerButton {
             pos: at,
@@ -800,6 +1018,14 @@ impl Sim {
             () if now.surfaces < before.surfaces => Outcome::SurfaceClosed,
             () if now.leaves > before.leaves => Outcome::LeafSplit,
             () if now.leaves < before.leaves => Outcome::LeafClosed,
+            // Before the fraction test, because a toggle rewrites fractions too — and often
+            // back to the same numbers, which is why the orientations carry this and not them.
+            // Both halves are load-bearing: the ids alone would let a plain append through
+            // (nothing moved, nothing to see), and the orientations alone would credit a drop
+            // that removed one leaf and split another, since that keeps the leaf *count*.
+            () if now.leaf_ids == before.leaf_ids && now.orientations != before.orientations => {
+                Outcome::CrossTransposed
+            }
             // Checked before the shape, because a moved separator leaves the shape *identical* —
             // it is the one outcome the layout trace cannot see, which is why it needed its own
             // snapshot field rather than a widening of the trace.
@@ -849,7 +1075,32 @@ impl Sim {
             layout: self.layout_trace(),
             focus: self.focus_trace(),
             fractions: self.fraction_trace(),
+            orientations: self.orientation_trace(),
+            leaf_ids: self.leaf_id_trace(),
         }
+    }
+
+    /// Every split's orientation in tree order, as `H`/`V`.
+    fn orientation_trace(&self) -> String {
+        self.state
+            .iter_all_nodes()
+            .filter_map(|(_, node)| match node {
+                Node::Horizontal(_) => Some('H'),
+                Node::Vertical(_) => Some('V'),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every live leaf's id, sorted, so the comparison is about the set and not the walk.
+    fn leaf_id_trace(&self) -> String {
+        let mut ids: Vec<String> = self
+            .state
+            .iter_leaves()
+            .map(|(path, _)| format!("{path:?}"))
+            .collect();
+        ids.sort();
+        ids.join(" ")
     }
 
     /// Drags from `from` to `to` over several frames, the way a hand would.
@@ -992,9 +1243,10 @@ impl Sim {
                     return None;
                 }
                 let (path, at, fraction) = separators[node % separators.len()];
-                if self.window_over(at, path.surface) {
-                    // A separator under a floating window is not the thing the pointer would
-                    // reach; the same refusal the tab aims make, for the same reason.
+                if self.window_over(at, path.surface) || self.toggle_over(at) {
+                    // A separator under a floating window — or under the cross-split toggle —
+                    // is not the thing the pointer would reach; the same refusal the tab aims
+                    // make, for the same reason.
                     self.refused[refused_index(Refused::Contested)] += 1;
                     return None;
                 }
@@ -1020,11 +1272,13 @@ impl Sim {
                 // exactly the fault this judges.
                 commits = if self.fraction_of(path) == Some(fraction) {
                     self.separator.clamped += 1;
-                    CommitRule::Never
+                    CommitRule::Exactly(0)
                 } else {
                     self.separator.moves += 1;
-                    CommitRule::Once
+                    CommitRule::Exactly(1)
                 };
+                // A drag that focused something was read as a click, which the check below
+                // reports in its own words — so the count here stays at the gesture itself.
                 // The assumption above, asserted where it is made rather than left to fail as a
                 // confusing commit count later: a drag that focused something was read as a click.
                 if self.focus_trace() != focus_before {
@@ -1047,10 +1301,11 @@ impl Sim {
                     return None;
                 }
                 let (path, at, fraction) = separators[node % separators.len()];
-                if self.window_over(at, path.surface) {
+                if self.window_over(at, path.surface) || self.toggle_over(at) {
                     self.refused[refused_index(Refused::Contested)] += 1;
                     return None;
                 }
+                let focus_before = self.focus_trace();
                 self.grab(at);
                 self.separator.grabs += 1;
 
@@ -1065,12 +1320,22 @@ impl Sim {
                     ));
                 }
 
-                // Nothing moved and nothing was focused — the press landed in the gap, which is
-                // no leaf's — so the dock has nothing to announce. Stated flatly rather than
-                // measured after the fact: an exemption computed from the diff would make the
-                // rule agree with whatever happened.
-                commits = CommitRule::Never;
-                must_change_nothing = true;
+                // The gap belongs to no leaf as this harness reads the screen, but egui hit-tests
+                // it for itself: the aim point sits on the boundary of a 1 px band, and a press
+                // there can still land in a leaf body and move the focus — which the dock is
+                // right to announce. So the rule is read off the focus rather than declared:
+                // a grab that changed nothing announces nothing, a grab that refocused announces
+                // that once. The boundary check above is the part that stays unconditional,
+                // because no reading of the click makes moving a divider the right answer.
+                //
+                // The pair is counted (see `SeparatorWatch::quiet_grabs`) so that the silent
+                // regime cannot quietly stop being reached.
+                let refocused = self.focus_trace() != focus_before;
+                commits = CommitRule::Exactly(usize::from(refocused));
+                if !refocused {
+                    must_change_nothing = true;
+                    self.separator.quiet_grabs += 1;
+                }
                 Vec::new()
             }
 
@@ -1080,17 +1345,118 @@ impl Sim {
                     return None;
                 }
                 let (path, at, fraction) = separators[node % separators.len()];
+                if self.window_over(at, path.surface) || self.toggle_over(at) {
+                    self.refused[refused_index(Refused::Contested)] += 1;
+                    return None;
+                }
+                let focus_before = self.focus_trace();
+                self.double_click(at);
+                // Two independent changes, counted separately: the centring itself, and the
+                // focus move a click in the gap can also cause (see `Step::GrabSeparator`). A
+                // double-click on an already-centred separator does neither, and then the dock
+                // must say nothing at all.
+                let centred = self.fraction_of(path) != Some(fraction);
+                if centred {
+                    self.separator.centrings += 1;
+                }
+                let refocused = self.focus_trace() != focus_before;
+                commits = CommitRule::Exactly(usize::from(centred) + usize::from(refocused));
+                Vec::new()
+            }
+
+            Step::BuildCross { leaf } => {
+                let target = leaves[leaf % leaves.len()];
+                // All three at 0.5: the two halves of the outer split span the full height, so
+                // splitting each at the same fraction puts their dividers on one line — a "+"
+                // by construction rather than by luck.
+                let (t1, t2, t3) = (self.fresh_tab(), self.fresh_tab(), self.fresh_tab());
+                let [_, right] = self.state.split(target, Split::Right, 0.5, Node::leaf(t1));
+                self.state.split(target, Split::Below, 0.5, Node::leaf(t2));
+                self.state.split(
+                    NodePath::new(target.surface, right),
+                    Split::Below,
+                    0.5,
+                    Node::leaf(t3),
+                );
+                self.run_frame(vec![]);
+                vec![target]
+            }
+
+            Step::ToggleCrossSplit { cross } => {
+                // Settle before looking, not after: the oracle below compares pixels across the
+                // press, so the picture has to be standing still before it is photographed — and
+                // a cross found in a moving scene may not be one by the time the pointer arrives,
+                // which showed up as presses that landed on a button no longer drawn.
+                if !self.settle() {
+                    self.refused[refused_index(Refused::Unsettled)] += 1;
+                    return None;
+                }
+                let crosses = self.cross_toggles();
+                if crosses.is_empty() {
+                    return None;
+                }
+                let (path, at) = crosses[cross % crosses.len()];
+                // Only the window guard here: `toggle_over` is what the *separator* steps use to
+                // stay off this button, and `at` is the button, so applying it here would make
+                // the step refuse itself. It did, silently, for a whole run — every press was
+                // skipped and the sweep reported no cross was ever offered.
                 if self.window_over(at, path.surface) {
                     self.refused[refused_index(Refused::Contested)] += 1;
                     return None;
                 }
-                self.double_click(at);
-                commits = if self.fraction_of(path) == Some(fraction) {
-                    CommitRule::Never
+                let horizontal_before = matches!(self.state[path], Node::Horizontal(_));
+                let rects_before = self.leaf_rects();
+                let focus_before = self.focus_trace();
+                self.cross.offered += 1;
+
+                self.click(at);
+
+                let flipped = matches!(self.state[path], Node::Horizontal(_)) != horizontal_before;
+                if flipped {
+                    self.cross.flipped += 1;
+                    // One press, one undo entry — the transposition self-classifies as a
+                    // finalised change. Plus a focus move if the press caused one: the button
+                    // sits in its own foreground layer and should take the click whole, but that
+                    // is a claim about layer order, not a licence to stop counting.
+                    commits =
+                        CommitRule::Exactly(1 + usize::from(self.focus_trace() != focus_before));
+
+                    // The oracle, and the whole reason this step is worth a place in the sweep:
+                    // the toggle claims the picture is *identical*, only described differently.
+                    // Judged on every leaf in the dock, not just the four of the cross — a
+                    // regrouping that disturbed something elsewhere would be just as wrong.
+                    //
+                    // A pixel of slack, because a pixel is what the crate itself calls collinear
+                    // when it decides the cross is there at all; holding the result to a finer
+                    // rule than the detection would be judging it by a promise it never made.
+                    let after = self.leaf_rects();
+                    let moved = rects_before.iter().find_map(|(leaf, was)| {
+                        let (_, now) = after.iter().find(|(other, _)| other == leaf)?;
+                        let off = (now.min - was.min)
+                            .length()
+                            .max((now.max - was.max).length());
+                        (off > 1.0).then_some((*leaf, *was, *now))
+                    });
+                    if let Some((leaf, was, now)) = moved {
+                        forbidden = Some(format!(
+                            "the cross-split toggle regroups a 2x2 without moving anything on \
+                             screen, and leaf {leaf:?} went from {was:?} to {now:?}. The two \
+                             groupings describe the same four rectangles; a leaf that moved means \
+                             the new fractions do not reproduce the old picture"
+                        ));
+                    }
                 } else {
-                    self.separator.centrings += 1;
-                    CommitRule::Once
-                };
+                    // Counted, not judged. A press that flipped nothing is either a point this
+                    // harness derived and the crate does not offer, or a button something else
+                    // took the click for — and what it did to the dock instead is not this
+                    // step's contract to state. The sweep's `flipped > 0` gate is what stops
+                    // this branch from becoming a place the whole step can quietly retire into.
+                    commits = CommitRule::Unjudged;
+                }
+
+                // Nothing is exempt from the identity check. The transposition rewrites three
+                // nodes but reuses every child id and touches no tab, so a leaf whose identity
+                // moved is a bug however the picture came out.
                 Vec::new()
             }
 
@@ -1098,7 +1464,7 @@ impl Sim {
             // is why nothing is listed as touched.
             Step::Idle => {
                 must_change_nothing = true;
-                commits = CommitRule::Never;
+                commits = CommitRule::Exactly(0);
                 self.run_frame(vec![]);
                 Vec::new()
             }
@@ -1208,6 +1574,22 @@ struct Snapshot {
     /// Kept apart from `layout` on purpose: a separator gesture changes only this, so folding it
     /// into the shape string would report a moved boundary as a rearranged tab.
     fractions: String,
+    /// Every split's orientation, in tree order — the only thing a cross-split toggle changes.
+    ///
+    /// `layout` cannot stand in for it: that string also carries the tabs, so it moves for an
+    /// append too. `fractions` cannot either, and that one is worth spelling out, because it
+    /// looks like it should: a toggle recomputes all three fractions, but on the symmetric
+    /// cross this harness mostly builds (every scripted `Split` uses 0.5) the numbers come back
+    /// out the same and the string does not move at all.
+    orientations: String,
+    /// Every live leaf, by id, sorted — set equality, not order.
+    ///
+    /// This is what separates a transposition from the other way a step can change the shape
+    /// while keeping the leaf *count*: a tab dropped onto a split button of another leaf can
+    /// remove the emptied source and create a new leaf in the same breath. That reshuffles the
+    /// ids; a transposition reuses every one of them, which is the promise this field turns
+    /// into a discriminator.
+    leaf_ids: String,
 }
 
 /// A short, stable number for a surface in traces.
@@ -1268,7 +1650,7 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
             steps.push(previous);
             continue;
         }
-        steps.push(match rng.below(16) {
+        steps.push(match rng.below(19) {
             0..=4 => Step::Drag {
                 from: rng.below(8),
                 to: rng.below(8),
@@ -1312,6 +1694,14 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
             },
             12 => Step::GrabSeparator { node: rng.below(6) },
             13 => Step::CentreSeparator { node: rng.below(6) },
+            // The cross-split toggle. Drawn as often as the separator drags because a cross is
+            // not a scene the generator can ask for directly — it has to *happen*, out of two
+            // opposite-orientation splits landing with collinear dividers — so the press has to
+            // be frequent enough to still be in the script when one does.
+            14..=15 => Step::ToggleCrossSplit {
+                cross: rng.below(4),
+            },
+            16 => Step::BuildCross { leaf: rng.below(8) },
             _ => Step::Idle,
         });
     }
@@ -1331,6 +1721,8 @@ struct Run {
     identity: IdentityWatch,
     /// How much the separator gestures got to do — see [`SeparatorWatch`].
     separator: SeparatorWatch,
+    /// How much the cross-split toggle got to do — see [`CrossWatch`].
+    cross: CrossWatch,
     /// The first step that left the dock invalid, if any.
     failure: Option<Failure>,
 }
@@ -1501,6 +1893,7 @@ fn run(steps: &[Step]) -> Run {
         refused: sim.refused,
         identity,
         separator: sim.separator,
+        cross: sim.cross,
         failure,
     }
 }
@@ -1514,15 +1907,19 @@ fn run(steps: &[Step]) -> Run {
 fn commit_complaint(effect: &Effect, observed: usize) -> Option<String> {
     match effect.commits {
         CommitRule::Unjudged => None,
-        CommitRule::Never if observed > 0 => Some(format!(
+        CommitRule::Exactly(0) if observed > 0 => Some(format!(
             "the dock reported {observed} finalised layout change(s) for a step that changed \
              nothing — a consumer would write an undo entry and a file for an interaction that \
              never happened"
         )),
-        CommitRule::Once if observed != 1 => Some(format!(
+        CommitRule::Exactly(1) if observed != 1 => Some(format!(
             "one completed gesture must be one finalised event, and the dock reported {observed}. \
              Zero means a real change nobody will persist; more than one means the live frames of \
              the drag are being announced as commits"
+        )),
+        CommitRule::Exactly(expected) if observed != expected => Some(format!(
+            "this step changed {expected} things about the dock and the dock reported {observed} \
+             finalised event(s) — one per change is what a consumer diffing snapshots needs"
         )),
         _ => None,
     }
@@ -2151,12 +2548,61 @@ fn reordering_a_tab_in_the_bar_keeps_it_the_same_tab() {
     assert_eq!(sim.state.validate(), Ok(()));
 }
 
+#[test]
+fn dbg_moved_leaf() {
+    for idle_only in [true, false] {
+        let mut sim = Sim::new();
+        for step in [
+            Step::Drag {
+                from: 1,
+                to: 6,
+                aim: Aim::Window,
+            },
+            Step::BuildCross { leaf: 0 },
+            Step::BuildCross { leaf: 0 },
+        ] {
+            sim.apply(step);
+        }
+        let crosses = sim.cross_toggles();
+        let (_path, at) = crosses[0];
+        let before = sim.leaf_rects();
+        if idle_only {
+            for _ in 0..4 {
+                sim.run_frame(vec![]);
+            }
+        } else {
+            sim.click(at);
+        }
+        let after = sim.leaf_rects();
+        let moved: Vec<_> = before
+            .iter()
+            .filter_map(|(p, was)| {
+                let (_, now) = after.iter().find(|(o, _)| o == p)?;
+                (was != now).then(|| (format!("{:?}", p.node), *was, *now))
+            })
+            .collect();
+        println!(
+            "idle_only={idle_only}: moved {} of {} -> {:?}",
+            moved.len(),
+            before.len(),
+            moved
+        );
+    }
+}
+
 /// How many seeds the sweep runs, and how long each scenario is.
 ///
 /// Each step is a handful of frames, so this is seconds, not milliseconds — the budget was set
 /// by what still finishes inside a normal `cargo test`. Longer hunts are a loop over more seeds,
 /// not a bigger number here.
-const SEEDS: u64 = 48;
+///
+/// Raised from 48 when the cross-split toggle joined the vocabulary. Not because the number was
+/// wrong before, but because that gesture is *rare*: a cross has to be built before one can be
+/// pressed, and 48 seeds produced 22 presses against 65 separator drags. Measured with the
+/// layout-staleness bug of `transpose_cross_split` reintroduced: 48 seeds stayed green, and the
+/// first seed to catch it was 68. Doubling the sweep costs about four seconds and brings the
+/// known-reachable case inside the default run.
+const SEEDS: u64 = 96;
 const STEPS: usize = 24;
 
 /// The sweep: every seed must leave the dock well-formed at every step.
@@ -2168,6 +2614,7 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
     let mut coverage = [0usize; OUTCOMES];
     let mut identity = IdentityWatch::default();
     let mut separator = SeparatorWatch::default();
+    let mut cross = CrossWatch::default();
     let mut aimed = 0usize;
     let mut refused = [0usize; REFUSALS];
 
@@ -2187,7 +2634,10 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         separator.moves += outcome.separator.moves;
         separator.clamped += outcome.separator.clamped;
         separator.grabs += outcome.separator.grabs;
+        separator.quiet_grabs += outcome.separator.quiet_grabs;
         separator.centrings += outcome.separator.centrings;
+        cross.offered += outcome.cross.offered;
+        cross.flipped += outcome.cross.flipped;
 
         if let Some(failure) = outcome.failure {
             let minimal = quietly(|| shrink(&steps, &|candidate| run(candidate).failure.is_some()));
@@ -2207,6 +2657,26 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
     println!(
         "coverage: {:?}",
         OUTCOME_NAMES.iter().zip(coverage).collect::<Vec<_>>()
+    );
+
+    println!("cross watch: {cross:?}");
+
+    // Asserted before the generic coverage loop below, which would otherwise fire first with
+    // "the sweep never produced CrossTransposed" — true, but silent about which of the two very
+    // different reasons it is. These two say which.
+    assert!(
+        cross.offered > 0,
+        "no cross split was ever offered a toggle across {SEEDS} seeds — the scenes never grew \
+         two opposite-orientation splits with collinear dividers, so the gesture had nothing to \
+         press and everything asserted about it below is vacuous"
+    );
+    assert!(
+        cross.flipped > 0,
+        "{} cross toggles were pressed and not one flipped a grouping. The point is derived in \
+         this harness (`Sim::cross_toggles`) from the same rule the crate uses; presses that \
+         land on nothing mean the two have drifted apart, and the sweep has been pressing empty \
+         pixels while staying green",
+        cross.offered
     );
 
     // A green sweep means nothing unless the steps did something. Every kind has to have
@@ -2301,6 +2771,12 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
          must stay silent about a gesture that changed nothing was never exercised"
     );
     assert!(
+        separator.quiet_grabs > 0,
+        "all {} separator grabs moved the focus, so the dock was never once asked to stay \
+         silent — the branch the step exists for went untested",
+        separator.grabs
+    );
+    assert!(
         separator.centrings > 0,
         "no double-click ever re-centred an off-centre separator — either the sweep never \
          offset one, or the gesture stopped working"
@@ -2338,7 +2814,6 @@ fn a_seed_replays_to_the_same_trace() {
 /// bugs would leave it unchecked precisely when it matters most.
 #[test]
 fn the_shrinker_keeps_only_the_steps_that_matter() {
-    let steps = scenario(3, 40);
     let fails = |candidate: &[Step]| {
         candidate
             .iter()
@@ -2347,7 +2822,14 @@ fn the_shrinker_keeps_only_the_steps_that_matter() {
                 .iter()
                 .any(|step| matches!(step, Step::CloseLeaf { .. }))
     };
-    assert!(fails(&steps), "seed 3 must contain both kinds to shrink");
+    // The first seed whose scenario contains both kinds, rather than a seed number written
+    // down once. This test is about the shrinker, and a hardcoded seed makes it hostage to the
+    // generator's mix instead: adding one step kind reshuffles every draw, and seed 3 stopped
+    // qualifying — a red test saying nothing about shrinking.
+    let steps = (0..64u64)
+        .map(|seed| scenario(seed, 40))
+        .find(|steps| fails(steps))
+        .expect("some seed in 64 draws both a split and a close");
 
     let minimal = shrink(&steps, &fails);
 

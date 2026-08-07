@@ -41,8 +41,11 @@ use egui_dock::{
     Tree,
 };
 
-/// Screen the simulated dock lives on. Big enough that a few splits still leave leaves wider
+/// Screen the simulated dock starts on. Big enough that a few splits still leave leaves wider
 /// than their own tab bar — a scene squeezed to nothing makes every gesture a silent no-op.
+///
+/// Only the starting value: [`Sim::screen`] is what a frame is actually run with, so a test can
+/// resize the window the way a user would (see [`Sim::resize`]).
 const SCREEN: Vec2 = Vec2::new(1280.0, 800.0);
 
 /// Id the dock area gets by default; the geometry map and the widget ids hang off it.
@@ -292,6 +295,10 @@ struct Sim {
     state: DockState<String>,
     frame: u32,
     next_tab: u32,
+    /// Size of the window the dock is shown in. A field rather than the constant because
+    /// resizing is a real thing a user does *to a saved layout*, and the layout is expected to
+    /// survive it — see `a_ratio_the_window_grew_too_small_for_comes_back_when_it_grows_again`.
+    screen: Vec2,
     /// The style the dock is shown with, kept here because the sim has to aim at the overlay
     /// buttons and those are laid out from these numbers. Passing it explicitly (rather than
     /// letting the dock derive one from the egui style) is what keeps the aiming arithmetic
@@ -432,9 +439,32 @@ struct Effect {
     /// the very behaviour the dock deliberately avoids (a commit per frame, leaving consumers to
     /// dedupe an interaction in progress).
     commits: CommitRule,
+    /// Which boundaries this step was allowed to move — see [`BoundaryRule`].
+    boundaries: BoundaryRule,
     /// A rule the step broke about itself, in its own words — reported like any other failure so
     /// that it arrives with a step index and a shrunk scenario.
     forbidden: Option<String>,
+}
+
+/// Which splits a step was allowed to move the boundary of.
+///
+/// `fraction` is persisted state, and only three gestures in the vocabulary name a boundary at
+/// all. The vocabulary already said so in prose — see [`Step::DragSeparator`], *"Nothing else in
+/// this harness ever moves it"* — and a claim in prose is a claim nothing checks.
+///
+/// Naming the split rather than flagging the step is the sharp half. A drag on one divider is
+/// not a licence to move the rest of them: the divider the pointer holds changes the *range* of
+/// every split beneath it, and it was the frame pass reacting to that range — clamping the
+/// stored ratio into a band derived from this frame's geometry — that rewrote layouts nobody
+/// touched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoundaryRule {
+    /// The step named no separator: every split must come through exactly as it was.
+    None,
+    /// Exactly the split the gesture aimed at, and nothing else.
+    Only(NodePath),
+    /// Every split of a cross: a transposition recomputes all three by construction.
+    Any,
 }
 
 /// What the dock was allowed to announce for a step.
@@ -454,6 +484,9 @@ enum CommitRule {
 
 /// Every live leaf's identities, in tree order. See [`Sim::identities`].
 type Identities = Vec<(NodePath, LeafIdentity)>;
+
+/// Every split's stored ratio, in tree order. See [`Sim::boundaries`].
+type Boundaries = Vec<(NodePath, f32)>;
 
 /// A leaf's identities, which no gesture that was not about it may disturb.
 ///
@@ -490,6 +523,7 @@ impl Sim {
             state: DockState::new(vec!["t0".to_string()]),
             frame: 0,
             next_tab: 1,
+            screen: SCREEN,
             style: Style::default(),
             effective: [0; OUTCOMES],
             aimed: 0,
@@ -510,10 +544,16 @@ impl Sim {
         tab
     }
 
+    /// Resizes the window the dock is shown in, and runs a frame so the geometry follows.
+    fn resize(&mut self, screen: Vec2) {
+        self.screen = screen;
+        self.run_frame(vec![]);
+    }
+
     /// Runs one frame with the given input events.
     fn run_frame(&mut self, events: Vec<Event>) {
         let input = RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SCREEN)),
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.screen)),
             // Time advances: egui's drag detection and animations are time-based, and a clock
             // that never ticks is its own kind of unreal scene.
             time: Some(f64::from(self.frame) / 60.0),
@@ -1163,6 +1203,7 @@ impl Sim {
                     must_change_nothing: false,
                     touched: self.live_leaves(),
                     commits: CommitRule::Unjudged,
+                    boundaries: BoundaryRule::None,
                     forbidden: None,
                 });
             }
@@ -1177,6 +1218,8 @@ impl Sim {
         // Separator gestures are the ones whose event contract is judged here; everything else
         // announces on its own terms and is judged by the tests that own it.
         let mut commits = CommitRule::Unjudged;
+        // Set by the three steps that name a boundary; see `BoundaryRule`.
+        let mut boundaries = BoundaryRule::None;
         // A rule a step can break about *itself*, in its own words. Reported by `run` so the
         // failure names the step and its shrunk scenario like any other.
         let mut forbidden: Option<String> = None;
@@ -1266,6 +1309,10 @@ impl Sim {
                 let focus_before = self.focus_trace();
                 self.drag(at, to);
                 self.separator.drags += 1;
+                // This divider and no other. Holding it changes the *range* of every split
+                // beneath it, which is precisely the pressure the frame pass must not answer by
+                // rewriting their stored ratios.
+                boundaries = BoundaryRule::Only(path);
 
                 // The rule is read off the model, not predicted from the delta: a drag that ran
                 // into the clamp moved nothing, and a dock that announces a commit for it is
@@ -1351,6 +1398,7 @@ impl Sim {
                 }
                 let focus_before = self.focus_trace();
                 self.double_click(at);
+                boundaries = BoundaryRule::Only(path);
                 // Two independent changes, counted separately: the centring itself, and the
                 // focus move a click in the gap can also cause (see `Step::GrabSeparator`). A
                 // double-click on an already-centred separator does neither, and then the dock
@@ -1408,6 +1456,9 @@ impl Sim {
                 let rects_before = self.leaf_rects();
                 let focus_before = self.focus_trace();
                 self.cross.offered += 1;
+                // A transposition rewrites the fractions of all three splits of the cross by
+                // construction — that is what regrouping the same four rectangles takes.
+                boundaries = BoundaryRule::Any;
 
                 self.click(at);
 
@@ -1477,8 +1528,49 @@ impl Sim {
             must_change_nothing,
             touched,
             commits,
+            boundaries,
             forbidden,
         })
+    }
+
+    /// Every split's stored ratio, by the node that owns it.
+    ///
+    /// Keyed by [`NodePath`] rather than by position: node ids are stable across structural
+    /// edits (that is the point of the arena), so a split that survives a step is comparable
+    /// with itself and one that did not simply drops out.
+    fn boundaries(&self) -> Boundaries {
+        self.state
+            .iter_all_nodes()
+            .filter_map(|(path, node)| node.get_split().map(|split| (path, split.fraction)))
+            .collect()
+    }
+
+    /// Splits whose ratio the current geometry cannot honour: the node is shorter than
+    /// `2 * separator.extra` along its split axis, so there is no position leaving that margin
+    /// on both sides, and the stored ratio is not the one being drawn.
+    ///
+    /// This is the coverage number for [`boundary_drift_complaint`]. The oracle is free to be
+    /// green on a sweep that never entered this regime — every ratio is honoured as stored,
+    /// and there is no reason for the frame pass to touch anything — so the count is asserted
+    /// rather than assumed.
+    fn ratios_the_geometry_cannot_honour(&self) -> usize {
+        let layout = self.layout();
+        self.state
+            .iter_all_nodes()
+            .filter(|(_, node)| node.get_split().is_some())
+            .filter(|(path, _)| {
+                let Some(geometry) = layout.get(*path) else {
+                    return false;
+                };
+                let range = if matches!(self.state[*path], Node::Vertical(_)) {
+                    geometry.rect.height()
+                } else {
+                    geometry.rect.width()
+                };
+                range > 0.0 && range < 2.0 * self.style.separator.extra
+            })
+            .filter(|(path, _)| self.fraction_of(*path) != Some(0.5))
+            .count()
     }
 
     /// The fraction of a split node, if it is still there and still a split.
@@ -1719,6 +1811,8 @@ struct Run {
     refused: [usize; REFUSALS],
     /// How much the identity property actually got to check — see [`IdentityWatch`].
     identity: IdentityWatch,
+    /// How much the boundary-drift property got to check — see [`BoundaryWatch`].
+    boundary: BoundaryWatch,
     /// How much the separator gestures got to do — see [`SeparatorWatch`].
     separator: SeparatorWatch,
     /// How much the cross-split toggle got to do — see [`CrossWatch`].
@@ -1792,6 +1886,56 @@ fn identity_complaint(
     None
 }
 
+/// Coverage of the boundary-drift property, counted while the run happens.
+#[derive(Clone, Copy, Default, Debug)]
+struct BoundaryWatch {
+    /// Surviving splits compared across a step that did not name them.
+    checked: usize,
+    /// ...of which were in the regime that makes the property sharp: a node too short to leave
+    /// `separator.extra` on both sides, holding a ratio that is not dead centre. That is where
+    /// the clamp used to overwrite the stored number, and where a sweep that never got there
+    /// would be green for free.
+    under_pressure: usize,
+}
+
+/// Checks that no step moved a boundary it did not name — see [`BoundaryRule`].
+///
+/// The failure this exists for does not need a gesture at all: the clamp that keeps both
+/// children on screen is derived from *this frame's* geometry, so applying it to the stored
+/// number turns a window resize — or any edit that shrinks an ancestor — into a silent rewrite
+/// of the layout. On a node shorter than `2 * separator.extra` that band is the single point
+/// `0.5`, so the ratio is not merely nudged, it is gone.
+fn boundary_drift_complaint(
+    before: &Boundaries,
+    after: &Boundaries,
+    effect: &Effect,
+    under_pressure: usize,
+    watch: &mut BoundaryWatch,
+) -> Option<String> {
+    if effect.boundaries == BoundaryRule::Any {
+        return None;
+    }
+    watch.under_pressure += under_pressure;
+    for (path, was) in before {
+        if effect.boundaries == BoundaryRule::Only(*path) {
+            continue;
+        }
+        let Some((_, now)) = after.iter().find(|(other, _)| other == path) else {
+            continue;
+        };
+        watch.checked += 1;
+        if now != was {
+            return Some(format!(
+                "the split at {path:?} went from fraction {was} to {now} during a step that did \
+                 not name it ({:?}) — `fraction` is persisted state, so something in the frame \
+                 pass rewrote a layout the user did not touch",
+                effect.boundaries
+            ));
+        }
+    }
+    None
+}
+
 #[derive(Debug)]
 struct Failure {
     step_index: usize,
@@ -1810,6 +1954,7 @@ fn run(steps: &[Step]) -> Run {
     let mut sim = Sim::new();
     let mut traces = Vec::with_capacity(steps.len());
     let mut identity = IdentityWatch::default();
+    let mut boundary = BoundaryWatch::default();
 
     // One exit, so that everything the run has to report — traces, coverage, refusals — is
     // gathered in a single place. Four copies of the same construction is how a counter gets
@@ -1818,6 +1963,11 @@ fn run(steps: &[Step]) -> Run {
     let failure = 'scenario: {
         for (step_index, &step) in steps.iter().enumerate() {
             let before_identities = sim.identities();
+            let before_boundaries = sim.boundaries();
+            // Measured *before* the step: these are the ratios that were at risk while its
+            // frames ran. A step that creates the regime (a drag shrinking an ancestor) is
+            // exempt from the property anyway; the step after it is the one that must behave.
+            let under_pressure = sim.ratios_the_geometry_cannot_honour();
             let applied =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sim.apply(step)));
 
@@ -1882,6 +2032,20 @@ fn run(steps: &[Step]) -> Run {
                     reason: complaint,
                 });
             }
+
+            if let Some(complaint) = boundary_drift_complaint(
+                &before_boundaries,
+                &sim.boundaries(),
+                &effect,
+                under_pressure,
+                &mut boundary,
+            ) {
+                break 'scenario Some(Failure {
+                    step_index,
+                    step,
+                    reason: complaint,
+                });
+            }
         }
         None
     };
@@ -1892,6 +2056,7 @@ fn run(steps: &[Step]) -> Run {
         aimed: sim.aimed,
         refused: sim.refused,
         identity,
+        boundary,
         separator: sim.separator,
         cross: sim.cross,
         failure,
@@ -2284,6 +2449,143 @@ fn a_node_too_small_for_the_margin_keeps_both_children() {
     assert_eq!(sim.state.validate(), Ok(()));
 }
 
+/// A window too small to honour the margin borrows the ratio; it does not take it.
+///
+/// The reported shape: shrink a window until a split's node is shorter than
+/// `2 * separator.extra`, and the position of that divider is gone — growing the window back
+/// leaves it dead centre. Nothing announced it, because nothing about it was a gesture.
+///
+/// Root cause is the clamp `show_separator` applies to `fraction`: the band is derived from
+/// *this frame's* geometry, and it was applied to the stored number on every frame, drag or no
+/// drag. On a node that cannot honour the margin on both sides the band is the single point
+/// `0.5`, so the ratio was not nudged into range — it was replaced by dead centre, and the
+/// window growing back had nothing left to restore.
+///
+/// The fix separates the two: the band still decides where the boundary is *drawn* and where
+/// the children are cut, and only a gesture writes the tree. Both halves are asserted here —
+/// a ratio that survived but was never honoured would be just as wrong.
+#[test]
+fn a_ratio_the_window_grew_too_small_for_comes_back_when_it_grows_again() {
+    let mut sim = Sim::new();
+    let root = sim.state.main_surface().root().unwrap();
+    sim.state.split(
+        NodePath::new(SurfaceIndex::main(), root),
+        Split::Below,
+        0.3,
+        Node::leaf("t1".to_string()),
+    );
+    sim.run_frame(vec![]);
+    // The split is a node of its own; `root` named the leaf, which is now its first child.
+    let (path, _, _) = sim.separators()[0];
+    assert_eq!(
+        sim.fraction_of(path),
+        Some(0.3),
+        "the scene starts at the ratio it was built with"
+    );
+    let roomy = sim
+        .live_leaves()
+        .iter()
+        .map(|leaf| sim.layout().get(*leaf).unwrap().rect)
+        .collect::<Vec<_>>();
+
+    // Shrink the window until the split's node cannot leave the margin on both sides. That is
+    // the regime the old clamp collapsed to a point, and the test proves nothing without it.
+    sim.resize(Vec2::new(1280.0, 260.0));
+    let squeezed_range = sim.layout().get(path).unwrap().rect.height();
+    assert!(
+        squeezed_range < 2.0 * sim.style.separator.extra,
+        "the shrunk window must leave the split with no room for the margin on both sides, and \
+         this one is {squeezed_range} px against 2 x {}",
+        sim.style.separator.extra
+    );
+    assert_eq!(
+        sim.fraction_of(path),
+        Some(0.3),
+        "the stored ratio is state; a window resize is not a gesture and may not write it"
+    );
+    // ...and while it cannot be honoured, both children still have to be on screen: the margin
+    // is enforced by where the boundary is *drawn*, not by editing the tree.
+    let squeezed = sim
+        .live_leaves()
+        .iter()
+        .map(|leaf| sim.layout().get(*leaf).unwrap().rect)
+        .collect::<Vec<_>>();
+    assert_eq!(squeezed.len(), 2, "both leaves must still be laid out");
+    assert!(
+        (squeezed[0].height() - squeezed[1].height()).abs() < 2.0,
+        "with no room to give, the least-bad answer is an equal split, and these came out \
+         {} and {} px",
+        squeezed[0].height(),
+        squeezed[1].height()
+    );
+
+    sim.resize(SCREEN);
+    assert_eq!(
+        sim.fraction_of(path),
+        Some(0.3),
+        "and it is still there once there is room for it again"
+    );
+    let restored = sim
+        .live_leaves()
+        .iter()
+        .map(|leaf| sim.layout().get(*leaf).unwrap().rect)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        restored,
+        roomy,
+        "growing the window back must put every leaf where it was: {}",
+        sim.trace()
+    );
+    assert_eq!(
+        sim.take_commits(),
+        0,
+        "and none of it is a layout change the user made, so there is nothing to announce"
+    );
+}
+
+/// A ratio the geometry cannot honour is *shown* inside the margin, not written into the tree.
+///
+/// The other half of the fix above, and the reason it is not simply "stop clamping". A fraction
+/// can arrive from outside any gesture — [`DockState::split`] takes one, and so does a file on
+/// disk — and it may name a child narrower than `separator.extra`. That child still has to be
+/// reachable, so the band still applies; what changed is that it applies to the drawing and the
+/// cut rather than to the stored number.
+#[test]
+fn a_ratio_the_margin_cannot_honour_is_drawn_inside_it_and_left_in_the_tree() {
+    let mut sim = Sim::new();
+    let root = sim.state.main_surface().root().unwrap();
+    sim.state.split(
+        NodePath::new(SurfaceIndex::main(), root),
+        Split::Below,
+        0.02,
+        Node::leaf("t1".to_string()),
+    );
+    sim.run_frame(vec![]);
+    let (path, _, _) = sim.separators()[0];
+
+    let range = sim.layout().get(path).unwrap().rect.height();
+    assert!(
+        range > 2.0 * sim.style.separator.extra,
+        "this case is about a node with room to spare — {range} px against 2 x {}",
+        sim.style.separator.extra
+    );
+    assert_eq!(
+        sim.fraction_of(path),
+        Some(0.02),
+        "nothing but a gesture writes the ratio, and there was no gesture"
+    );
+
+    let leaves = sim.live_leaves();
+    assert_eq!(leaves.len(), 2, "both leaves must be laid out");
+    let top = sim.layout().get(leaves[0]).unwrap().rect.height();
+    assert!(
+        top >= sim.style.separator.extra - 2.0,
+        "the top child was drawn {top} px tall, below the {} px margin that is the only thing \
+         keeping it grabbable",
+        sim.style.separator.extra
+    );
+}
+
 #[test]
 fn a_frame_runs_without_a_window() {
     let sim = Sim::new();
@@ -2613,6 +2915,7 @@ const STEPS: usize = 24;
 fn seeded_scenarios_keep_the_dock_well_formed() {
     let mut coverage = [0usize; OUTCOMES];
     let mut identity = IdentityWatch::default();
+    let mut boundary = BoundaryWatch::default();
     let mut separator = SeparatorWatch::default();
     let mut cross = CrossWatch::default();
     let mut aimed = 0usize;
@@ -2630,6 +2933,8 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         }
         identity.idle_frames += outcome.identity.idle_frames;
         identity.bystanders += outcome.identity.bystanders;
+        boundary.checked += outcome.boundary.checked;
+        boundary.under_pressure += outcome.boundary.under_pressure;
         separator.drags += outcome.separator.drags;
         separator.moves += outcome.separator.moves;
         separator.clamped += outcome.separator.clamped;
@@ -2739,6 +3044,26 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         identity.bystanders > 0,
         "no leaf was ever a bystander to a step that changed something — the property only \
          ever looked at leaves the step was allowed to change"
+    );
+
+    println!("boundary watch: {boundary:?}");
+
+    // And of the boundary-drift property, whose two zeros mean different things. No comparisons
+    // at all means the sweep never carried a split across a step; comparisons but none under
+    // pressure means every ratio was one the geometry could honour as stored, which is exactly
+    // the regime in which the frame pass has no reason to touch anything and the property is
+    // green for free.
+    assert!(
+        boundary.checked > 0,
+        "no split ever survived a step that named no boundary, so \"only a gesture writes \
+         `fraction`\" was never asked of anything"
+    );
+    assert!(
+        boundary.under_pressure > 0,
+        "all {} boundary comparisons were made on splits whose ratio the geometry could honour \
+         as stored — the sweep never entered the regime where the clamp and the stored number \
+         disagree, which is the only one where the property can fail",
+        boundary.checked
     );
 
     println!("separator watch: {separator:?}");

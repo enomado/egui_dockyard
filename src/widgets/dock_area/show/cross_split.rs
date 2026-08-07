@@ -224,14 +224,19 @@ impl<Tab> DockArea<'_, Tab> {
     /// drawn at the tail of `show_separator` for `outer`), and `show_separator` is still going
     /// to be called for `c0` and `c1` further down the same loop — reading their geometry from
     /// [`Self::layout`], which up to this point describes the grouping we have just replaced.
-    /// So the last thing this does is re-run the layout pass over the three edited nodes: a
-    /// separator that reads a rectangle belonging to a shape that no longer exists does not
-    /// merely draw in the wrong place, it *writes back* — `show_separator` clamps `fraction`
-    /// into `[extra/range, 1 - extra/range]` from that stale `range` every frame, drag or no
-    /// drag. That is how transposing after dragging the outer divider used to snap one of the
-    /// two new inner dividers back to 0.5: the pre-transposition rectangle it was measured
-    /// against was shorter than `2 * separator.extra`, which collapses the clamp interval to
-    /// the single point 0.5.
+    /// So the last thing this does is re-run the layout pass over the three edited nodes, and
+    /// the rest of the pass sees the shape that now exists.
+    ///
+    /// The cost of not doing it used to be worse than a misdrawn frame: `show_separator` pushed
+    /// `fraction` into a band derived from whatever rectangle it read, on every frame, drag or
+    /// no drag — so a stale rectangle shorter than `2 * separator.extra` (whose band is the
+    /// single point 0.5) *overwrote* the ratio the transposition had just computed. That is how
+    /// transposing after dragging the outer divider used to snap one of the two new inner
+    /// dividers back to dead centre. Only a gesture writes `fraction` now (see `SeparatorBand`),
+    /// so what is left here is one frame of dividers painted and hit-tested against a shape that
+    /// no longer exists — pinned by
+    /// `the_toggle_leaves_the_geometry_map_describing_the_tree_it_just_wrote`, which has to read
+    /// the map *inside* the editing frame, since any quiet frame rebuilds it.
     fn transpose_cross_split(&mut self, pixels_per_point: f32, cross: &CrossSplit) {
         let &CrossSplit {
             outer,
@@ -410,12 +415,11 @@ mod tests {
     /// Renders the dock until its geometry has settled, leaving it in `ctx` memory exactly as
     /// `DockArea::show_inside_with_response` normally would inside a real app.
     ///
-    /// Two frames, not one: the geometry map is written at the top of a pass, but
-    /// `show_separator` may still clamp `fraction` into `[extra/range, 1 - extra/range]`
-    /// further down that same pass (a stored fraction that squeezes a child below
-    /// `separator.extra` is corrected the first frame it is seen). After a single frame the
-    /// tree and the map can therefore be one step apart, and a test measuring the map would
-    /// be aiming at a divider the next frame is about to move.
+    /// Two frames, not one. This used to be load-bearing for a reason that is gone — the pass
+    /// wrote `fraction` back on every frame, so the tree and the map could be one step apart
+    /// after a single frame — and it is kept because egui itself settles over frames (hover
+    /// state, auto-sizing) and a test that aims at geometry wants a scene that has stopped
+    /// moving. See `SeparatorBand` for what stopped being true.
     fn render(ctx: &Context, state: &mut DockState<u32>, style: &Style, id: Id) {
         run_frame(ctx, state, style, id, vec![]);
         run_frame(ctx, state, style, id, vec![]);
@@ -738,6 +742,12 @@ mod tests {
     /// "dead centre", which is exactly where the divider had been before the drag.
     ///
     /// The oracle is the feature's whole promise: a toggle moves no pixel.
+    ///
+    /// Two things closed that root cause, and this test now only sees the second one:
+    /// `show_separator` no longer writes `fraction` outside a gesture (see `SeparatorBand`), and
+    /// the relayout keeps the map in step. Removing the relayout alone leaves this test green —
+    /// the staleness is real but no longer *persists* — which is why it has a test of its own,
+    /// `the_toggle_leaves_the_geometry_map_describing_the_tree_it_just_wrote`.
     #[test]
     fn toggle_after_dragging_the_outer_divider_keeps_every_leaf_in_place() {
         // Start as two columns, each with its own inner divider ("0 сплит горизонтальный").
@@ -778,6 +788,89 @@ mod tests {
         assert_rects_close(dragged, leaf_rects(&DockLayout::load(&ctx, id), leaves));
     }
 
+    /// The transposition runs in the *middle* of a pass, so the geometry map it leaves behind
+    /// must already describe the tree it just wrote — the rest of that pass reads it.
+    ///
+    /// This is the property the relayout at the end of `transpose_cross_split` exists for, and
+    /// it needs a test of its own now. It used to be covered as a side effect: `show_separator`
+    /// clamped `fraction` into a band derived from whatever rectangle it read, on every frame,
+    /// so a stale rectangle did not merely draw in the wrong place — it *wrote back*, and the
+    /// damage was still there on the next frame for
+    /// `toggle_after_dragging_the_outer_divider_keeps_every_leaf_in_place` to see. Only a
+    /// gesture writes `fraction` now, which is right and which also means that test no longer
+    /// fails when the relayout is removed. What is left is a frame drawn against a shape that
+    /// does not exist — dividers painted and hit-tested in the wrong place, for one frame — and
+    /// that is only visible *inside* the frame that did the edit.
+    ///
+    /// Read on the three edited nodes rather than on the leaves on purpose: the whole promise of
+    /// a transposition is that the four leaf rectangles are unchanged, so leaves cannot tell the
+    /// two groupings apart. The splits can — `c0` and `c1` are the two columns before and the two
+    /// rows after.
+    ///
+    /// The click is driven here rather than through `press_toggle`, and that is the whole test:
+    /// `click` ends with a quiet frame, which recomputes the map from the tree and washes the
+    /// staleness away before anything can look at it. The map has to be read on the frame that
+    /// did the edit.
+    #[test]
+    fn the_toggle_leaves_the_geometry_map_describing_the_tree_it_just_wrote() {
+        use egui::{Event, Modifiers, PointerButton};
+
+        let (mut state, outer_id, _) = build_cross(true, 0.4, 0.6);
+        let ctx = Context::default();
+        let id = Id::new(DOCK_ID);
+        let style = Style::default();
+        let outer = NodePath::new(SurfaceIndex::main(), outer_id);
+
+        render(&ctx, &mut state, &style, id);
+        let center = toggle_center(&ctx, &mut state, id, outer).expect("the toggle is on screen");
+        let button = |pressed| {
+            vec![Event::PointerButton {
+                pos: center,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            }]
+        };
+        run_frame(
+            &ctx,
+            &mut state,
+            &style,
+            id,
+            vec![Event::PointerMoved(center)],
+        );
+        run_frame(&ctx, &mut state, &style, id, button(true));
+        // The release frame is the one that transposes, mid-pass. No quiet frame after it.
+        run_frame(&ctx, &mut state, &style, id, button(false));
+        assert!(
+            state[outer].is_vertical(),
+            "the click did not flip the grouping, so there is no mid-pass edit to judge"
+        );
+
+        let [c0, c1] = state.main_surface().children(outer_id).unwrap();
+        let edited = [
+            outer,
+            NodePath::new(SurfaceIndex::main(), c0),
+            NodePath::new(SurfaceIndex::main(), c1),
+        ];
+        let read = |layout: &DockLayout| {
+            edited.map(|path| layout.rect(path).expect("an edited node was laid out"))
+        };
+
+        let straight_after = read(&DockLayout::load(&ctx, id));
+        // A quiet frame recomputes the whole map from the tree, so this is what the edited
+        // nodes' rectangles are *supposed* to be.
+        render(&ctx, &mut state, &style, id);
+        let settled = read(&DockLayout::load(&ctx, id));
+
+        for ((path, stale), fresh) in edited.iter().zip(straight_after).zip(settled) {
+            assert!(
+                (stale.min - fresh.min).length() < 0.1 && (stale.max - fresh.max).length() < 0.1,
+                "the frame that transposed the cross left {path:?} recorded as {stale:?}, while \
+                 the shape it wrote puts it at {fresh:?} — the rest of that pass reads this map"
+            );
+        }
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(128))]
 
@@ -786,7 +879,7 @@ mod tests {
         ///
         /// Driven through a real click on the button rather than by calling
         /// `transpose_cross_split` directly: the edit lands in the *middle* of a separator
-        /// pass, and the rest of that pass is free to write back over what it wrote (which is
+        /// pass, and the rest of that pass runs against whatever the edit left behind (which is
         /// precisely how `toggle_after_dragging_the_outer_divider_keeps_every_leaf_in_place`
         /// used to fail). Calling the surgery on a bare `DockArea` and re-rendering afterwards
         /// skips the only frame where that can happen, so it can only prove the arithmetic.

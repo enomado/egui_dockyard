@@ -491,8 +491,14 @@ impl<Tab> DockArea<'_, Tab> {
                 let rect = expand_to_pixel(rect, pixels_per_point);
 
                 let dim_size = rect.dim_size();
+                // The children are cut at where the boundary *is*, which is the stored ratio
+                // pushed into the band this frame's geometry can honour — see `SeparatorBand`.
+                // Clamping here, rather than writing the clamped number back into the tree,
+                // is what lets a node with no room for the margin keep the ratio it will get
+                // back as soon as there is room again.
                 let midpoint = if dim_size > 0.0 {
-                    rect.min.dim_point + dim_size * fraction
+                    let band = SeparatorBand::new(fraction, dim_size, style.separator.extra);
+                    rect.min.dim_point + dim_size * band.effective
                 } else {
                     rect.min.dim_point
                 };
@@ -556,7 +562,15 @@ impl<Tab> DockArea<'_, Tab> {
                 let rect = node_rect;
                 let mut separator = rect;
 
-                let midpoint = rect.min.dim_point + rect.dim_size() * split.fraction;
+                // Where the boundary is *this frame*, which is not necessarily the number the
+                // tree stores: a ratio the current geometry cannot honour is shown inside the
+                // band without being written back — see `SeparatorBand`. Everything below reads
+                // `band.effective`, so the separator that is drawn, the rectangle it is grabbed
+                // by and the cut `compute_rect_sizes` made all name the same line.
+                let range = rect.dim_size();
+                let band = SeparatorBand::new(split.fraction, range, style.separator.extra);
+
+                let midpoint = rect.min.dim_point + range * band.effective;
                 separator.min.dim_point = midpoint - style.separator.width * 0.5;
                 separator.max.dim_point = midpoint + style.separator.width * 0.5;
 
@@ -597,7 +611,7 @@ impl<Tab> DockArea<'_, Tab> {
                     None
                 };
 
-                let midpoint = rect.min.dim_point + rect.dim_size() * split.fraction;
+                let midpoint = rect.min.dim_point + range * band.effective;
                 separator.min.dim_point = map_to_pixel(
                     midpoint - style.separator.width * 0.5,
                     pixels_per_point,
@@ -646,25 +660,22 @@ impl<Tab> DockArea<'_, Tab> {
                     state.separator_drag_start = Some((response.id, split.fraction));
                 }
 
-                let range = rect.max.dim_point - rect.min.dim_point;
-                if range > 0.0 {
-                    // `separator.extra` is a margin in *pixels* that each child must keep, so as
-                    // a fraction it is `extra / range` — and on a node shorter than twice that
-                    // margin there is no position honouring both sides.
-                    //
-                    // Capping the margin at half the node is what makes that case degrade
-                    // sensibly: the band shrinks to a point and the separator pins to the centre,
-                    // an equal split, which is the least-bad answer when there is no room to
-                    // give. The previous normalisation `(min.min(max), max.max(min))` instead
-                    // *swapped* the inverted pair, and `extra/range >= 1` therefore produced the
-                    // interval `(0, 1)` — no clamp at all, exactly on the nodes where the clamp
-                    // was the only thing standing between a child and zero size. Found by the
-                    // frame harness: a drag on a 175 px node drove `fraction` to 0.0.
-                    let min = (style.separator.extra / range).min(0.5);
-                    let max = 1.0 - min;
-                    let is_arrow = arrow_key_offset.is_some();
-                    let delta = arrow_key_offset.unwrap_or(response.drag_delta()).dim_point;
-                    let new_fraction = (split.fraction + delta / range).clamp(min, max);
+                // The stored ratio is *state*, and only a gesture may write it. The band is
+                // geometry — it is derived from this frame's `range`, so pushing
+                // `split.fraction` into it unconditionally would make every window resize a
+                // silent edit of the layout, and on a node shorter than `2 * separator.extra`
+                // an outright loss: the band is the single point 0.5 there, so the stored ratio
+                // would be replaced by "dead centre" and growing the window back would not
+                // bring it home. What the band does here is give the gesture its starting point
+                // (`effective`, i.e. the line the user actually grabbed) and its limits.
+                //
+                // `drag_delta()` is zero on any frame the separator is not being dragged, so a
+                // non-zero delta *is* the gesture; arrow nudges are never zero either.
+                let is_arrow = arrow_key_offset.is_some();
+                let delta = arrow_key_offset.unwrap_or(response.drag_delta()).dim_point;
+                if range > 0.0 && delta != 0.0 {
+                    let new_fraction =
+                        (band.effective + delta / range).clamp(band.min, band.max);
                     if split.fraction != new_fraction {
                         split.fraction = new_fraction;
                         if is_arrow {
@@ -703,5 +714,64 @@ impl<Tab> DockArea<'_, Tab> {
         // `draw_cross_split_toggle` needs `&mut self`.
         let separator_style = style.separator.clone();
         self.draw_cross_split_toggle(ui, path, &separator_style);
+    }
+}
+
+/// The band a split's boundary may occupy this frame, and where the stored ratio sits inside it.
+///
+/// [`SeparatorStyle::extra`](crate::SeparatorStyle::extra) is a margin in *pixels* that each
+/// child must keep, so on a node `range` px long it is the fraction `extra / range`. Two things
+/// come out of that, and keeping them apart is the whole reason this type exists:
+///
+/// * `min` / `max` — the limits a **gesture** may write between;
+/// * `effective` — where the boundary is **drawn** and where the children are cut, which is the
+///   stored ratio pushed into those limits *without being written back*.
+///
+/// The separation matters because the band depends on geometry and the ratio does not. Applying
+/// the band to `SplitNode::fraction` on every frame — which is what this code used to do, drag or
+/// no drag — turns a window resize into a silent edit of the layout: on a node shorter than
+/// `2 * extra` the band is the single point `0.5`, so the ratio the user set is replaced by dead
+/// centre and growing the window back does not bring it home. A ratio is state; only a gesture
+/// gets to change it. Geometry gets to decide where it is honoured.
+#[derive(Clone, Copy, Debug)]
+struct SeparatorBand {
+    /// Lowest fraction a gesture may write.
+    min: f32,
+    /// Highest fraction a gesture may write. Always `1.0 - min`, so always `>= min`.
+    max: f32,
+    /// The stored fraction as this frame's geometry can honour it: `fraction.clamp(min, max)`.
+    effective: f32,
+}
+
+impl SeparatorBand {
+    /// `range` is the node's extent along the split axis, `extra` is
+    /// [`SeparatorStyle::extra`](crate::SeparatorStyle::extra); both in points.
+    fn new(fraction: f32, range: f32, extra: f32) -> Self {
+        // A node with no extent has no room for a margin and nothing to show either. Answering
+        // "no constraint" keeps this a total function of its arguments instead of a special
+        // case every caller has to remember; the callers that could act on it guard on `range`
+        // anyway, because `delta / range` is not finite here.
+        if !(range > 0.0) {
+            return Self {
+                min: 0.0,
+                max: 1.0,
+                effective: fraction,
+            };
+        }
+
+        // Capping the margin at half the node is what makes an impossible margin degrade
+        // sensibly: the band shrinks to a point and the boundary sits at the centre — an equal
+        // split, which is the least-bad answer when there is no room to give. The previous
+        // normalisation `(min.min(max), max.max(min))` instead *swapped* the inverted pair, so
+        // `extra / range >= 1` produced the interval `(0, 1)`: no constraint at all, exactly on
+        // the nodes where it was the only thing standing between a child and zero size. Found
+        // by the frame harness — a drag on a 175 px node drove `fraction` to 0.0.
+        let min = (extra / range).min(0.5);
+        let max = 1.0 - min;
+        Self {
+            min,
+            max,
+            effective: fraction.clamp(min, max),
+        }
     }
 }

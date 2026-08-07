@@ -12,6 +12,80 @@ Ordered newest first.
 
 ---
 
+## The clamp that keeps a panel on screen was applied to the saved ratio, so resizing a window edited the layout
+
+**Status upstream:** not submitted.
+
+**Symptom.** Shrink a window far enough and a divider's position is *gone* — not moved, gone.
+Growing the window back leaves it dead centre. Nothing announced it, nothing was persisted as a
+change, and there is no gesture anywhere in the story: the user resized a window and lost part of
+a saved layout. The same thing happens without touching the window at all, by dragging an
+*ancestor* divider: that shrinks the node below it, and the descendant's ratio goes with it.
+
+**Root cause.** `separator.extra` is a margin in pixels each child must keep, so on a node `range`
+px long it is the fraction `extra / range`. `show_separator` turned that into a band and pushed
+`split.fraction` into it — on every frame, drag or no drag, with `delta` simply being zero when
+nobody was dragging:
+
+```rust
+let min = (style.separator.extra / range).min(0.5);
+let max = 1.0 - min;
+let delta = arrow_key_offset.unwrap_or(response.drag_delta()).dim_point;
+let new_fraction = (split.fraction + delta / range).clamp(min, max);   // <- every frame
+```
+
+Two things are conflated there and only one of them is state. The band is *geometry*: it is
+derived from this frame's `range`, and it moves whenever the window does. `fraction` is the
+layout the user set and the consumer persists. Applying the first to the second every frame makes
+a resize an edit — and on a node shorter than `2 * extra` it is not a nudge but a deletion, since
+the band is the single point `0.5` there (which is the least-bad *drawing* when there is no room
+to give, and a terrible thing to write down).
+
+Worth naming why this was invisible for so long: the bug erases its own evidence. The rewrite
+happens on the first frame a node is under pressure, so by the time anything looks, every such
+ratio is already `0.5` and looks perfectly ordinary. A sweep counting "ratios the geometry cannot
+honour" reads **zero** on the broken build and non-zero on the fixed one.
+
+**Fix.** A named type, `SeparatorBand`, that keeps the two apart: `min`/`max` are the limits a
+*gesture* may write between, and `effective` is the stored ratio pushed into them *without being
+written back*. `compute_rect_sizes` cuts the children at `effective`, `show_separator` draws and
+hit-tests the divider there, and the tree is written only when a gesture actually produces motion
+(`delta != 0.0` — `drag_delta()` is zero on any frame the separator is not being dragged, and an
+arrow nudge is never zero). The gesture also starts from `effective` rather than from the stored
+number, so grabbing a divider that is being shown inside the band does not make it jump.
+
+The guarantee the old code bought with the write-back is kept, and by construction rather than by
+repair: a ratio the margin cannot honour — from a file, from `DockState::split`, from a window
+that shrank — is *shown* inside the band, so no child is ever squeezed below `extra` px, and the
+ratio is still there when there is room for it again.
+
+**Evidence.** Two scripted tests in `tests/dst.rs`, one per half:
+`a_ratio_the_window_grew_too_small_for_comes_back_when_it_grows_again` (the reported gesture —
+shrink until the node cannot honour the margin, check the ratio survived *and* that both children
+are still on screen, grow back, check every leaf returns to where it was, with no commit
+announced) and `a_ratio_the_margin_cannot_honour_is_drawn_inside_it_and_left_in_the_tree` (a
+fraction of `0.02` from the model: the tree keeps `0.02`, the drawing keeps the margin). Mutation:
+restoring the per-frame write fails the first; dropping the clamp from `compute_rect_sizes` fails
+both. The harness gained a resizable screen for this — `Sim::resize` — because a resize *is* the
+gesture here.
+
+And a property in the sweep, so the class stops depending on someone thinking of the case.
+`fraction` is persisted state and exactly three steps in the vocabulary name a boundary; the
+`DragSeparator` step said so in prose already ("Nothing else in this harness ever moves it") and
+nothing checked it. `boundary_drift_complaint` now does, and it names the *split*, not the step:
+a drag on one divider is not a licence to move the rest, which matters because holding a divider
+is exactly what changes the range of everything beneath it. On the old code it fails at seed 19,
+step 5 — a drag of one separator moved a different split from `0.723` to `0.658`.
+
+With a coverage counter beside it (`BoundaryWatch::under_pressure`), for the reason above: the
+property is green for free on a sweep that never carried a ratio the geometry could not honour,
+and that is precisely the state the old code could not stay in.
+
+**Where.** `src/widgets/dock_area/show/mod.rs` (`SeparatorBand`, `compute_rect_sizes`,
+`show_separator`), `tests/dst.rs`.
+
+---
+
 ## The DST harness asked the dock for three things it never promised
 
 **Status upstream:** not applicable — this is our own headless test harness, not library code.
@@ -140,11 +214,10 @@ the product never takes is not testing the product.
 
 **Where.** `src/widgets/dock_area/show/cross_split.rs`, `src/widgets/dock_area/show/mod.rs`.
 
-**Still open.** The clamp in `show_separator` rewrites a stored `fraction` on *every* frame, not
-just while a separator is being interacted with. On a node too small to honour `separator.extra`
-that silently destroys the stored ratio (it becomes 0.5) — so shrinking a window can lose split
-positions that growing it back does not restore. Only reachable through legitimate geometry here,
-but it is the same "the clamp mutates state nobody asked it to" edge that made this bug asymmetric.
+**Was still open, now fixed** — see the section above this one. The clamp rewriting `fraction` on
+every frame is what made this bug's damage persist; only a gesture writes it now. The mid-pass
+relayout is still right and still here, but this test no longer fails without it, so it got one of
+its own.
 
 ---
 

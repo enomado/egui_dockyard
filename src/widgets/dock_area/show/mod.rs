@@ -325,11 +325,12 @@ impl<Tab> DockArea<'_, Tab> {
         let order = self.dock_state[surf_index].breadth_first();
 
         // First compute all rect sizes in the node graph.
+        let pixels_per_point = ui.ctx().pixels_per_point();
         let max_rect = self.allocate_area_for_root_node(ui, surf_index);
         for node in order.iter().copied() {
             let path = NodePath::new(surf_index, node);
             if self.dock_state[path].is_parent() {
-                self.compute_rect_sizes(ui, path, max_rect);
+                self.compute_rect_sizes(pixels_per_point, path, max_rect);
             }
         }
 
@@ -396,11 +397,17 @@ impl<Tab> DockArea<'_, Tab> {
         rect
     }
 
-    fn compute_rect_sizes(&mut self, ui: &Ui, path: NodePath, max_rect: Rect) {
+    /// Write the rectangles of `path`'s two children into [`Self::layout`], cutting them out
+    /// of the rectangle already recorded for `path` itself.
+    ///
+    /// Takes `pixels_per_point` rather than a [`Ui`] because it is also called from
+    /// [`Self::transpose_cross_split`], which edits the tree in the middle of a pass and has
+    /// to bring the geometry map back in step with the new shape right there — see the note
+    /// on staleness in that function.
+    fn compute_rect_sizes(&mut self, pixels_per_point: f32, path: NodePath, max_rect: Rect) {
         assert!(self.dock_state[path].is_parent());
 
         let style = self.style.as_ref().unwrap();
-        let pixels_per_point = ui.ctx().pixels_per_point();
 
         let [left_path, right_path] = self.child_paths(path);
         let left_collapsed_count = self.dock_state[left_path].collapsed_leaf_count();

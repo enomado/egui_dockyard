@@ -203,7 +203,7 @@ impl<Tab> DockArea<'_, Tab> {
             .inner;
 
         if response.clicked() {
-            self.transpose_cross_split(&cross);
+            self.transpose_cross_split(ui.ctx().pixels_per_point(), &cross);
             self.events.push(DockEvent::CrossSplitTransposed);
         }
     }
@@ -219,7 +219,20 @@ impl<Tab> DockArea<'_, Tab> {
     /// After: `outer` = Vertical(`c0`, `c1`), `c0` = Horizontal(`a`, `c`) (the top row), `c1` =
     /// Horizontal(`b`, `d`) (the bottom row). Same four rectangles, different grouping. The
     /// vertical-outer case is the mirror image of this.
-    fn transpose_cross_split(&mut self, cross: &CrossSplit) {
+    ///
+    /// This runs in the *middle* of the separator pass (its only caller is the toggle button,
+    /// drawn at the tail of `show_separator` for `outer`), and `show_separator` is still going
+    /// to be called for `c0` and `c1` further down the same loop — reading their geometry from
+    /// [`Self::layout`], which up to this point describes the grouping we have just replaced.
+    /// So the last thing this does is re-run the layout pass over the three edited nodes: a
+    /// separator that reads a rectangle belonging to a shape that no longer exists does not
+    /// merely draw in the wrong place, it *writes back* — `show_separator` clamps `fraction`
+    /// into `[extra/range, 1 - extra/range]` from that stale `range` every frame, drag or no
+    /// drag. That is how transposing after dragging the outer divider used to snap one of the
+    /// two new inner dividers back to 0.5: the pre-transposition rectangle it was measured
+    /// against was shorter than `2 * separator.extra`, which collapses the clamp interval to
+    /// the single point 0.5.
+    fn transpose_cross_split(&mut self, pixels_per_point: f32, cross: &CrossSplit) {
         let &CrossSplit {
             outer,
             outer_horizontal,
@@ -302,6 +315,22 @@ impl<Tab> DockArea<'_, Tab> {
         self.dock_state[outer] = new_outer;
         self.dock_state[c0] = new_c0;
         self.dock_state[c1] = new_c1;
+
+        // Bring the geometry map back in step with the shape we just wrote (see the note on
+        // staleness above). `max_rect` is the surface root's rectangle — the same value
+        // `render_nodes` hands to this function, recorded by `allocate_area_for_root_node`.
+        // Order matters: `outer` writes `c0`/`c1`'s rectangles, which the next two calls then
+        // cut their own children out of.
+        let root = self.dock_state[outer.surface]
+            .root()
+            .expect("the surface being laid out has a root: `outer` lives in it");
+        let max_rect = self
+            .layout
+            .rect(NodePath::new(outer.surface, root))
+            .expect("the root was laid out at the top of this pass");
+        for path in [outer, c0, c1] {
+            self.compute_rect_sizes(pixels_per_point, path, max_rect);
+        }
     }
 }
 
@@ -377,9 +406,17 @@ mod tests {
         (state, outer, [a, node_b, node_c, node_d])
     }
 
-    /// Runs one real headless frame of the dock and leaves its geometry in `ctx` memory,
-    /// exactly as `DockArea::show_inside_with_response` normally would inside a real app.
+    /// Renders the dock until its geometry has settled, leaving it in `ctx` memory exactly as
+    /// `DockArea::show_inside_with_response` normally would inside a real app.
+    ///
+    /// Two frames, not one: the geometry map is written at the top of a pass, but
+    /// `show_separator` may still clamp `fraction` into `[extra/range, 1 - extra/range]`
+    /// further down that same pass (a stored fraction that squeezes a child below
+    /// `separator.extra` is corrected the first frame it is seen). After a single frame the
+    /// tree and the map can therefore be one step apart, and a test measuring the map would
+    /// be aiming at a divider the next frame is about to move.
     fn render(ctx: &Context, state: &mut DockState<u32>, style: &Style, id: Id) {
+        run_frame(ctx, state, style, id, vec![]);
         run_frame(ctx, state, style, id, vec![]);
     }
 
@@ -612,11 +649,136 @@ mod tests {
         );
     }
 
+    /// Clicks once at `at`, over several frames (press + release + settle).
+    fn click(ctx: &Context, state: &mut DockState<u32>, style: &Style, id: Id, at: Pos2) {
+        use egui::{Event, Modifiers, PointerButton};
+
+        run_frame(ctx, state, style, id, vec![Event::PointerMoved(at)]);
+        run_frame(
+            ctx,
+            state,
+            style,
+            id,
+            vec![Event::PointerButton {
+                pos: at,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            }],
+        );
+        run_frame(
+            ctx,
+            state,
+            style,
+            id,
+            vec![Event::PointerButton {
+                pos: at,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            }],
+        );
+        run_frame(ctx, state, style, id, vec![]);
+    }
+
+    /// Where the toggle button currently sits, or `None` if no cross is detected and the
+    /// button is therefore not on screen at all.
+    fn toggle_center(
+        ctx: &Context,
+        state: &mut DockState<u32>,
+        id: Id,
+        outer: NodePath,
+    ) -> Option<Pos2> {
+        let mut area = DockArea::new(state).id(id);
+        area.layout = DockLayout::load(ctx, id);
+        area.detect_cross_split(outer).map(|cross| cross.center())
+    }
+
+    /// Presses the toggle button through a real headless click and asserts that it was there
+    /// to be pressed and that it did flip the grouping — a click that lands on nothing would
+    /// otherwise let every "nothing moved" assertion below pass vacuously.
+    fn press_toggle(
+        ctx: &Context,
+        state: &mut DockState<u32>,
+        style: &Style,
+        id: Id,
+        outer: NodePath,
+    ) {
+        let was_horizontal = state[outer].is_horizontal();
+        let center = toggle_center(ctx, state, id, outer).expect("the toggle button is on screen");
+        click(ctx, state, style, id, center);
+        assert_eq!(
+            state[outer].is_horizontal(),
+            !was_horizontal,
+            "clicking the toggle did not flip the grouping"
+        );
+    }
+
+    /// Reported bug: toggle a cross to rows (one full-width divider), drag that divider down,
+    /// toggle back to columns — and only one of the two restored column dividers followed the
+    /// drag; the other snapped back to where it sat *before* the drag.
+    ///
+    /// Root cause was mid-pass staleness: `transpose_cross_split` rewrites the tree from
+    /// inside `show_separator` for the outer node, and the same loop then ran `show_separator`
+    /// for the two edited children against `layout` rectangles still describing the previous
+    /// grouping. One of those stale rectangles (the old bottom row, 321 px) was shorter than
+    /// `2 * separator.extra`, which collapses that separator's clamp interval to the single
+    /// point 0.5 — so the fraction the transposition had just written was overwritten with
+    /// "dead centre", which is exactly where the divider had been before the drag.
+    ///
+    /// The oracle is the feature's whole promise: a toggle moves no pixel.
+    #[test]
+    fn toggle_after_dragging_the_outer_divider_keeps_every_leaf_in_place() {
+        // Start as two columns, each with its own inner divider ("0 сплит горизонтальный").
+        let (mut state, outer_id, leaves) = build_cross(true, 0.5, 0.5);
+        let ctx = Context::default();
+        let id = Id::new(DOCK_ID);
+        let style = Style::default();
+        let outer = NodePath::new(SurfaceIndex::main(), outer_id);
+
+        render(&ctx, &mut state, &style, id);
+
+        // Toggle to rows: the two inner dividers become one full-width divider.
+        press_toggle(&ctx, &mut state, &style, id, outer);
+
+        // Drag that divider down, grabbing it on its left half.
+        let layout = DockLayout::load(&ctx, id);
+        let [c0, c1] = state.main_surface().children(outer_id).unwrap();
+        let c0_rect = layout
+            .rect(NodePath::new(SurfaceIndex::main(), c0))
+            .unwrap();
+        let c1_rect = layout
+            .rect(NodePath::new(SurfaceIndex::main(), c1))
+            .unwrap();
+        let at = Pos2::new(
+            c0_rect.min.x + c0_rect.width() * 0.25,
+            0.5 * (c0_rect.bottom() + c1_rect.top()),
+        );
+        drag(&ctx, &mut state, &style, id, at, at + Vec2::new(0.0, 120.0));
+
+        let dragged = leaf_rects(&DockLayout::load(&ctx, id), leaves);
+        assert!(
+            (dragged[0].height() - dragged[1].height()).abs() > 100.0,
+            "the drag did not actually move the divider, so the toggle below proves nothing"
+        );
+
+        // Toggle back to columns. Both column dividers must stay on the dragged line.
+        press_toggle(&ctx, &mut state, &style, id, outer);
+        assert_rects_close(dragged, leaf_rects(&DockLayout::load(&ctx, id), leaves));
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(128))]
 
         /// The whole point of the feature: toggling a cross split must not move a single
         /// pixel on screen, and toggling back must restore the original grouping.
+        ///
+        /// Driven through a real click on the button rather than by calling
+        /// `transpose_cross_split` directly: the edit lands in the *middle* of a separator
+        /// pass, and the rest of that pass is free to write back over what it wrote (which is
+        /// precisely how `toggle_after_dragging_the_outer_divider_keeps_every_leaf_in_place`
+        /// used to fail). Calling the surgery on a bare `DockArea` and re-rendering afterwards
+        /// skips the only frame where that can happen, so it can only prove the arithmetic.
         #[test]
         fn transpose_preserves_leaf_rects_and_round_trips(
             outer_horizontal in any::<bool>(),
@@ -632,17 +794,7 @@ mod tests {
             render(&ctx, &mut state, &style, id);
             let before = leaf_rects(&DockLayout::load(&ctx, id), leaves);
 
-            {
-                let mut area = DockArea::new(&mut state).id(id);
-                area.layout = DockLayout::load(&ctx, id);
-                let cross = area
-                    .detect_cross_split(outer)
-                    .expect("must be a perfect cross by construction");
-                area.transpose_cross_split(&cross);
-            }
-
-            // Re-render with the *same* screen: the transposed tree must reproduce it exactly.
-            render(&ctx, &mut state, &style, id);
+            press_toggle(&ctx, &mut state, &style, id, outer);
             let after = leaf_rects(&DockLayout::load(&ctx, id), leaves);
             assert_rects_close(before, after);
 
@@ -653,15 +805,7 @@ mod tests {
             );
 
             // Toggling back must restore both the original geometry and the original grouping.
-            {
-                let mut area = DockArea::new(&mut state).id(id);
-                area.layout = DockLayout::load(&ctx, id);
-                let cross2 = area
-                    .detect_cross_split(outer)
-                    .expect("still a perfect cross after one toggle");
-                area.transpose_cross_split(&cross2);
-            }
-            render(&ctx, &mut state, &style, id);
+            press_toggle(&ctx, &mut state, &style, id, outer);
             let round_tripped = leaf_rects(&DockLayout::load(&ctx, id), leaves);
             assert_rects_close(before, round_tripped);
 

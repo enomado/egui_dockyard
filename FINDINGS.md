@@ -12,6 +12,58 @@ Ordered newest first.
 
 ---
 
+## Transposing a cross split mid-pass left the separators reading the old shape, and one divider snapped back
+
+**Status upstream:** not applicable — the cross-split toggle is this fork's own feature.
+
+**Symptom.** Toggle a 2x2 cross so the two side-by-side columns become two stacked rows (the two
+inner dividers merge into one full-width divider). Drag that divider down. Toggle back to
+columns — and only *one* of the two restored column dividers is on the dragged line; the other
+sits exactly where it was **before** the drag.
+
+**Root cause.** `transpose_cross_split` runs from inside `show_separator`, i.e. in the middle of
+the pass that walks every parent node drawing separators. It rewrote three nodes (the outer split
+and both children) and left `self.layout` — the geometry map every separator reads — still
+describing the grouping it had just replaced. The loop then reached those two children and ran
+`show_separator` on them against rectangles belonging to a shape that no longer existed.
+
+That is worse than drawing in the wrong place for one frame, because `show_separator` *writes
+back*: it clamps `fraction` into `[extra/range, 1 - extra/range]` on every frame, drag or no drag,
+with `range` taken from the rectangle it just read. One of the two stale rectangles — the old
+bottom row, 321 px tall — is shorter than `2 * separator.extra` (2 × 175), and the clamp
+degrades that case by collapsing the interval to the single point `0.5`. So the fraction the
+transposition had just computed was overwritten with "dead centre", which is precisely where that
+divider had been sitting before the drag. The sibling's stale rectangle (the old top row, 562 px)
+was large enough for the clamp to be a no-op, so it kept the dragged position — hence the
+asymmetry that made the bug look like a stale-value bug rather than a geometry bug.
+
+**Fix.** Re-run the layout pass over the three edited nodes (`outer`, then both children, in that
+order — the outer writes the children's rectangles that the next two calls cut their own children
+out of) as the last step of `transpose_cross_split`, so the map is back in step with the tree
+before anything else in the pass can read it. `compute_rect_sizes` now takes `pixels_per_point`
+instead of a `&Ui`, which is all it ever used it for.
+
+**Evidence.** `cross_split::tests::toggle_after_dragging_the_outer_divider_keeps_every_leaf_in_place`
+replays the exact report through real headless frames (click, drag, click) and asserts no leaf
+rectangle moves across the second toggle; it fails on the old code.
+
+The pre-existing proptest `transpose_preserves_leaf_rects_and_round_trips` did **not** catch this,
+and that is the more useful half of the finding: it called `transpose_cross_split` directly on a
+bare `DockArea` and re-rendered afterwards, which skips the only frame in which the damage can
+happen. It could only ever prove the arithmetic. It now presses the button through a real click,
+and in that form it too fails on the old code. A test that reaches the unit under test by a path
+the product never takes is not testing the product.
+
+**Where.** `src/widgets/dock_area/show/cross_split.rs`, `src/widgets/dock_area/show/mod.rs`.
+
+**Still open.** The clamp in `show_separator` rewrites a stored `fraction` on *every* frame, not
+just while a separator is being interacted with. On a node too small to honour `separator.extra`
+that silently destroys the stored ratio (it becomes 0.5) — so shrinking a window can lose split
+positions that growing it back does not restore. Only reachable through legitimate geometry here,
+but it is the same "the clamp mutates state nobody asked it to" edge that made this bug asymmetric.
+
+---
+
 ## `Context::run_ui` output dropped unconsumed textures_delta under egui 0.36
 
 **Status upstream:** not applicable — this is our own headless test harness, not library code.

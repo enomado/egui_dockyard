@@ -34,6 +34,10 @@ pub enum DockEvent {
     /// A finalised, discrete layout mutation. Use this as the trigger for
     /// undo entries and writes to disk.
     LayoutCommitted,
+    /// A 2x2 "+"-shaped split had its row/column grouping transposed by clicking the
+    /// toggle button at the crossing point. The on-screen layout is unchanged; only
+    /// which leaves are siblings in the tree did.
+    CrossSplitTransposed,
 }
 
 impl DockEvent {

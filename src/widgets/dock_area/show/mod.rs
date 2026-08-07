@@ -17,6 +17,7 @@ use crate::{
     utils::{expand_to_pixel, fade_dock_style, map_to_pixel},
 };
 
+mod cross_split;
 mod leaf;
 mod main_surface;
 mod window_surface;
@@ -689,5 +690,10 @@ impl<Tab> DockArea<'_, Tab> {
                 }
             }
         }
+
+        // Clone out of `style` first: it may be borrowed from `self.style`, and
+        // `draw_cross_split_toggle` needs `&mut self`.
+        let separator_style = style.separator.clone();
+        self.draw_cross_split_toggle(ui, path, &separator_style);
     }
 }

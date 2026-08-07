@@ -34,6 +34,7 @@ pub struct DockArea<'tree, Tab> {
     show_window_collapse_buttons: bool,
     show_leaf_close_all_buttons: bool,
     show_leaf_collapse_buttons: bool,
+    show_cross_split_toggle: bool,
     show_secondary_button_hint: bool,
     secondary_button_modifiers: Modifiers,
     secondary_button_on_modifier: bool,
@@ -84,6 +85,7 @@ impl<'tree, Tab> DockArea<'tree, Tab> {
             show_window_collapse_buttons: true,
             show_leaf_close_all_buttons: true,
             show_leaf_collapse_buttons: true,
+            show_cross_split_toggle: true,
             show_secondary_button_hint: true,
             secondary_button_modifiers: Modifiers::SHIFT,
             secondary_button_on_modifier: true,
@@ -151,6 +153,15 @@ impl<'tree, Tab> DockArea<'tree, Tab> {
     /// By default it's all.
     pub fn allowed_splits(mut self, allowed_splits: AllowedSplits) -> Self {
         self.allowed_splits = allowed_splits;
+        self
+    }
+
+    /// Whether a small toggle button is shown at the crossing point of a "+"-shaped 2x2
+    /// split, letting the user transpose the row/column grouping without moving a pixel on
+    /// screen. See [`crate::DockEvent::CrossSplitTransposed`].
+    /// By default it's `true`.
+    pub fn show_cross_split_toggle(mut self, show_cross_split_toggle: bool) -> Self {
+        self.show_cross_split_toggle = show_cross_split_toggle;
         self
     }
 

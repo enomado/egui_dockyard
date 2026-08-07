@@ -426,9 +426,7 @@ impl<Tab> DockArea<'_, Tab> {
         if (left_collapsed || right_collapsed)
             && self.dock_state[path.surface][path.node].is_vertical()
         {
-            let rect = parent_rect;
-            debug_assert!(!rect.any_nan() && rect.is_finite());
-            let rect = expand_to_pixel(rect, pixels_per_point);
+            let rect = split_rect(parent_rect, pixels_per_point);
 
             if left_collapsed {
                 // EITHER only left collapsed OR left and right both collapsed
@@ -486,22 +484,16 @@ impl<Tab> DockArea<'_, Tab> {
             // the node while writing the geometry map would borrow `self` twice.
             if let Node::orientation(split) = &self.dock_state[path.surface][path.node] {
                 let fraction = split.fraction;
-                let rect = parent_rect;
-                debug_assert!(!rect.any_nan() && rect.is_finite());
-                let rect = expand_to_pixel(rect, pixels_per_point);
+                let rect = split_rect(parent_rect, pixels_per_point);
 
-                let dim_size = rect.dim_size();
                 // The children are cut at where the boundary *is*, which is the stored ratio
                 // pushed into the band this frame's geometry can honour — see `SeparatorBand`.
                 // Clamping here, rather than writing the clamped number back into the tree,
                 // is what lets a node with no room for the margin keep the ratio it will get
                 // back as soon as there is room again.
-                let midpoint = if dim_size > 0.0 {
-                    let band = SeparatorBand::new(fraction, dim_size, style.separator.extra);
-                    rect.min.dim_point + dim_size * band.effective
-                } else {
-                    rect.min.dim_point
-                };
+                let dim_size = rect.dim_size();
+                let band = SeparatorBand::new(fraction, dim_size, style.separator.extra);
+                let midpoint = band.midpoint(rect.min.dim_point, dim_size);
 
                 let left_separator_border = map_to_pixel(
                     midpoint - style.separator.width * 0.5,
@@ -559,18 +551,21 @@ impl<Tab> DockArea<'_, Tab> {
                 [Vertical]    [y]        [height];
             ]
             if let Node::orientation(split) = &mut self.dock_state[path.surface][path.node] {
-                let rect = node_rect;
+                // The same rectangle `compute_rect_sizes` cut the children out of, derived the
+                // same way — see `split_rect`, which is why that is a function and not two
+                // lines inlined twice.
+                let rect = split_rect(node_rect, pixels_per_point);
                 let mut separator = rect;
 
                 // Where the boundary is *this frame*, which is not necessarily the number the
                 // tree stores: a ratio the current geometry cannot honour is shown inside the
                 // band without being written back — see `SeparatorBand`. Everything below reads
-                // `band.effective`, so the separator that is drawn, the rectangle it is grabbed
-                // by and the cut `compute_rect_sizes` made all name the same line.
+                // the band, so the separator that is drawn, the rectangle it is grabbed by and
+                // the cut `compute_rect_sizes` made all name the same line.
                 let range = rect.dim_size();
                 let band = SeparatorBand::new(split.fraction, range, style.separator.extra);
 
-                let midpoint = rect.min.dim_point + range * band.effective;
+                let midpoint = band.midpoint(rect.min.dim_point, range);
                 separator.min.dim_point = midpoint - style.separator.width * 0.5;
                 separator.max.dim_point = midpoint + style.separator.width * 0.5;
 
@@ -611,7 +606,9 @@ impl<Tab> DockArea<'_, Tab> {
                     None
                 };
 
-                let midpoint = rect.min.dim_point + range * band.effective;
+                // Same `midpoint` as above — the fraction cannot have moved in between, since
+                // nothing writes it until the gesture block further down. Recomputed here for
+                // years, which is how the two derivations of it drifted apart in the first place.
                 separator.min.dim_point = map_to_pixel(
                     midpoint - style.separator.width * 0.5,
                     pixels_per_point,
@@ -717,6 +714,23 @@ impl<Tab> DockArea<'_, Tab> {
     }
 }
 
+/// The rectangle a split's children are cut out of, snapped out to whole pixels.
+///
+/// A function, and called by both halves, because they have to name the *same* rectangle:
+/// [`DockArea::compute_rect_sizes`] cuts the two children out of it, and
+/// [`DockArea::show_separator`] draws the divider between them against it, hit-tests it there
+/// and moves it from there. They used to derive it separately — the layout pass snapped, the
+/// separator did not — so the divider was measured against a slightly different node than the
+/// children were: a boundary up to `2 / pixels_per_point` px off the gap it is supposed to sit
+/// in, and a [`SeparatorBand`] computed from a different `range` on top of that. Sub-pixel in
+/// every scene we could reach (measured: 0.08 px at `ppp = 1.3`, against 0.17 px of the
+/// pixel-rounding both sides share anyway), which is exactly why it would have been found by
+/// someone looking at the code rather than at the screen.
+fn split_rect(node_rect: Rect, pixels_per_point: f32) -> Rect {
+    debug_assert!(!node_rect.any_nan() && node_rect.is_finite());
+    expand_to_pixel(node_rect, pixels_per_point)
+}
+
 /// The band a split's boundary may occupy this frame, and where the stored ratio sits inside it.
 ///
 /// [`SeparatorStyle::extra`](crate::SeparatorStyle::extra) is a margin in *pixels* that each
@@ -772,6 +786,20 @@ impl SeparatorBand {
             min,
             max,
             effective: fraction.clamp(min, max),
+        }
+    }
+
+    /// Where the boundary falls along the split axis, given the node's near edge and its extent
+    /// along that axis — the same `range` this band was built from.
+    ///
+    /// A node with no extent has no boundary: it is its own edge. That case is here rather than
+    /// at the call sites because it is the only place both of them would have had to remember
+    /// it, and one of them already got it wrong by omission once.
+    fn midpoint(&self, min: f32, range: f32) -> f32 {
+        if range > 0.0 {
+            min + range * self.effective
+        } else {
+            min
         }
     }
 }

@@ -12,6 +12,87 @@ Ordered newest first.
 
 ---
 
+## A "+" between a two-part row and a three-part row was not offered a toggle, because the detector read the tree instead of the picture
+
+**Status upstream:** not applicable — the cross-split toggle is this fork's own feature.
+
+**Symptom.** Two rows across the dock, the upper one cut into 2 panels and the lower into 3, with
+one divider of each on the same line. On screen that is a plain "+": a vertical line running the
+full height of both rows, crossing the line between them. No toggle button appeared on it. Build
+the identical picture by making the splits in a different order and the button *was* there — and
+in a layout where it appeared at all, it appeared at only one of the crossings.
+
+**Root cause.** `detect_cross_split` looked exactly one level down each side:
+
+```rust
+let (a, b) = self.split_pair(c0, inner_horizontal)?;   // c0's two children
+let (c, d) = self.split_pair(c1, inner_horizontal)?;   // c1's two children
+```
+
+and compared the single divider between `a`/`b` with the single divider between `c`/`d`. But a
+row of `n` panels is not one split — it is a chain of `n - 1` of them, and only one of those is
+the child of the row's root. Which one is decided by the order the user happened to make the
+splits in: the same three columns are `H(H(C, D), E)` or `H(C, H(D, E))`, drawing the same
+pixels either way. So of the `(n - 1) x (m - 1)` pairs of dividers that could line up, the
+detector examined exactly **one**, chosen by history rather than by geometry.
+
+Two consequences, both reported as one bug: a crossing that is plainly on screen may not be
+offered at all, and where one *is* offered it looks arbitrary — "the crossing only exists between
+the last two".
+
+The surgery had the matching hole. `Tree::regroup_2x2` moved four grandchildren between two
+parents; a crossing inside a longer chain needs that chain **re-associated** so the crossed
+divider ends up at the root of each side, which is a different operation altogether.
+
+**Fix.** State the law on a flattened row instead of on the tree.
+
+* `Band` — one side of a split with its chain of same-orientation splits flattened: the parts in
+  screen order, the splits between them, and the boundaries along the axis. Derived, not stored:
+  the tree stays binary, so no persisted layout changes.
+* The law becomes one line — *a crossing is a position both bands have a boundary at* — with
+  neither `n`, nor `m`, nor depth in it. Two ascending boundary lists, one merge walk.
+* Every crossing on a line gets its own button; pressing one cuts the whole of `outer` by that
+  line and stacks what each band had on either side of it. The 2x2 is that with every chain of
+  length one.
+* `Tree::regroup_2x2` is replaced by `Tree::regroup`, which writes an arbitrary `Regroup` shape
+  over a subtree out of the split nodes already in it — a chain taken apart and re-nested needs
+  exactly as many splits as it had, so nothing is allocated or freed, and the check that the
+  shape "may not invent, drop or duplicate" what it was given carries over unchanged.
+* Fractions come from the band's boundaries rather than from the parts' sizes, so a rebuilt chain
+  reproduces the boundaries that are on screen with no separator width to fold in or out.
+
+One precondition came out of the fix and is now enforced: `separator.extra` is a floor on how
+close a boundary may sit to either end of the interval it is cut from, so a part thinner than the
+margin cannot be put back where it was after a re-cut, and the picture would jump. A band with
+such a part is refused (`Band::parts_can_be_renested`) — no button rather than one that moves
+things. It is rarely reached, since the same clamp is what produced those parts, and only lets
+one out below the margin on an interval shorter than twice it.
+
+**Evidence.** `cross_split::tests::detects_a_cross_where_a_band_has_three_columns` is the reported
+scene; it fails on the old code. Three more name the class rather than the case:
+
+* `the_nesting_of_a_band_does_not_change_which_crossings_exist` — one picture built four ways
+  (both chains leaning either way) must offer the same buttons at the same points. This is the
+  bug's actual shape, and the old detector disagreed with itself across those four.
+* `the_crossings_on_a_line_are_the_cuts_both_bands_share` — a property test over bands of any
+  length and nesting, whose oracle is the *masks the scene was built from*: a count that knows
+  nothing about trees or bands. Pressing any crossing must move no pixel and must round-trip.
+* `a_cross_whose_parts_are_thinner_than_the_margin_is_not_offered` — the precondition, built
+  twice with the margin as the only difference, so "no button" cannot be the answer for a scene
+  that never had a crossing.
+
+The DST harness carried the same one-level rule in its own restatement of the detection, so it
+would have kept aiming at the old set of buttons: `Sim::cross_toggles` is now the band law, and
+`Step::BuildCross` grew a `deep` variant that builds the reported shape — a shared divider that
+is *not* the root of its chain. `CrossWatch::in_a_long_band` counts presses that crossed a band
+of more than two parts, and the sweep asserts it is non-zero: without it, "a cross was offered"
+is satisfied entirely by 2x2s, which is the one shape the old rule got right.
+
+**Where.** `src/widgets/dock_area/show/cross_split.rs`, `src/core/tree/regroup.rs`,
+`tests/dst.rs`.
+
+---
+
 ## The clamp that keeps a panel on screen was applied to the saved ratio, so resizing a window edited the layout
 
 **Status upstream:** not submitted.

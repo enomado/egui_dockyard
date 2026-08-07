@@ -34,6 +34,9 @@ pub mod persist;
 /// Read-only structural oracle: are a tree's invariants intact?
 pub mod validate;
 
+/// Rewriting the shape of a subtree out of the nodes it already has.
+pub(crate) mod regroup;
+
 use std::{
     cmp::max,
     collections::VecDeque,
@@ -927,93 +930,6 @@ impl<Tab> Tree<Tab> {
         let count = self.root_node().map_or(0, Node::collapsed_leaf_count);
         self.set_collapsed(collapsed);
         self.set_collapsed_leaf_count(count);
-    }
-
-    /// Rewrites a 2x2 — a split whose own two children are splits — to a different grouping of
-    /// the *same* four grandchildren.
-    ///
-    /// `outer_node`, `first_node` and `second_node` replace `outer` and its two children in
-    /// place. Between them they must name exactly the four grandchildren that were there
-    /// before, and that is the whole point of the operation: the same nodes end up under
-    /// different parents, so every id, tab, focus and collapsed flag below the rewrite survives
-    /// it untouched. Only the shape above them changes.
-    ///
-    /// This exists because the three writes are *not* the whole edit, and doing them through
-    /// `self[id] = node` looks like they are. A split owns two things beyond its children —
-    /// each child's back-pointer to it, and the collapsing bookkeeping of the subtree — and
-    /// neither is stored in the `Node` being assigned. Moving a grandchild between the two
-    /// inner splits by assignment alone leaves it pointing at the parent it no longer belongs
-    /// to: `validate` calls that `ParentLinkBroken`, and the first `split` or `remove_leaf` to
-    /// walk up from that node panics on "a child is known to its parent".
-    ///
-    /// # Panics
-    ///
-    /// If `outer` is not a split of two splits, or if the three replacement nodes do not name
-    /// the same four grandchildren the tree has now.
-    pub(crate) fn regroup_2x2(
-        &mut self,
-        outer: NodeId,
-        outer_node: Node<Tab>,
-        first_node: Node<Tab>,
-        second_node: Node<Tab>,
-    ) {
-        let [first, second] = self
-            .children(outer)
-            .expect("regroup_2x2 on a node that is not a split");
-        let before = [
-            self.children(first)
-                .expect("regroup_2x2 on a split whose first child is not a split"),
-            self.children(second)
-                .expect("regroup_2x2 on a split whose second child is not a split"),
-        ];
-
-        let after = [
-            first_node
-                .get_split()
-                .expect("the replacement for an inner split is a split")
-                .children(),
-            second_node
-                .get_split()
-                .expect("the replacement for an inner split is a split")
-                .children(),
-        ];
-        assert_eq!(
-            outer_node
-                .get_split()
-                .expect("the replacement for the outer split is a split")
-                .children(),
-            [first, second],
-            "regroup_2x2 keeps the two inner splits where they are; only what hangs off them moves"
-        );
-        let sorted = |mut ids: [NodeId; 4]| {
-            ids.sort_unstable();
-            ids
-        };
-        let flatten = |[[a, b], [c, d]]: [[NodeId; 2]; 2]| [a, b, c, d];
-        assert_eq!(
-            sorted(flatten(before)),
-            sorted(flatten(after)),
-            "regroup_2x2 regroups the grandchildren it was given; it may not invent, drop or \
-             duplicate one"
-        );
-
-        self[outer] = outer_node;
-        self[first] = first_node;
-        self[second] = second_node;
-
-        // The back-pointers, which the assignments above cannot carry: two of the four
-        // grandchildren have just changed parent.
-        for (parent, children) in [(first, after[0]), (second, after[1])] {
-            for child in children {
-                self.nodes.get_mut(child).unwrap().parent = Some(parent);
-            }
-        }
-
-        // And the collapsing bookkeeping, which a freshly built `SplitNode` starts empty: the
-        // two inner splits first, then `outer` and everything above it.
-        self.update_split_collapsed(first);
-        self.update_split_collapsed(second);
-        self.node_update_collapsed(first);
     }
 
     /// Updates the collapsed state of the node's ancestors, and of the tree itself.

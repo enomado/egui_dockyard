@@ -121,7 +121,7 @@ enum Step {
     GrabSeparator { node: usize },
     /// Double-click a separator, which centres it.
     CentreSeparator { node: usize },
-    /// Build a 2x2 cross around a leaf, through the model — scaffolding for the step below.
+    /// Build a cross around a leaf, through the model — scaffolding for the step below.
     ///
     /// Not something [`Step::Split`] can be asked for: a cross needs two opposite-orientation
     /// splits whose inner dividers land on the same line, which takes three splits in a
@@ -129,7 +129,13 @@ enum Step {
     /// until the first has run. Measured before it was written: across 48 seeds of 24 steps,
     /// the generator produced exactly zero crosses by chance, so the toggle below had nothing
     /// to press and every assertion about it was vacuous.
-    BuildCross { leaf: usize },
+    ///
+    /// `deep` builds the *reported* shape instead of a bare 2x2: one side gets a third part, cut
+    /// so that the shared divider is no longer the one at the root of that side's chain. The
+    /// picture is the same kind of "+", and for as long as the crate compared root dividers it
+    /// was the picture the crate could not see. A sweep that can only build 2x2s cannot tell
+    /// that regression from a working detector.
+    BuildCross { leaf: usize, deep: bool },
     /// Press the toggle the dock offers where two perpendicular dividers cross, which swaps
     /// the grouping of a 2x2 (rows-of-columns <-> columns-of-rows) in place.
     ///
@@ -367,6 +373,14 @@ struct CrossWatch {
     offered: usize,
     /// ...of which actually flipped the grouping.
     flipped: usize,
+    /// ...of which crossed a band of more than two parts, i.e. exercised the chain being taken
+    /// apart and re-nested rather than four rectangles changing parents.
+    ///
+    /// Counted separately because "a cross was offered" is satisfied entirely by 2x2s, and a
+    /// 2x2 is the one shape the detector got right even when it read the tree instead of the
+    /// picture. Without this number the sweep would report full coverage of a law it never
+    /// reached.
+    in_a_long_band: usize,
 }
 
 /// What a step actually did to the dock — measured after the fact, not assumed from its name.
@@ -851,17 +865,21 @@ impl Sim {
     /// function, and a harness that could only aim at what the crate handed it would be unable
     /// to notice the crate offering a button where it should not.
     ///
-    /// It is a restatement of `DockArea::detect_cross_split`, tolerance and all, and the two can
-    /// drift apart. That is not left to chance: a point derived here that the crate does not
-    /// answer to produces a press that flips nothing, and the sweep asserts that presses did
-    /// flip things. Drift shows up as a named failure rather than as a quietly idle step.
+    /// It is a restatement of `DockArea::detect_crossings`, tolerance and margin and all, and
+    /// the two can drift apart. That is not left to chance: a point derived here that the crate
+    /// does not answer to produces a press that flips nothing, and the sweep asserts that
+    /// presses did flip things. Drift shows up as a named failure rather than as a quietly idle
+    /// step.
     ///
-    /// A split qualifies when both its children are splits of the *opposite* orientation and
-    /// their two inner dividers are collinear within a pixel — that is what makes the four
-    /// rectangles a "+" rather than a staggered "L", and only a "+" has one point to pivot
-    /// around.
-    fn cross_toggles(&self) -> Vec<(NodePath, Pos2)> {
-        /// Same number as `CrossSplit::TOLERANCE` in the crate. Deliberately not looser: a
+    /// The law: flatten each child into a **band** — its chain of same-orientation splits, an
+    /// ordered list of parts with the boundaries between them — and a toggle sits wherever the
+    /// two bands have a boundary at the same place. Stated on the bands rather than on the tree
+    /// because the tree can hold one picture several ways: which divider of a three-part band is
+    /// the "root" one is decided by the order the splits were made in, not by anything on
+    /// screen, and a rule that looks one level down therefore answers differently for the same
+    /// pixels.
+    fn cross_toggles(&self) -> Vec<(NodePath, Pos2, usize)> {
+        /// Same number as `Crossings::TOLERANCE` in the crate. Deliberately not looser: a
         /// harness that accepted near-misses the crate rejects would press empty pixels.
         const TOLERANCE: f32 = 1.0;
 
@@ -871,62 +889,112 @@ impl Sim {
             .filter_map(|(path, node)| {
                 node.get_split()?;
                 let outer_horizontal = matches!(node, Node::Horizontal(_));
+                let inner_horizontal = !outer_horizontal;
                 let at = |id: NodeId| NodePath::new(path.surface, id);
 
                 let [c0, c1] = self.state[path.surface].children(path.node)?;
-                // The children must both split the other way; anything else is not a 2x2 at all.
-                let inner_matches = |child: NodeId| {
-                    if outer_horizontal {
-                        matches!(self.state[at(child)], Node::Vertical(_))
-                    } else {
-                        matches!(self.state[at(child)], Node::Horizontal(_))
-                    }
-                };
-                if !inner_matches(c0) || !inner_matches(c1) {
-                    return None;
-                }
+                let band0 = self.band(path.surface, c0, inner_horizontal, &layout)?;
+                let band1 = self.band(path.surface, c1, inner_horizontal, &layout)?;
 
-                let [a, b] = self.state[path.surface].children(c0)?;
-                let [c, d] = self.state[path.surface].children(c1)?;
                 let rect = |id: NodeId| layout.get(at(id)).map(|geometry| geometry.rect);
-                let (a_rect, b_rect) = (rect(a)?, rect(b)?);
-                let (c_rect, d_rect) = (rect(c)?, rect(d)?);
                 let (c0_rect, c1_rect) = (rect(c0)?, rect(c1)?);
-                for r in [a_rect, b_rect, c_rect, d_rect] {
-                    if r.width() <= 0.0 || r.height() <= 0.0 {
-                        return None;
-                    }
-                }
-
-                // The inner dividers run across `outer`'s own axis, so they are measured along
-                // the perpendicular one.
-                let inner_pos_of = |first: Rect, second: Rect| {
-                    if outer_horizontal {
-                        (first.max.y + second.min.y) * 0.5
-                    } else {
-                        (first.max.x + second.min.x) * 0.5
-                    }
-                };
-                let pos0 = inner_pos_of(a_rect, b_rect);
-                let pos1 = inner_pos_of(c_rect, d_rect);
-                if (pos0 - pos1).abs() > TOLERANCE {
-                    return None;
-                }
-                let inner = (pos0 + pos1) * 0.5;
-
                 let outer = if outer_horizontal {
                     (c0_rect.max.x + c1_rect.min.x) * 0.5
                 } else {
                     (c0_rect.max.y + c1_rect.min.y) * 0.5
                 };
-                let point = if outer_horizontal {
-                    Pos2::new(outer, inner)
-                } else {
-                    Pos2::new(inner, outer)
-                };
-                Some((path, point))
+
+                // Both boundary lists ascend, so one merge walk pairs them up and cannot hand
+                // one boundary two partners.
+                let (first, second) = (&band0[1..band0.len() - 1], &band1[1..band1.len() - 1]);
+                let (mut i, mut j) = (0, 0);
+                let mut points = Vec::new();
+                while i < first.len() && j < second.len() {
+                    let gap = first[i] - second[j];
+                    if gap.abs() <= TOLERANCE {
+                        let inner = (first[i] + second[j]) * 0.5;
+                        points.push((
+                            path,
+                            if outer_horizontal {
+                                Pos2::new(outer, inner)
+                            } else {
+                                Pos2::new(inner, outer)
+                            },
+                            // How long the longer of the two bands is, so the sweep can tell a
+                            // plain 2x2 from a crossing that needs a chain rebuilt.
+                            (band0.len() - 1).max(band1.len() - 1),
+                        ));
+                        i += 1;
+                        j += 1;
+                    } else if gap < 0.0 {
+                        i += 1;
+                    } else {
+                        j += 1;
+                    }
+                }
+                Some(points)
             })
+            .flatten()
             .collect()
+    }
+
+    /// The band one side of a split flattens into: the boundaries along its own axis, outer
+    /// edges included, ascending. `None` if the crate would not offer a toggle on it at all.
+    ///
+    /// The harness's own flattening — see [`Sim::cross_toggles`] for why it is restated rather
+    /// than asked for.
+    fn band(
+        &self,
+        surface: SurfaceIndex,
+        root: NodeId,
+        horizontal: bool,
+        layout: &DockLayout,
+    ) -> Option<Vec<f32>> {
+        // In-order, so the parts come out in screen order: everything under a chain node's
+        // first child lies before its own boundary.
+        fn parts_of<T>(tree: &Tree<T>, node: NodeId, horizontal: bool, out: &mut Vec<NodeId>) {
+            let in_chain = match &tree[node] {
+                Node::Horizontal(_) => horizontal,
+                Node::Vertical(_) => !horizontal,
+                _ => false,
+            };
+            let Some([first, second]) = (if in_chain { tree.children(node) } else { None }) else {
+                out.push(node);
+                return;
+            };
+            parts_of(tree, first, horizontal, out);
+            parts_of(tree, second, horizontal, out);
+        }
+
+        let mut parts = Vec::new();
+        parts_of(&self.state[surface], root, horizontal, &mut parts);
+
+        let rects: Vec<Rect> = parts
+            .iter()
+            .map(|id| layout.get(NodePath::new(surface, *id)).map(|g| g.rect))
+            .collect::<Option<_>>()?;
+        if rects.iter().any(|r| r.width() <= 0.0 || r.height() <= 0.0) {
+            return None;
+        }
+
+        let lo = |r: Rect| if horizontal { r.min.x } else { r.min.y };
+        let hi = |r: Rect| if horizontal { r.max.x } else { r.max.y };
+        let mut bounds = vec![lo(rects[0])];
+        for pair in rects.windows(2) {
+            bounds.push((hi(pair[0]) + lo(pair[1])) * 0.5);
+        }
+        bounds.push(hi(*rects.last().unwrap()));
+
+        // The crate refuses a band it could not re-cut without a boundary moving: the separator
+        // margin is a floor on how close a boundary may come to either end of the interval it
+        // is cut from, so a part thinner than the margin cannot be put back where it was.
+        if bounds
+            .windows(2)
+            .any(|pair| pair[1] - pair[0] < self.style.separator.extra)
+        {
+            return None;
+        }
+        Some(bounds)
     }
 
     /// Whether a cross-split toggle button covers `point`.
@@ -945,7 +1013,7 @@ impl Sim {
             (self.style.separator.width + self.style.separator.extra_interact_width).max(14.0);
         self.cross_toggles()
             .into_iter()
-            .any(|(_, at)| Rect::from_center_size(at, Vec2::splat(side)).contains(point))
+            .any(|(_, at, _)| Rect::from_center_size(at, Vec2::splat(side)).contains(point))
     }
 
     /// Runs quiet frames until the geometry stops moving; `false` if it never did.
@@ -1412,14 +1480,14 @@ impl Sim {
                 Vec::new()
             }
 
-            Step::BuildCross { leaf } => {
+            Step::BuildCross { leaf, deep } => {
                 let target = leaves[leaf % leaves.len()];
                 // All three at 0.5: the two halves of the outer split span the full height, so
                 // splitting each at the same fraction puts their dividers on one line — a "+"
                 // by construction rather than by luck.
                 let (t1, t2, t3) = (self.fresh_tab(), self.fresh_tab(), self.fresh_tab());
                 let [_, right] = self.state.split(target, Split::Right, 0.5, Node::leaf(t1));
-                self.state.split(target, Split::Below, 0.5, Node::leaf(t2));
+                let [_, below] = self.state.split(target, Split::Below, 0.5, Node::leaf(t2));
                 self.state.split(
                     NodePath::new(target.surface, right),
                     Split::Below,
@@ -1427,6 +1495,56 @@ impl Sim {
                     Node::leaf(t3),
                 );
                 self.run_frame(vec![]);
+
+                if deep {
+                    // The line the two halves share, before anything moves it.
+                    let layout = self.layout();
+                    let rect = |id: NodeId| {
+                        layout
+                            .get(NodePath::new(target.surface, id))
+                            .expect("the cross was laid out")
+                            .rect
+                    };
+                    let line = (rect(target.node).max.y + rect(below).min.y) * 0.5;
+
+                    // A third part on the left, added *above* its chain rather than inside a
+                    // part: splitting the chain node itself puts a fresh divider at the root and
+                    // pushes the shared one a level down, which is the whole point. It is also
+                    // why the shared one then has to be put back — it now lives in a shorter
+                    // interval, so the fraction that used to mean "halfway down the half" no
+                    // longer lands on the same pixel. The number that does is read off the
+                    // divider it has to meet.
+                    let chain = self.state[target.surface]
+                        .parent(target.node)
+                        .expect("the left half of a cross is a split");
+                    let chain_path = NodePath::new(target.surface, chain);
+                    let t4 = self.fresh_tab();
+                    self.state
+                        .split(chain_path, Split::Below, 0.75, Node::leaf(t4));
+                    self.run_frame(vec![]);
+
+                    let shrunk = self
+                        .layout()
+                        .get(chain_path)
+                        .expect("the deepened cross was laid out")
+                        .rect;
+                    let fraction = (line - shrunk.min.y) / shrunk.height();
+                    // Only if the line is still reachable from inside the shorter interval.
+                    // A leaf in a small floating window leaves no room for it, and a step that
+                    // wrote the number anyway would hand the sweep a tree the crate would never
+                    // produce — which is what happened: `validate` reported a fraction of 1.003
+                    // and a child with no room, from the scaffolding rather than from the dock.
+                    // Skipping leaves a three-part band whose dividers simply do not line up,
+                    // and the toggle is not offered there. That is a scene, not a failure.
+                    let margin = self.style.separator.extra / shrunk.height();
+                    if (margin..=1.0 - margin).contains(&fraction) {
+                        self.state[chain_path]
+                            .get_split_mut()
+                            .expect("a chain node is a split")
+                            .fraction = fraction;
+                    }
+                    self.run_frame(vec![]);
+                }
                 vec![target]
             }
 
@@ -1443,7 +1561,7 @@ impl Sim {
                 if crosses.is_empty() {
                     return None;
                 }
-                let (path, at) = crosses[cross % crosses.len()];
+                let (path, at, parts) = crosses[cross % crosses.len()];
                 // Only the window guard here: `toggle_over` is what the *separator* steps use to
                 // stay off this button, and `at` is the button, so applying it here would make
                 // the step refuse itself. It did, silently, for a whole run — every press was
@@ -1456,6 +1574,9 @@ impl Sim {
                 let rects_before = self.leaf_rects();
                 let focus_before = self.focus_trace();
                 self.cross.offered += 1;
+                if parts > 2 {
+                    self.cross.in_a_long_band += 1;
+                }
                 // A transposition rewrites the fractions of all three splits of the cross by
                 // construction — that is what regrouping the same four rectangles takes.
                 boundaries = BoundaryRule::Any;
@@ -1793,7 +1914,10 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
             14..=15 => Step::ToggleCrossSplit {
                 cross: rng.below(4),
             },
-            16 => Step::BuildCross { leaf: rng.below(8) },
+            16 => Step::BuildCross {
+                leaf: rng.below(8),
+                deep: rng.below(2) == 1,
+            },
             _ => Step::Idle,
         });
     }
@@ -2860,13 +2984,19 @@ fn dbg_moved_leaf() {
                 to: 6,
                 aim: Aim::Window,
             },
-            Step::BuildCross { leaf: 0 },
-            Step::BuildCross { leaf: 0 },
+            Step::BuildCross {
+                leaf: 0,
+                deep: false,
+            },
+            Step::BuildCross {
+                leaf: 0,
+                deep: false,
+            },
         ] {
             sim.apply(step);
         }
         let crosses = sim.cross_toggles();
-        let (_path, at) = crosses[0];
+        let (_path, at, _parts) = crosses[0];
         let before = sim.leaf_rects();
         if idle_only {
             for _ in 0..4 {
@@ -2943,6 +3073,7 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         separator.centrings += outcome.separator.centrings;
         cross.offered += outcome.cross.offered;
         cross.flipped += outcome.cross.flipped;
+        cross.in_a_long_band += outcome.cross.in_a_long_band;
 
         if let Some(failure) = outcome.failure {
             let minimal = quietly(|| shrink(&steps, &|candidate| run(candidate).failure.is_some()));
@@ -2981,6 +3112,14 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
          this harness (`Sim::cross_toggles`) from the same rule the crate uses; presses that \
          land on nothing mean the two have drifted apart, and the sweep has been pressing empty \
          pixels while staying green",
+        cross.offered
+    );
+    assert!(
+        cross.in_a_long_band > 0,
+        "all {} cross toggles pressed across {SEEDS} seeds sat between two two-part bands. A 2x2 \
+         is the one shape the crate got right while it read the tree instead of the picture, so \
+         a sweep that only ever presses those says nothing about the law it was rewritten for — \
+         and nothing about a chain being taken apart and re-nested",
         cross.offered
     );
 

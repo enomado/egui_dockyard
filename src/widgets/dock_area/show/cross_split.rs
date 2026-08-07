@@ -307,7 +307,7 @@ impl<Tab> DockArea<'_, Tab> {
 
 #[cfg(test)]
 mod tests {
-    use egui::{CentralPanel, Context, Id, RawInput, Ui, Vec2, WidgetText};
+    use egui::{CentralPanel, Context, Id, Pos2, RawInput, Ui, Vec2, WidgetText};
     use proptest::prelude::*;
 
     use super::*;
@@ -380,8 +380,20 @@ mod tests {
     /// Runs one real headless frame of the dock and leaves its geometry in `ctx` memory,
     /// exactly as `DockArea::show_inside_with_response` normally would inside a real app.
     fn render(ctx: &Context, state: &mut DockState<u32>, style: &Style, id: Id) {
+        run_frame(ctx, state, style, id, vec![]);
+    }
+
+    /// Runs one real headless frame with the given input `events` fed to it.
+    fn run_frame(
+        ctx: &Context,
+        state: &mut DockState<u32>,
+        style: &Style,
+        id: Id,
+        events: Vec<egui::Event>,
+    ) {
         let input = RawInput {
             screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, SCREEN)),
+            events,
             ..Default::default()
         };
         let mut output = ctx.run_ui(input, |ctx| {
@@ -394,6 +406,63 @@ mod tests {
         });
         // Headless harness, no GPU backend to hand the delta to.
         output.textures_delta.clear();
+    }
+
+    /// Drags from `from` to `to` over several frames, the way a hand would — egui only calls
+    /// a press a *drag* once the pointer has travelled past a threshold.
+    fn drag(
+        ctx: &Context,
+        state: &mut DockState<u32>,
+        style: &Style,
+        id: Id,
+        from: Pos2,
+        to: Pos2,
+    ) {
+        use egui::{Event, Modifiers, PointerButton};
+
+        run_frame(ctx, state, style, id, vec![Event::PointerMoved(from)]);
+        run_frame(
+            ctx,
+            state,
+            style,
+            id,
+            vec![Event::PointerButton {
+                pos: from,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            }],
+        );
+        for step in 1..=4u8 {
+            let t = f32::from(step) / 4.0;
+            run_frame(
+                ctx,
+                state,
+                style,
+                id,
+                vec![Event::PointerMoved(from + (to - from) * t)],
+            );
+        }
+        run_frame(
+            ctx,
+            state,
+            style,
+            id,
+            vec![Event::PointerButton {
+                pos: to,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            }],
+        );
+        run_frame(ctx, state, style, id, vec![Event::PointerMoved(to)]);
+    }
+
+    fn fraction_of(state: &DockState<u32>, id: NodeId) -> f32 {
+        state[NodePath::new(SurfaceIndex::main(), id)]
+            .get_split()
+            .expect("node is a split")
+            .fraction
     }
 
     fn leaf_rects(layout: &DockLayout, leaves: [NodeId; 4]) -> [Rect; 4] {
@@ -501,6 +570,45 @@ mod tests {
         assert!(
             area.detect_cross_split(NodePath::new(SurfaceIndex::main(), outer))
                 .is_none()
+        );
+    }
+
+    /// Reported bug: with the cross toggle button present, dragging one inner separator
+    /// (say `c0`'s, between `a`/`b`) was observed to also drag the *other* inner separator
+    /// (`c1`'s, between `c`/`d`) — the two moved together, and hover flickered.
+    #[test]
+    fn dragging_one_inner_separator_does_not_move_the_other() {
+        let (mut state, _outer, [a, b, c, _d]) = build_cross(true, 0.5, 0.5);
+        let ctx = Context::default();
+        let id = Id::new(DOCK_ID);
+        let style = Style::default();
+
+        render(&ctx, &mut state, &style, id);
+        let layout = DockLayout::load(&ctx, id);
+        let a_rect = layout.rect(NodePath::new(SurfaceIndex::main(), a)).unwrap();
+        let b_rect = layout.rect(NodePath::new(SurfaceIndex::main(), b)).unwrap();
+
+        // The midpoint of `c0`'s own divider (between `a` and `b`).
+        let at = Pos2::new(a_rect.center().x, 0.5 * (a_rect.bottom() + b_rect.top()));
+        let to = at + Vec2::new(0.0, 60.0);
+
+        let c0 = state.main_surface().parent(a).unwrap();
+        let c1 = state.main_surface().parent(c).unwrap();
+        let c0_before = fraction_of(&state, c0);
+        let c1_before = fraction_of(&state, c1);
+
+        drag(&ctx, &mut state, &style, id, at, to);
+
+        let c0_after = fraction_of(&state, c0);
+        let c1_after = fraction_of(&state, c1);
+
+        assert_ne!(
+            c0_before, c0_after,
+            "the dragged separator itself did not move"
+        );
+        assert_eq!(
+            c1_before, c1_after,
+            "dragging c0's inner separator must not move c1's"
         );
     }
 

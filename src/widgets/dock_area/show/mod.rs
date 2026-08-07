@@ -557,7 +557,8 @@ impl<Tab> DockArea<'_, Tab> {
                 expand.dim_point += style.separator.extra_interact_width / 2.0;
                 let interact_rect = separator.expand2(expand);
 
-                let response = ui.allocate_rect(interact_rect, Sense::click_and_drag())
+                let resize_id = ui.id().with((path.node, "separator"));
+                let response = ui.interact(interact_rect, resize_id, Sense::click_and_drag())
                     .on_hover_and_drag_cursor(paste!{ CursorIcon::[<Resize orientation>]});
 
                 let should_respond_to_arrow_keys = ui.input(|i| i.modifiers.command || i.modifiers.shift);

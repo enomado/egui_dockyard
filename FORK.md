@@ -105,3 +105,37 @@ cargo fuzz run -s none tree_persist fuzz/corpus/tree_persist fuzz/seeds/tree_per
 
 Details, the reasoning behind the seed corpus, and the list of what has been found so far are
 in [fuzz/README.md](fuzz/README.md).
+
+## Backlog
+
+Loose ends noticed while working, each with why it is worth touching. Not a plan — a list of
+things a later session should not have to rediscover.
+
+**A fraction derived from pixels can land outside the clamp band, and is drawn moved.**
+`separator.extra` floors how close a boundary may sit to either end of the interval it is cut
+from. Anything that computes a fraction from measured geometry and writes it is therefore making
+a claim the renderer may not honour — silently, since the clamp is applied at draw time and not
+written back. The cross-split path now checks this up front (`Band::parts_can_be_renested`) and
+declines rather than jump, but the check was written for that path only; the same shape of write
+exists elsewhere (`Step::BuildCross` in the DST hit it immediately, from the scaffolding side).
+Worth a sweep for "computes a fraction, writes it, does not ask whether the interval can hold it".
+
+**A transposition re-nests both chains, so a `NodeId` can change which divider it names.**
+`rebuild_chain` builds right-leaning out of a pool of the splits it took apart, and the pool is
+consumed in build order — so outside the 2x2 case, the node that was a divider between two
+columns may come back as the split between the two halves. Nothing in the crate holds a split's
+id across the edit, but a consumer that persists node ids, or that is mid-drag on a separator,
+would find it pointing elsewhere. Either pin the mapping (keep each divider's id on the boundary
+it was on, which is possible: the boundaries are the same set) or state plainly that split ids are
+not stable across a transposition.
+
+**`Crossings::TOLERANCE` is 1.0 in points regardless of `pixels_per_point`.** At ppp 2 it accepts
+two device pixels of misalignment as one line, at ppp 1 it accepts one. The number was picked at
+ppp 1. Whether it should be scaled, or should be derived from the separator width instead, has
+not been thought about.
+
+**The sweep reaches long bands thinly.** `CrossWatch::in_a_long_band` counted 2 of 17 presses on
+the seeds as they stand, and `Step::BuildCross { deep: true }` only ever lengthens *one* side to
+three parts. Nothing in the sweep builds a crossing that is deep on both sides, or a line
+carrying more than one "+". The unit and property tests do; the sweep is what would catch those
+shapes interacting with drags, drops and window tearing.

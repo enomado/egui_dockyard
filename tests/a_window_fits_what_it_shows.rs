@@ -19,13 +19,13 @@
 //! over the window's own border and out into the desktop below it.
 //!
 //! Both halves are geometry, so none of this needs a screen: the layout pass publishes its
-//! rectangles through [`DockLayout`], and `Context::run_ui` hands back the shapes that were
-//! painted, with the clip rectangle each was painted under. What the eye found, the numbers can
-//! keep.
+//! rectangles through [`DockLayout`], and a headless pass leaves behind every shape it painted,
+//! under the clip rectangle it was painted with and in the layer that painted it. What the eye
+//! found, the numbers can keep.
 
 use egui::{
-    CentralPanel, Context, CornerRadius, Frame, Id, Pos2, RawInput, Rect, Shape, Stroke, Ui, Vec2,
-    WidgetText, epaint::ClippedShape,
+    CentralPanel, Context, CornerRadius, Frame, Id, LayerId, Pos2, RawInput, Rect, Shape, Stroke,
+    Ui, Vec2, WidgetText, epaint::ClippedShape,
 };
 use egui_dock::{
     DockArea, DockLayout, DockState, Node, NodePath, Split, Style, SurfaceIndex, TabViewer,
@@ -60,9 +60,30 @@ fn tab(name: &str) -> String {
 /// What one headless frame produced: the shapes it painted, and the rectangle the dock was
 /// handed to draw the whole of itself in.
 struct Painted {
-    shapes: Vec<ClippedShape>,
+    /// Everything painted this frame, grouped by the layer that painted it.
+    ///
+    /// `FullOutput::shapes` is one flat list — `end_pass` drains every layer into it and the
+    /// layer is gone by the time the frame returns. Read out mid-frame it is still there, and
+    /// that is what makes "outside its window" a statement about the *dock's* painting rather
+    /// than about whatever else the frame drew.
+    by_layer: Vec<(LayerId, Vec<ClippedShape>)>,
     /// The area the `DockArea` was given — the main surface's border is drawn against this.
     given: Rect,
+}
+
+impl Painted {
+    /// Everything painted into the layer of a floating window surface.
+    ///
+    /// A window's layer holds its frame *and* the dock it hosts, which is exactly the set that
+    /// has to stay inside the window.
+    fn window_layer(&self, window: SurfaceIndex) -> &[ClippedShape] {
+        let id = window_area_id(window);
+        self.by_layer
+            .iter()
+            .find(|(layer, _)| layer.id == id)
+            .map(|(_, shapes)| shapes.as_slice())
+            .expect("the window was painted this frame")
+    }
 }
 
 /// One headless frame, with no input.
@@ -84,6 +105,7 @@ fn frame_with(
         ..Default::default()
     };
     let mut given = Rect::NOTHING;
+    let mut by_layer = Vec::new();
     let mut output = ctx.run_ui(input, |ui| {
         CentralPanel::default().show(ui, |ui| {
             given = ui.available_rect_before_wrap();
@@ -95,13 +117,32 @@ fn frame_with(
                 .show_add_buttons(true)
                 .show_inside(ui, &mut Viewer);
         });
+        // Still inside the pass: the paint lists exist until `end_pass` drains them, and
+        // draining is what loses the layer each shape was painted into.
+        by_layer = layers_painted(ui.ctx());
     });
-    // Headless harness, no GPU backend to hand the delta to.
+    // Load-bearing: `TexturesDelta` panics when dropped with deltas nobody applied, and there is
+    // no GPU backend here to apply them. The shapes in `output` are the flat, layerless list —
+    // everything this harness reads came from `by_layer` above.
     output.textures_delta.clear();
-    Painted {
-        shapes: output.shapes,
-        given,
-    }
+    Painted { by_layer, given }
+}
+
+/// Every layer egui knows about this frame, with the shapes painted into it so far.
+fn layers_painted(ctx: &Context) -> Vec<(LayerId, Vec<ClippedShape>)> {
+    let layers: Vec<LayerId> = ctx.memory(|memory| memory.layer_ids().collect());
+    ctx.graphics(|graphics| {
+        layers
+            .into_iter()
+            .map(|layer| {
+                let shapes = graphics
+                    .get(layer)
+                    .map(|list| list.all_entries().cloned().collect())
+                    .unwrap_or_default();
+                (layer, shapes)
+            })
+            .collect()
+    })
 }
 
 /// Settle, then one more frame, which is the one under test.
@@ -218,42 +259,107 @@ fn the_rows_of_a_collapsed_window_fit_inside_its_frame() {
 
 /// Nothing a window paints leaves the window.
 ///
-/// The scene is a window deliberately squeezed below what its rows need, because the property
-/// has to hold when the geometry *cannot* be satisfied — that is the only interesting case. A
-/// row that does not fit must be cut off by the frame, not painted through it: `Ui::set_clip_rect`
-/// **replaces** the clip rectangle rather than intersecting it, so the tab bar's own clip
-/// silently undid the leaf's, and the label of the bottom row was drawn out in the open, below
-/// the window's border, over whatever happened to be there.
+/// A leaf that cannot hold its own tab bar must show a *cut* tab bar; nothing may escape the
+/// rectangle the layout gave it, and nothing may escape the window around that. What used to
+/// happen instead is that the bottom row was painted straight through the window's border and
+/// out onto the desktop, because `Ui::set_clip_rect` **replaces** the clip rectangle rather than
+/// intersecting it: the tab bar's own clip silently undid the leaf's.
 ///
-/// Text is the probe because it is unambiguous: every galley carries its string, so the shape
-/// that escaped can be *named* in the failure rather than described as "something at y = 612".
+/// # The scene has to make the clip do work
+///
+/// This started life on a window squeezed below the height its collapsed rows need — and that
+/// scene stopped meaning anything the moment the strip arithmetic was fixed, because a collapsed
+/// window is *sized from its strip*: asking for 40 px gets a 63 px window that fits its rows, and
+/// there is nothing left to cut. Reintroducing the clip bug left it green. A scene has to rest on
+/// something the fix does not remove, so this one squeezes the leaf from the other side — a tab
+/// bar taller than half the window it lives in. The window keeps the size it was given, the leaf
+/// keeps its half of it, and the tab bar wants more than either: [`SQUEEZED_TAB_BAR`]. The
+/// premise is asserted below rather than assumed, so that a layout which ever *does* refuse to
+/// make a leaf that short says so, instead of passing for free.
+///
+/// # Everything, not just the text
+///
+/// The check used to be on *text*, because a galley carries its string and an escapee could be
+/// named rather than described as "something at y = 612" — and because `FullOutput::shapes` is
+/// one flat list with no layer on it, so "this rectangle is outside that window" could not be
+/// told apart from a rectangle that has every right to be there. The tab bar's fill, the buttons,
+/// the body's stroke all went unchecked, which is most of what the bug actually drew.
+///
+/// Attribution turned out to be there already: `end_pass` is what flattens the layers, and until
+/// it runs, `Context::graphics` still hands back a paint list *per layer*. A window surface's
+/// layer holds its frame and the dock inside it and nothing else, so the property can be stated
+/// over the whole of it — see [`layers_painted`].
+///
+/// The one thing painted in that layer and meant to fall outside is the window's **shadow**,
+/// which is a blurred rectangle by construction; blur is what identifies it, not a name.
 #[test]
-fn a_window_paints_no_text_outside_itself() {
+fn a_window_paints_nothing_outside_itself() {
     let ctx = Context::default();
     let id = Id::new(DOCK_ID);
-    let style = style();
-    let (mut state, window, _) = window_of_collapsed_rows(3);
+    let mut style = style();
+    style.tab_bar.height = SQUEEZED_TAB_BAR;
 
-    // Half the height the three rows need: the window is now too small by construction, and the
-    // question is only whether the overflow is cut or spilled.
+    let mut state = DockState::new(vec![tab("main")]);
+    let window = state.add_window(vec![tab("row 0")]);
+    let top = state[window].root().unwrap();
+    let [_, bottom] = state.split(
+        NodePath::new(window, top),
+        Split::Below,
+        0.5,
+        Node::leaf(tab("row 1")),
+    );
     state
         .get_window_state_mut(window)
         .unwrap()
-        .set_size(egui_dock::geom::Size::new(320.0, 40.0));
+        .set_size(egui_dock::geom::Size::new(320.0, SQUEEZED_WINDOW));
 
     let painted_frame = settle(&ctx, &mut state, id, &style);
     let outer = window_area_rect(&ctx, window).expand(TOLERANCE);
 
-    for (text, painted) in visible_texts(&painted_frame.shapes) {
-        if !text.starts_with("row ") {
-            continue;
-        }
+    // The premise: both leaves really are shorter than the tab bar they have to draw.
+    let layout = DockLayout::load(&ctx, id);
+    for leaf in [top, bottom] {
+        let rect = layout
+            .rect(NodePath::new(window, leaf))
+            .expect("the leaf was laid out");
         assert!(
-            outer.contains_rect(painted),
-            "the label {text:?} was painted at {painted:?}, outside its window at {outer:?}"
+            rect.height() + TOLERANCE < style.tab_bar.height,
+            "{leaf:?} came out {} px tall and its tab bar is {} px, so nothing has to be cut \
+             and the scan below would pass however the clip behaved",
+            rect.height(),
+            style.tab_bar.height
+        );
+    }
+
+    let painted = visible_shapes(painted_frame.window_layer(window));
+    // A scanner has to say how much it read: the loop below holds vacuously over an empty list,
+    // and a layer read after the drain, or read under the wrong id, is empty.
+    assert!(
+        painted.len() >= 4,
+        "the window's layer held {} shapes, and two leaves cannot be drawn in that few — the \
+         layer was read empty, and the loop below proved nothing: {painted:#?}",
+        painted.len()
+    );
+    println!(
+        "checked {} shapes painted in the window's layer",
+        painted.len()
+    );
+
+    for (what, rect) in &painted {
+        assert!(
+            outer.contains_rect(*rect),
+            "{what} was painted at {rect:?}, outside its window at {outer:?}"
         );
     }
 }
+
+/// A window short enough that half of it cannot hold [`SQUEEZED_TAB_BAR`].
+///
+/// Both numbers are far enough apart that the overflow is tens of pixels rather than a rounding
+/// argument: the window's content is about 106 px, so each of the two leaves gets about 53, and
+/// a tab bar that wants 90 reaches some 30 px past the window's own border.
+const SQUEEZED_WINDOW: f32 = 120.0;
+const SQUEEZED_TAB_BAR: f32 = 90.0;
 
 /// A surface does not cover the border it just drew around itself.
 ///
@@ -423,37 +529,66 @@ fn click_collapse_button(
     settle(ctx, state, id, style);
 }
 
-/// The outer rectangle egui remembers for a window surface, frame and all.
+/// The id `show_window_surface` gives a window surface's `Area`.
 ///
-/// The id is the one `show_window_surface` builds — deliberately frozen at the shape the old
-/// positional `SurfaceIndex` printed, because egui persists window geometry under it.
-fn window_area_rect(ctx: &Context, window: SurfaceIndex) -> Rect {
+/// Deliberately frozen at the shape the old positional `SurfaceIndex` printed, because egui
+/// persists window geometry under it. It names both the area (its rectangle) and the layer
+/// (what was painted into it).
+fn window_area_id(window: SurfaceIndex) -> Id {
     let index = match window {
         SurfaceIndex::Window(index) => index.0 + 1,
         SurfaceIndex::Main => panic!("the main surface is not an egui window"),
     };
-    let id = Id::new(format!("window SurfaceIndex({index})"));
-    ctx.memory(|memory| memory.area_rect(id))
+    Id::new(format!("window SurfaceIndex({index})"))
+}
+
+/// The outer rectangle egui remembers for a window surface, frame and all.
+fn window_area_rect(ctx: &Context, window: SurfaceIndex) -> Rect {
+    ctx.memory(|memory| memory.area_rect(window_area_id(window)))
         .expect("the window was shown this frame")
 }
 
-/// Every text painted this frame, with the rectangle it actually covers on screen — its own
-/// rectangle cut down by the clip rectangle it was painted under.
-fn visible_texts(shapes: &[ClippedShape]) -> Vec<(String, Rect)> {
+/// Everything a paint list covers on screen: each shape's own rectangle cut down by the clip
+/// rectangle it was painted under, named well enough for a failure to be read.
+///
+/// Two kinds of shape are left out, and neither is a hole in the property:
+///
+/// * a **blurred** rectangle is a drop shadow — it is drawn outside its window on purpose, and
+///   blur is what says so (nothing else in the dock paints with it);
+/// * a shape that covers nothing (`Shape::Noop`, a transparent rectangle, or one clipped away
+///   entirely) has no position to be wrong about.
+fn visible_shapes(shapes: &[ClippedShape]) -> Vec<(String, Rect)> {
+    fn kind(shape: &Shape) -> String {
+        match shape {
+            Shape::Text(text) => format!("the text {:?}", text.galley.text()),
+            Shape::Rect(rect) => format!(
+                "a rectangle (fill {:?}, stroke {} px)",
+                rect.fill, rect.stroke.width
+            ),
+            Shape::LineSegment { .. } => "a line".to_owned(),
+            Shape::Path(_) => "a path".to_owned(),
+            Shape::Circle(_) => "a circle".to_owned(),
+            Shape::Mesh(_) => "a mesh".to_owned(),
+            other => format!("{other:?}"),
+        }
+    }
+
     fn walk(shape: &Shape, clip: Rect, out: &mut Vec<(String, Rect)>) {
         match shape {
-            Shape::Text(text) => {
-                let rect = text.visual_bounding_rect().intersect(clip);
-                if rect.is_positive() {
-                    out.push((text.galley.text().to_owned(), rect));
-                }
-            }
             Shape::Vec(shapes) => {
                 for shape in shapes {
                     walk(shape, clip, out);
                 }
             }
-            _ => {}
+            Shape::Noop => (),
+            // The window's own shadow, drawn around the outside of the frame by design.
+            Shape::Rect(rect) if rect.blur_width > 0.0 => (),
+            shape => {
+                let rect = shape.visual_bounding_rect().intersect(clip);
+                if rect.is_positive() {
+                    out.push((kind(shape), rect));
+                }
+            }
         }
     }
 

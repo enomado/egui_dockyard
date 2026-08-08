@@ -94,11 +94,32 @@ clipped, the tabs are drawn in this child and were not.
 its tab bar now shows a *cut* tab bar, which is what a leaf too small for its contents should
 look like.
 
-**Evidence.** `a_window_paints_no_text_outside_itself` squeezes a three-row window to half the
-height its rows need — the property is only interesting when the geometry *cannot* be satisfied —
-and checks every text painted that frame against the window it belongs to, taking each shape's
-own clip rectangle into account. Text is the probe because a galley carries its string, so a
-failure names the label that escaped rather than describing a rectangle.
+**Evidence.** `a_window_paints_nothing_outside_itself` puts a tab bar taller than half a window
+into a window of two leaves, so neither leaf can hold the bar it has to draw — the property is
+only interesting when the geometry *cannot* be satisfied — and checks everything painted into
+that window's layer against the window's own rectangle, each shape cut down by the clip it was
+painted under.
+
+**Its first scene was anchored to what the fix removes, and stopped meaning anything.** The gate
+was originally written on a *collapsed* window squeezed to half the height its rows need. That
+scene is unsatisfiable by construction now: a collapsed window is sized **from its strip**, so
+asking for 40 px yields a 63 px window that fits its rows exactly, and there is nothing left to
+cut. Reintroducing this very bug left the gate green — verified, not assumed — which means the
+clip had been ungated since the day the strip arithmetic was fixed, in the same commit. The scene
+now rests on the one thing the fix does not touch: a leaf is half of whatever height the window
+was given, and a tab bar is `tab_bar.height` regardless. The premise (`leaf.height() <
+tab_bar.height`) is asserted rather than assumed, so a layout that ever refuses to make a leaf
+that short reports it instead of passing for free.
+
+**And it checked only text.** A galley carries its string, so an escapee could be named; but
+`FullOutput::shapes` is one flat list with the layers already drained out of it, and "this
+rectangle is outside that window" is a violation only if the rectangle belongs to the dock —
+so fills, buttons and strokes went unchecked, which is most of what the bug actually drew.
+Attribution needed no new machinery: until `end_pass` drains them, `Context::graphics` hands back
+a paint list **per layer**, and a window surface's layer holds its frame and the dock inside it
+and nothing else. Under the reintroduced bug the gate now fails on a tab's *fill*, 31 px below
+the window's border. The single deliberate exception is the window's drop shadow, identified by
+being blurred rather than by name.
 
 ---
 

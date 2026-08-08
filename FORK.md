@@ -122,13 +122,13 @@ is not one, and a copy of the suite there would have been synchronised by hand f
 only exit non-zero. It now runs both links of the chain that actually guards the vendor — the
 vendored `src` is byte-for-byte the fork's, and the fork's suite is green.
 
-**A press aimed at a divider is tested; a shape drawn over one is not.**
-`a_window_paints_no_text_outside_itself` probes with *text*, because a galley carries its string
-and a failure can name what escaped. Everything else the dock paints — tab bar fills, buttons, the
-body's stroke — goes unchecked, since `FullOutput` hands back shapes without saying which layer
-they came from, and "this rectangle is outside that window" is only a violation if it belongs to
-the dock. Attributing them would need the crate to paint through something that records
-provenance, which is a bigger change than the property is worth today.
+**A press aimed at a divider is tested; a shape drawn over one is not.** — *answered, and the
+reason it stood was wrong twice over.* `FullOutput` is flat because `end_pass` **drains** the
+layers into it; until then `Context::graphics` hands back a paint list per layer, so no
+provenance-recording paint was ever needed. The gate now scans everything painted into a window
+surface's layer, not just its text. Worse, its scene had stopped reproducing the bug it was
+written for — the clip had been ungated since the strip arithmetic was fixed in the same commit.
+Both in [FINDINGS.md](FINDINGS.md).
 
 **`tools/test_egui_dock.sh` compares the vendor against a *branch* and then tests a *working
 tree*.** The two are the same thing on a clean fork, and the script says so when they are not,

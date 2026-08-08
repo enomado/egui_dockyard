@@ -117,8 +117,80 @@ struct Crossings {
 }
 
 impl Crossings {
-    /// Pixel tolerance for two dividers to be considered the same line.
-    const TOLERANCE: f32 = 1.0;
+    /// How far apart two dividers may be and still be one line: **one device pixel**.
+    ///
+    /// Not a taste setting — it is the finest answer the screen can give, and it is exactly the
+    /// gap under which the button can keep its promise. Every boundary in a [`Band`] is the
+    /// midpoint of two edges [`DockArea::compute_rect_sizes`] has already snapped to whole
+    /// device pixels, so two dividers aimed at one line come out at most one device pixel
+    /// apart; a transposition averages the pair, which moves each of them by at most half of
+    /// that — back onto the pixel it was already drawn on. Accept a wider gap and the "+" is a
+    /// visible jog, and pressing it *does* move the picture.
+    const TOLERANCE_DEVICE_PIXELS: f32 = 1.0;
+
+    /// [`Self::TOLERANCE_DEVICE_PIXELS`] in points, at a given `pixels_per_point`.
+    ///
+    /// This is the whole reason the number is not a constant in points, which is what it used
+    /// to be: a flat `1.0` is one device pixel on the ppp-1 screen it was picked on and two of
+    /// them at ppp 2, so the same crate was twice as willing to call a jog a cross on a
+    /// high-density display.
+    ///
+    /// The slack is float arithmetic, not policy: a bound is a sum of two snapped edges halved,
+    /// so a gap that *is* one device pixel can land a few ulps the wrong side of the limit.
+    fn tolerance(pixels_per_point: f32) -> f32 {
+        (Self::TOLERANCE_DEVICE_PIXELS + 1e-3) / pixels_per_point
+    }
+
+    /// The widest square the button at crossing `index` may occupy.
+    ///
+    /// The button sits on two dividers at once and answers to presses over its whole reach, so
+    /// every point it covers is a point that can no longer be grabbed to drag either of them.
+    /// That is the trade the magnet buys, and it is a good one only while the button stays
+    /// small next to what it sits on. The bound is the distance to the nearest thing that has
+    /// to stay reachable: across the line, the far edges of the two bands (`outer`'s own two
+    /// children); along it, the ends of the two parts the crossing divider separates, in
+    /// whichever of the two bands is the tighter.
+    ///
+    /// Nothing in the default style comes near it — `separator.extra` keeps every part at least
+    /// 175 px long, against a 38 px button at its widest. It binds where the style is loosened
+    /// or the window squeezed, and there the answer is a button that shrinks with the layout
+    /// rather than one that swallows it.
+    fn room_at(&self, index: usize) -> f32 {
+        let [i, j] = self.at[index].0;
+        // Across the line: `outer`'s two children, measured along `outer`'s own axis.
+        let mut room = (self.outer_bounds[1] - self.outer_bounds[0])
+            .min(self.outer_bounds[2] - self.outer_bounds[1]);
+        // Along the line: the two parts each band's divider separates.
+        for (band, k) in [(&self.bands[0], i), (&self.bands[1], j)] {
+            room = room
+                .min(band.bounds[k + 1] - band.bounds[k])
+                .min(band.bounds[k + 2] - band.bounds[k + 1]);
+        }
+        room
+    }
+}
+
+/// The three lengths the button at a crossing is built from, in points: the side of the drawn
+/// square, the catch margin around it, and the hold margin around that.
+///
+/// They are [`CrossSplitToggleStyle`]'s, shrunk **uniformly** so that the button at its widest —
+/// drawn square plus both margins — fits in `room` (see [`Crossings::room_at`]). Uniformly, and
+/// not by trimming the margins first, because the ratio between them is the feel: a button that
+/// kept its size while its hold margin was eaten would lose the hysteresis exactly on the
+/// layouts where a hand is least steady.
+fn toggle_metrics(toggle: &CrossSplitToggleStyle, room: f32) -> (f32, f32, f32) {
+    let widest = toggle.size + 2.0 * (toggle.catch_extra + toggle.hold_extra);
+    // A style of all zeroes asks for no button; `room / 0` would ask for a NaN one.
+    let scale = if widest > 0.0 {
+        (room / widest).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (
+        toggle.size * scale,
+        toggle.catch_extra * scale,
+        toggle.hold_extra * scale,
+    )
 }
 
 /// One edge of a rectangle along an axis: `x` for a horizontal one, `y` for a vertical one.
@@ -268,7 +340,15 @@ impl<Tab> DockArea<'_, Tab> {
     ///
     /// `outer` must already be known to be a split (parent) node; callers of `show_separator`
     /// establish that before this runs.
-    fn detect_crossings(&self, outer: NodePath, extra: f32) -> Option<Crossings> {
+    ///
+    /// `pixels_per_point` is what turns [`Crossings::TOLERANCE_DEVICE_PIXELS`] into a distance
+    /// in the points this geometry is measured in — see [`Crossings::tolerance`].
+    fn detect_crossings(
+        &self,
+        outer: NodePath,
+        extra: f32,
+        pixels_per_point: f32,
+    ) -> Option<Crossings> {
         let outer_horizontal = self.dock_state[outer].is_horizontal();
         let [c0, c1] = self.child_paths(outer);
 
@@ -293,11 +373,12 @@ impl<Tab> DockArea<'_, Tab> {
         // same line and, unlike a nested scan, cannot hand one divider two partners — which
         // would put two buttons on one point the moment two dividers ever sat a pixel apart.
         let (first, second) = (band0.divider_positions(), band1.divider_positions());
+        let tolerance = Crossings::tolerance(pixels_per_point);
         let (mut i, mut j) = (0, 0);
         let mut at = Vec::new();
         while i < first.len() && j < second.len() {
             let gap = first[i] - second[j];
-            if gap.abs() <= Crossings::TOLERANCE {
+            if gap.abs() <= tolerance {
                 let line = 0.5 * (first[i] + second[j]);
                 let center = if outer_horizontal {
                     pos2(outer_bounds[1], line)
@@ -342,7 +423,8 @@ impl<Tab> DockArea<'_, Tab> {
         if !self.show_cross_split_toggle {
             return;
         }
-        let Some(crossings) = self.detect_crossings(outer, style.extra) else {
+        let pixels_per_point = ui.ctx().pixels_per_point();
+        let Some(crossings) = self.detect_crossings(outer, style.extra, pixels_per_point) else {
             return;
         };
 
@@ -350,8 +432,8 @@ impl<Tab> DockArea<'_, Tab> {
         // tree these crossings were read off, so the rest of them stop describing anything the
         // moment the first one fires.
         let mut pressed = None;
-        for (index, &(at, center)) in crossings.at.iter().enumerate() {
-            if self.draw_one_toggle(ui, &crossings, at, center, style, toggle) {
+        for index in 0..crossings.at.len() {
+            if self.draw_one_toggle(ui, &crossings, index, style, toggle) {
                 pressed = Some(index);
             }
         }
@@ -386,11 +468,11 @@ impl<Tab> DockArea<'_, Tab> {
         &self,
         ui: &mut Ui,
         crossings: &Crossings,
-        at: [usize; 2],
-        center: Pos2,
+        index: usize,
         style: &SeparatorStyle,
         toggle: &CrossSplitToggleStyle,
     ) -> bool {
+        let (at, center) = crossings.at[index];
         // Keyed by the two dividers that meet here rather than by their position in the band:
         // an id has to survive a neighbouring divider being dragged past, and an index does
         // not.
@@ -401,8 +483,10 @@ impl<Tab> DockArea<'_, Tab> {
         ));
         let layer_id = LayerId::new(Order::Foreground, button_id);
 
-        let drawn_idle = Rect::from_center_size(center, Vec2::splat(toggle.size));
-        let catch_rect = drawn_idle.expand(toggle.catch_extra);
+        // Never wider than the crossing has room for — see `toggle_metrics`.
+        let (size, catch_extra, hold_extra) = toggle_metrics(toggle, crossings.room_at(index));
+        let drawn_idle = Rect::from_center_size(center, Vec2::splat(size));
+        let catch_rect = drawn_idle.expand(catch_extra);
 
         // The grip is remembered as *when* it was last held, not as a flag. A crossing can stop
         // existing while it holds the pointer — the layout changes under it — and a bare `true`
@@ -414,7 +498,7 @@ impl<Tab> DockArea<'_, Tab> {
         let held_on: Option<u64> = ui.data(|data| data.get_temp(button_id));
         let holding = held_on.is_some_and(|last| last + 1 >= pass);
         let hit_rect = if holding {
-            catch_rect.expand(toggle.hold_extra)
+            catch_rect.expand(hold_extra)
         } else {
             catch_rect
         };
@@ -933,7 +1017,8 @@ mod tests {
             0.5 * (rect(&ctx, bottom_left).right() + rect(&ctx, bottom_mid).left());
         let top_divider_x = 0.5 * (rect(&ctx, top_left).right() + rect(&ctx, top_right).left());
         assert!(
-            (bottom_divider_x - top_divider_x).abs() <= Crossings::TOLERANCE,
+            (bottom_divider_x - top_divider_x).abs()
+                <= Crossings::tolerance(ctx.pixels_per_point()),
             "the scene was not built as intended: the two dividers are at {top_divider_x} and \
              {bottom_divider_x}, so there is no crossing for the detector to miss"
         );
@@ -1132,6 +1217,197 @@ mod tests {
         run_frame(ctx, state, style, id, vec![]);
     }
 
+    /// "The same line" is one **device** pixel, so what it means in points depends on
+    /// `pixels_per_point`.
+    ///
+    /// One point of misalignment is one device pixel at ppp 1 and two at ppp 2, and two is a
+    /// jog you can see — press the button there and the transposition, which averages the pair,
+    /// moves the picture. The tolerance used to be a flat 1.0 point, so the crate was exactly
+    /// twice as willing to call a jog a cross on a high-density screen. This is that difference,
+    /// on one scene: offered at ppp 1, refused at ppp 2.
+    ///
+    /// The geometry is dictated rather than rendered. The distances at stake are smaller than
+    /// the pixel snapping the layout pass applies, so a scene aimed through fractions cannot
+    /// state one exactly — and a test that cannot say what gap it built cannot be an oracle for
+    /// which gaps are accepted. The tree is a real 2x2 cross; only the rectangles are hand-cut,
+    /// and they are cut as a partition of the screen, the way the layout pass would.
+    #[test]
+    fn two_dividers_are_one_line_within_a_device_pixel() {
+        let (mut state, outer_id, [top_left, bottom_left, top_right, bottom_right]) =
+            build_cross(true, 0.5, 0.5);
+        let outer = NodePath::new(SurfaceIndex::main(), outer_id);
+        let [left_half, right_half] = state
+            .main_surface()
+            .children(outer_id)
+            .expect("the root of a cross is a split");
+
+        // The two columns, and inside each the horizontal divider that has to meet the other.
+        // `gap` is how far the right column's divider sits below the left one's.
+        let scene = |gap: f32| {
+            let mut layout = DockLayout::default();
+            let mut put = |node: NodeId, rect: Rect| {
+                layout.set_rect(NodePath::new(SurfaceIndex::main(), node), rect);
+            };
+            let (left, right) = (0.0..=600.0, 601.0..=1200.0);
+            let half = 0.5; // half a separator: the gap the midpoint of a boundary is read from
+            put(left_half, Rect::from_x_y_ranges(left.clone(), 0.0..=900.0));
+            put(
+                right_half,
+                Rect::from_x_y_ranges(right.clone(), 0.0..=900.0),
+            );
+            put(
+                top_left,
+                Rect::from_x_y_ranges(left.clone(), 0.0..=450.0 - half),
+            );
+            put(
+                bottom_left,
+                Rect::from_x_y_ranges(left, 450.0 + half..=900.0),
+            );
+            put(
+                top_right,
+                Rect::from_x_y_ranges(right.clone(), 0.0..=450.0 + gap - half),
+            );
+            put(
+                bottom_right,
+                Rect::from_x_y_ranges(right, 450.0 + gap + half..=900.0),
+            );
+            layout
+        };
+
+        let mut offered = |gap: f32, pixels_per_point: f32| {
+            let mut area = DockArea::new(&mut state).id(Id::new(DOCK_ID));
+            area.layout = scene(gap);
+            area.detect_crossings(outer, band_style().separator.extra, pixels_per_point)
+                .is_some_and(|crossings| !crossings.at.is_empty())
+        };
+
+        assert!(
+            offered(0.0, 1.0) && offered(0.0, 2.0),
+            "two dividers on exactly the same line are a cross at any density"
+        );
+        assert!(
+            offered(1.0, 1.0),
+            "one point apart is one device pixel at ppp 1 — the finest the screen can tell apart"
+        );
+        assert!(
+            !offered(1.0, 2.0),
+            "one point apart is two device pixels at ppp 2, which is a jog, not a cross"
+        );
+        assert!(
+            offered(0.5, 2.0),
+            "half a point is one device pixel at ppp 2, so the tolerance shrank with the pixel \
+             rather than vanishing"
+        );
+        assert!(
+            !offered(2.0, 1.0),
+            "the tolerance is one device pixel, not any pixel"
+        );
+    }
+
+    /// A 2x2 cross squeezed into a strip a twentieth of the screen tall, so each of its four
+    /// parts is some 20px — less than the 38px the button asks for at its widest.
+    ///
+    /// Its own [`Context`], for the reason [`cross_scene`] gives.
+    fn squeezed_cross_scene(style: &Style, id: Id) -> (Context, DockState<u32>, NodePath, Pos2) {
+        let ctx = Context::default();
+        let mut state = DockState::new(vec![0u32]);
+        let strip = state.main_surface().root().unwrap();
+        let strip_path = NodePath::new(SurfaceIndex::main(), strip);
+        state.split(strip_path, Split::Below, 0.05, Node::leaf(1u32));
+        let [_, right] = state.split(strip_path, Split::Right, 0.5, Node::leaf(2u32));
+        let outer = NodePath::new(
+            SurfaceIndex::main(),
+            state.main_surface().parent(strip).unwrap(),
+        );
+        state.split(strip_path, Split::Below, 0.5, Node::leaf(3u32));
+        state.split(
+            NodePath::new(SurfaceIndex::main(), right),
+            Split::Below,
+            0.5,
+            Node::leaf(4u32),
+        );
+        render(&ctx, &mut state, style, id);
+        let center = toggle_center(&ctx, &mut state, style, id, outer)
+            .expect("the squeezed scene is still a cross");
+        (ctx, state, outer, center)
+    }
+
+    /// The bound the button is sized by, stated on the function that applies it: however
+    /// generous the style, the widest form of the button fits in the room the crossing has.
+    ///
+    /// Both halves matter. Only the cap and a style could be silently ignored; only the
+    /// pass-through and the cap could be a clamp to nothing.
+    #[test]
+    fn a_toggle_is_never_wider_than_the_room_it_has() {
+        let style = CrossSplitToggleStyle::default();
+        let widest = style.size + 2.0 * (style.catch_extra + style.hold_extra);
+
+        for room in [0.0, 1.0, 7.5, widest - 0.1, widest, widest + 50.0, 4000.0] {
+            let (size, catch, hold) = toggle_metrics(&style, room);
+            assert!(
+                size + 2.0 * (catch + hold) <= room.max(0.0) + 1e-3,
+                "with {room}px of room the button is still {}px wide",
+                size + 2.0 * (catch + hold)
+            );
+            assert!(
+                size >= 0.0 && catch >= 0.0 && hold >= 0.0,
+                "a negative length came out of a {room}px crossing"
+            );
+        }
+
+        let (size, catch, hold) = toggle_metrics(&style, widest);
+        assert!(
+            (size - style.size).abs() < 1e-3
+                && (catch - style.catch_extra).abs() < 1e-3
+                && (hold - style.hold_extra).abs() < 1e-3,
+            "given exactly the room it asks for, the button must be the style's own size"
+        );
+
+        // Uniform: a squeezed button keeps the proportions, so the hysteresis is not the first
+        // thing to disappear.
+        let (size, catch, hold) = toggle_metrics(&style, widest * 0.5);
+        assert!(
+            (size / catch - style.size / style.catch_extra).abs() < 1e-3
+                && (hold / catch - style.hold_extra / style.catch_extra).abs() < 1e-3,
+            "the squeeze changed the button's proportions: {size}/{catch}/{hold}"
+        );
+    }
+
+    /// And the bound is actually wired to the layout: the same press, at the same distance from
+    /// the crossing, reaches the button on a roomy cross and misses it on a squeezed one.
+    ///
+    /// Without the second half this would be a test of `toggle_metrics` again; without the
+    /// first it would pass on a button that had stopped working everywhere.
+    #[test]
+    fn a_squeezed_cross_gets_a_smaller_button() {
+        let id = Id::new(DOCK_ID);
+        let style = band_style();
+        let toggle = &style.cross_split_toggle;
+        // Inside the catch zone of a button at full size, and well outside a shrunken one.
+        let off = Vec2::new(0.0, toggle.size * 0.5 + toggle.catch_extra - 1.0);
+
+        let (ctx, mut state, outer, center) = cross_scene(&style, id);
+        assert!(
+            click_flips(&ctx, &mut state, &style, id, outer, center + off),
+            "the roomy half of this test stopped working, so the squeezed half proves nothing"
+        );
+
+        // A fresh scene per press: a flip is a real edit, and what the next press is about is
+        // its distance from the crossing, not the grouping it starts from.
+        let (ctx, mut state, outer, center) = squeezed_cross_scene(&style, id);
+        assert!(
+            click_flips(&ctx, &mut state, &style, id, outer, center),
+            "the squeezed cross has no pressable button left at all, which is not the point"
+        );
+
+        let (ctx, mut state, outer, center) = squeezed_cross_scene(&style, id);
+        assert!(
+            !click_flips(&ctx, &mut state, &style, id, outer, center + off),
+            "a button on a cross with ~20px of room still answered {}px away",
+            off.y
+        );
+    }
+
     /// Rests the pointer at `at` for a few frames, without pressing anything.
     ///
     /// More than one frame on purpose: egui decides what is hovered at the *end* of a frame,
@@ -1258,7 +1534,7 @@ mod tests {
     ) -> Vec<Pos2> {
         let mut area = DockArea::new(state).id(id);
         area.layout = DockLayout::load(ctx, id);
-        area.detect_crossings(outer, style.separator.extra)
+        area.detect_crossings(outer, style.separator.extra, ctx.pixels_per_point())
             .map(|crossings| crossings.at.iter().map(|&(_, center)| center).collect())
             .unwrap_or_default()
     }
@@ -1934,6 +2210,118 @@ mod tests {
         // miscounts the chain shows up.
         press_toggle_at(&ctx, &mut state, &style, id, outer, centers[1]);
         assert_rects_close(&before, &leaf_rects(&DockLayout::load(&ctx, id), &leaves));
+    }
+
+    /// Every node of the main surface, split by kind.
+    fn nodes_by_kind(state: &DockState<u32>) -> (Vec<NodeId>, Vec<NodeId>) {
+        let mut leaves = Vec::new();
+        let mut splits = Vec::new();
+        for node in state.main_surface().breadth_first() {
+            if state[NodePath::new(SurfaceIndex::main(), node)].is_leaf() {
+                leaves.push(node);
+            } else {
+                splits.push(node);
+            }
+        }
+        leaves.sort_unstable();
+        splits.sort_unstable();
+        (leaves, splits)
+    }
+
+    /// What a transposition does promise about ids.
+    ///
+    /// Not "every id names what it named" — see the test after this one for why that is
+    /// impossible. What holds is the bookkeeping: the same leaves, the same *set* of split ids
+    /// (nothing created, nothing dropped — the rebuild is handed exactly the splits it took
+    /// apart), and the crossing's own node still where its parent points.
+    ///
+    /// Worth pinning because the rebuild consumes its splits from a pool, and a pool is exactly
+    /// the shape of thing that leaks one or invents one when the counting is wrong. The `assert`
+    /// inside `transpose_cross_split` catches a leftover; this catches the other direction, and
+    /// catches it on the tree rather than on the arithmetic.
+    #[test]
+    fn a_transposition_creates_and_destroys_no_nodes() {
+        let ctx = Context::default();
+        let id = Id::new(DOCK_ID);
+        let style = band_style();
+
+        let (mut state, outer_id, _) = build_bands(
+            &ctx,
+            &style,
+            id,
+            false,
+            [&[0.4], &[0.4, 0.75]],
+            [Leaning::Left, Leaning::Left],
+        );
+        let outer = NodePath::new(SurfaceIndex::main(), outer_id);
+
+        let before = nodes_by_kind(&state);
+        press_toggle(&ctx, &mut state, &style, id, outer);
+        let after = nodes_by_kind(&state);
+
+        assert_eq!(before.0, after.0, "the set of leaves changed");
+        assert_eq!(before.1, after.1, "the set of splits changed");
+        assert!(
+            state.main_surface().root() == Some(outer_id),
+            "the crossing's own node lost its place in the tree"
+        );
+    }
+
+    /// And what it cannot promise: which line a split id names.
+    ///
+    /// This is a counting fact, not a bug to be fixed one day, and it is a test so that nobody
+    /// "fixes" it by accident and so that the guarantee above is not read as more than it says.
+    /// The line the two bands shared was one divider in each of them — two nodes — and comes
+    /// back as one divider spanning both. The old outer boundary was one node and comes back as
+    /// two, one per half. Two into one and one into two: no assignment of the old ids to the new
+    /// boundaries can keep every one of them on the segment it was drawn on.
+    ///
+    /// The visible form of it is orientation: at least one split that was cutting one way is
+    /// cutting the other way afterwards, while still carrying its old id.
+    #[test]
+    fn a_transposition_may_hand_a_split_id_a_line_of_the_other_orientation() {
+        let ctx = Context::default();
+        let id = Id::new(DOCK_ID);
+        let style = band_style();
+
+        let (mut state, outer_id, _) = build_bands(
+            &ctx,
+            &style,
+            id,
+            false,
+            [&[0.4], &[0.4, 0.75]],
+            [Leaning::Left, Leaning::Left],
+        );
+        let outer = NodePath::new(SurfaceIndex::main(), outer_id);
+
+        let orientation = |state: &DockState<u32>| {
+            let (_, splits) = nodes_by_kind(state);
+            splits
+                .iter()
+                .map(|node| {
+                    (
+                        *node,
+                        state[NodePath::new(SurfaceIndex::main(), *node)].is_horizontal(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let before = orientation(&state);
+        press_toggle(&ctx, &mut state, &style, id, outer);
+        let after = orientation(&state);
+
+        let turned = before
+            .iter()
+            .zip(&after)
+            .filter(|((_, was), (_, now))| was != now)
+            .count();
+        assert!(
+            turned > 0,
+            "not one split id changed the orientation of the line it names. Either the scene \
+             stopped being the one this is about, or ids became stable across a transposition — \
+             in which case this test should become the guarantee, not the caveat"
+        );
     }
 
     /// The five places a band in the property test below may be cut at, as fractions of its

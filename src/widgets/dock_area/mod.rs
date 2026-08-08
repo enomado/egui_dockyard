@@ -156,9 +156,14 @@ impl<'tree, Tab> DockArea<'tree, Tab> {
         self
     }
 
-    /// Whether a small toggle button is shown at the crossing point of a "+"-shaped 2x2
-    /// split, letting the user transpose the row/column grouping without moving a pixel on
-    /// screen. See [`crate::DockEvent::CrossSplitTransposed`].
+    /// Whether a small toggle button is shown wherever two dividers cross in a "+", letting the
+    /// user transpose the row/column grouping there without moving a pixel on screen.
+    ///
+    /// Not only on a 2x2: a crossing is any position that both of a split's two children are
+    /// divided at, however many parts each of them has. See
+    /// [`crate::DockEvent::CrossSplitTransposed`], which also states what the gesture does *not*
+    /// promise about split ids.
+    ///
     /// By default it's `true`.
     pub fn show_cross_split_toggle(mut self, show_cross_split_toggle: bool) -> Self {
         self.show_cross_split_toggle = show_cross_split_toggle;

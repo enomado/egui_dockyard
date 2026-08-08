@@ -120,38 +120,6 @@ declines rather than jump, but the check was written for that path only; the sam
 exists elsewhere (`Step::BuildCross` in the DST hit it immediately, from the scaffolding side).
 Worth a sweep for "computes a fraction, writes it, does not ask whether the interval can hold it".
 
-**A transposition re-nests both chains, so a `NodeId` can change which divider it names.**
-`rebuild_chain` builds right-leaning out of a pool of the splits it took apart, and the pool is
-consumed in build order — so outside the 2x2 case, the node that was a divider between two
-columns may come back as the split between the two halves. Nothing in the crate holds a split's
-id across the edit, but a consumer that persists node ids, or that is mid-drag on a separator,
-would find it pointing elsewhere. Either pin the mapping (keep each divider's id on the boundary
-it was on, which is possible: the boundaries are the same set) or state plainly that split ids are
-not stable across a transposition.
-
-**`Crossings::TOLERANCE` is 1.0 in points regardless of `pixels_per_point`.** At ppp 2 it accepts
-two device pixels of misalignment as one line, at ppp 1 it accepts one. The number was picked at
-ppp 1. Whether it should be scaled, or should be derived from the separator width instead, has
-not been thought about.
-
-**The toggle's catch zone is a hole in the separator it sits on.** The button now answers to a
-press up to `size / 2 + catch_extra` from the crossing (13 px by default, 19 while it holds the
-pointer), and every one of those points used to be a place you could grab the separator and drag.
-That is the trade the magnet buys and it is the right one — a miss used to start a resize nobody
-asked for — but nothing states the limit anywhere: a style that grows `catch_extra` past a short
-part's half-length would leave a divider with no grabbable stretch at all. Worth either a bound
-derived from the shortest part on the line, or a plain sentence saying the knob can eat a drag.
-
-**Nothing stops the next widget drawn at an absolute position from claiming layout space.** The
-window-creep bug was one call — `ui.scope_builder`, whose contract is to fold the child into the
-parent — placed in code that draws over geometry the layout already owns. The rule is not
-mechanical (the dragged tab in `leaf.rs` uses the same call and genuinely wants its slot in the
-tab bar), so it cannot be a lint; but the dock's outermost `Ui` is exactly the thing a floating
-window measures itself by, and today nothing says so at the place where it matters. A cheap gate
-would be the shape of `a_cross_in_a_window_does_not_make_the_window_creep` — a window left alone
-for ten frames does not move — run over a scene with every ornament the dock draws on it, not just
-a cross.
-
 **The sweep reaches long bands thinly.** `CrossWatch::in_a_long_band` counted 2 of 17 presses on
 the seeds as they stand, and `Step::BuildCross { deep: true }` only ever lengthens *one* side to
 three parts. Nothing in the sweep builds a crossing that is deep on both sides, or a line

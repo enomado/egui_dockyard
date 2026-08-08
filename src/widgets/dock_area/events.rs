@@ -34,9 +34,23 @@ pub enum DockEvent {
     /// A finalised, discrete layout mutation. Use this as the trigger for
     /// undo entries and writes to disk.
     LayoutCommitted,
-    /// A 2x2 "+"-shaped split had its row/column grouping transposed by clicking the
-    /// toggle button at the crossing point. The on-screen layout is unchanged; only
-    /// which leaves are siblings in the tree did.
+    /// A "+"-shaped crossing had its row/column grouping transposed by clicking the toggle
+    /// button on it. The on-screen layout is unchanged; only which leaves are siblings in the
+    /// tree did.
+    ///
+    /// # Split ids are not stable across this
+    ///
+    /// Leaf ids are: every leaf comes through with its id and its rectangle. The *number* of
+    /// splits is unchanged too — nothing is created or destroyed — and the node the crossing
+    /// was found on keeps its id. But which line a given split id names can change, and not
+    /// through carelessness: the boundaries themselves are re-cut. The line the two bands
+    /// shared used to be one divider in each of them, two nodes; afterwards it is one full-span
+    /// divider, one node. The old outer boundary was one node; afterwards it is two, one per
+    /// half. No mapping "keep each id on its boundary" exists, because the boundaries are not
+    /// the same set of segments — only the same set of pixels.
+    ///
+    /// So a consumer that persists split ids, or holds one across a frame, must re-read them
+    /// when this arrives.
     CrossSplitTransposed,
 }
 

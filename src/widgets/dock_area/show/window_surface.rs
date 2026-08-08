@@ -33,7 +33,8 @@ fn window_chrome_height(frame: &Frame, style: &Style) -> f32 {
     let padding = style.dock_area_padding.map_or(0.0, |margin| {
         f32::from(margin.top) + f32::from(margin.bottom)
     });
-    frame.total_margin().sum().y + padding + 2.0 * border_clearance(style)
+    let clearance = border_clearance(style);
+    frame.total_margin().sum().y + padding + clearance.top + clearance.bottom
 }
 
 impl<Tab> DockArea<'_, Tab> {

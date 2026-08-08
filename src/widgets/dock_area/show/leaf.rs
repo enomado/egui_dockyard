@@ -17,7 +17,7 @@ use crate::{
         drag_and_drop::{DragData, DragDropState, HoverData, TreeComponent},
         state::State,
     },
-    utils::{fade_visuals, rect_set_size_centered, rect_stroke_box},
+    utils::{clip_to, fade_visuals, rect_set_size_centered, rect_stroke_box},
 };
 
 fn tab_body_id(dock_area_id: Id, path: NodePath, tab_id: Id) -> Id {
@@ -54,7 +54,7 @@ impl<Tab> DockArea<'_, Tab> {
         );
         let spacing = ui.spacing().item_spacing;
         ui.spacing_mut().item_spacing = Vec2::ZERO;
-        ui.set_clip_rect(rect);
+        clip_to(ui, rect);
 
         if self.dock_state[path].tabs_count() == 0 {
             return;
@@ -169,14 +169,12 @@ impl<Tab> DockArea<'_, Tab> {
             if self.show_leaf_collapse_buttons {
                 clip_rect = clip_rect.translate(vec2(Style::TAB_COLLAPSE_BUTTON_SIZE, 0.0));
             }
-            // Intersected, not assigned: `Ui::set_clip_rect` *replaces* the clip rectangle, so
-            // handing it a rectangle of the tab bar's own making hands the tabs a licence to
-            // paint outside the leaf that owns them. The tab bar is always a full
+            // Narrowed through `clip_to`, never assigned: the tab bar is always a full
             // `tab_bar.height` tall while the leaf it sits in may be squeezed shorter than
-            // that, and then the difference was painted straight through the enclosing window's
-            // border and out onto the desktop. A leaf that has no room for its tab bar must
-            // show a *cut* tab bar; nothing may escape the rectangle the layout gave it.
-            tabs_ui.set_clip_rect(clip_rect.intersect(ui.clip_rect()));
+            // that, and an assignment here hands that difference a licence to paint through
+            // the enclosing window's border and out onto the desktop. A leaf with no room for
+            // its tab bar must show a *cut* tab bar.
+            clip_to(tabs_ui, clip_rect);
 
             // Desired size for tabs in "expanded" mode.
             let prefered_width = style
@@ -1282,7 +1280,7 @@ impl<Tab> DockArea<'_, Tab> {
                 id,
                 UiBuilder::new().max_rect(body_rect).layer_id(ui.layer_id()),
             );
-            ui.set_clip_rect(Rect::from_min_max(ui.cursor().min, ui.clip_rect().max));
+            clip_to(ui, Rect::from_min_max(ui.cursor().min, ui.clip_rect().max));
 
             // Use initial spacing for ui.
             ui.spacing_mut().item_spacing = spacing;

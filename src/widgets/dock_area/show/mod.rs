@@ -1,6 +1,7 @@
 use duplicate::duplicate;
 use egui::{
     Context, CornerRadius, CursorIcon, EventFilter, Key, Pos2, Rect, Sense, StrokeKind, Ui, Vec2,
+    epaint::MarginF32,
 };
 use paste::paste;
 
@@ -389,7 +390,7 @@ impl<Tab> DockArea<'_, Tab> {
         // not only the main one: the stroke is painted for all of them, and a window surface
         // used not to step back from it at all, so a bordered window drew its border and then
         // covered it with the first tab bar.
-        rect = rect.expand(-border_clearance(style));
+        rect = rect - border_clearance(style);
         ui.allocate_rect(rect, Sense::hover());
 
         let Some(root) = self.dock_state[surface].root() else {
@@ -745,12 +746,28 @@ pub(super) fn collapsed_strip_height(rows: i32, style: &Style) -> f32 {
 /// Inset by half the stroke and nothing else — which is what this used to be — and the first
 /// thing drawn paints over the outer half of the border, over the whole of the arc at the
 /// corners, and the border the style asked for is simply not there.
-fn border_clearance(style: &Style) -> f32 {
-    let radius = style.main_surface_border_rounding;
-    let max_radius = radius.nw.max(radius.ne).max(radius.sw).max(radius.se);
-    // 1 - 1/sqrt(2), the sagitta of a quarter arc as a fraction of its radius.
+///
+/// Per side, and not one number for all four, because a rectangle has four radii and a style is
+/// free to round one corner and leave the rest square. Each side answers to the two corners it
+/// runs between: the top edge is pushed down by the deeper of the north-west and north-east
+/// arcs, and knows nothing of the southern two. The distinction is free — the caller was
+/// shrinking a rectangle either way — and it is the difference between a rounded title corner
+/// costing the layout a strip along one edge and costing it a strip along all four.
+fn border_clearance(style: &Style) -> MarginF32 {
+    // 1 - 1/sqrt(2), how far a quarter arc bulges in from the corner it is inscribed at, as a
+    // fraction of its radius.
     const ARC_BULGE: f32 = 0.292_893_2;
-    style.main_surface_border_stroke.width + f32::from(max_radius) * ARC_BULGE
+
+    let radius = style.main_surface_border_rounding;
+    let stroke = style.main_surface_border_stroke.width;
+    let bulge = |a: u8, b: u8| stroke + f32::from(a.max(b)) * ARC_BULGE;
+
+    MarginF32 {
+        left: bulge(radius.nw, radius.sw),
+        right: bulge(radius.ne, radius.se),
+        top: bulge(radius.nw, radius.ne),
+        bottom: bulge(radius.sw, radius.se),
+    }
 }
 
 fn split_rect(node_rect: Rect, pixels_per_point: f32) -> Rect {

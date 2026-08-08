@@ -265,13 +265,25 @@ fn a_window_paints_no_text_outside_itself() {
 /// Clearing an arc of radius `r` costs `r - r / sqrt(2)` on each axis: that is how far the arc
 /// bulges inwards from the corner of the rectangle. The property is stated on the rectangles,
 /// not on pixels, so it holds for whatever rounding a style asks for.
+///
+/// The scene rounds **one** corner, which is what makes the bound two-sided. That the content
+/// clears the arc says the clearance is big enough; that the three square corners cost nothing
+/// beyond the stroke says it is not simply the largest radius charged to all four sides — a
+/// rounded title corner should not levy a strip along the bottom of the window.
 #[test]
 fn a_surface_does_not_cover_the_border_it_draws() {
     let ctx = Context::default();
     let id = Id::new(DOCK_ID);
     let mut style = style();
-    style.main_surface_border_stroke = Stroke::new(3.0, egui::Color32::RED);
-    style.main_surface_border_rounding = CornerRadius::same(14);
+    let stroke = 3.0;
+    let radius = 14.0_f32;
+    style.main_surface_border_stroke = Stroke::new(stroke, egui::Color32::RED);
+    style.main_surface_border_rounding = CornerRadius {
+        nw: radius as u8,
+        ne: 0,
+        sw: 0,
+        se: 0,
+    };
 
     let mut state = DockState::new(vec![tab("main")]);
     let painted_frame = settle(&ctx, &mut state, id, &style);
@@ -289,15 +301,23 @@ fn a_surface_does_not_cover_the_border_it_draws() {
         border.max -= padding.right_bottom();
     }
 
-    let radius = f32::from(style.main_surface_border_rounding.nw);
-    let clearance = style.main_surface_border_stroke.width + radius * (1.0 - 1.0 / 2.0_f32.sqrt());
+    let rounded = stroke + radius * (1.0 - 1.0 / 2.0_f32.sqrt());
     assert!(
-        content.min.x + TOLERANCE >= border.min.x + clearance
-            && content.min.y + TOLERANCE >= border.min.y + clearance,
-        "the content starts at {:?}, inside a {radius} px rounded border at {:?} that needs \
-         {clearance} px of clearance",
+        content.min.x + TOLERANCE >= border.min.x + rounded
+            && content.min.y + TOLERANCE >= border.min.y + rounded,
+        "the content starts at {:?}, inside a {radius} px rounded corner at {:?} that needs \
+         {rounded} px of clearance",
         content.min,
         border.min
+    );
+    let square = border.max - Vec2::splat(stroke);
+    assert!(
+        (content.max.x - square.x).abs() <= TOLERANCE
+            && (content.max.y - square.y).abs() <= TOLERANCE,
+        "the content ends at {:?} where the two square corners there ask for {square:?}: either \
+         it is painting over the stroke, or it is paying for an arc at the other end of the \
+         rectangle",
+        content.max
     );
 }
 

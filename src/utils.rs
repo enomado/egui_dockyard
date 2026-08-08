@@ -24,6 +24,23 @@ pub fn map_to_pixel(point: f32, ppi: f32, map: fn(f32) -> f32) -> f32 {
     map(point * ppi) / ppi
 }
 
+/// Narrow `ui`'s clip rectangle to `rect`.
+///
+/// The one way this crate is allowed to clip, and `tests/nothing_widens_its_clip.rs` is what
+/// makes that true rather than agreed. [`egui::Ui::set_clip_rect`] **replaces** the clip
+/// rectangle — it does not intersect with what the parent had — so a child that clips itself
+/// to a rectangle of its own making silently acquires the right to paint anywhere on the
+/// layer. That is not a hypothetical: the tab bar did exactly this, and a leaf too short for
+/// its own tab bar painted the overflow through the enclosing window's border and out onto the
+/// desktop (see FINDINGS).
+///
+/// Narrowing is the only thing any caller in this crate has ever wanted. Where the argument is
+/// already inside the parent's clip this is a no-op; where it is not, it is the difference
+/// between a widget that is cut off and one that escapes.
+pub fn clip_to(ui: &mut egui::Ui, rect: Rect) {
+    ui.set_clip_rect(rect.intersect(ui.clip_rect()));
+}
+
 pub fn rect_set_size_centered(rect: &mut Rect, size: Vec2) {
     let center = rect.center();
     rect.set_width(size.x);

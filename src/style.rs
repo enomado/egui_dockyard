@@ -16,6 +16,24 @@ pub enum TabAddAlign {
 /// Your [`Style`] can inherit all its properties from an [`egui::Style`] through the
 /// [`Style::from_egui`] function.
 ///
+/// # It is a save format, and it is versionless
+///
+/// Under the `serde` feature every struct here carries `#[serde(default)]` at the *container*
+/// level, so a style saved by an older version of this crate loads into a newer one: fields it
+/// has never heard of take their [`Default`], and fields it no longer has are ignored. That is
+/// deliberate, and it is a promise rather than an accident of how the structs happen to be
+/// written.
+///
+/// It began as one attribute on one field — `cross_split_toggle`, added to a struct consumers
+/// were already persisting — which left the next person adding a field with the same problem
+/// and no precedent visible among its neighbours. Answering it per-field is answering it once
+/// per field, forever; answering it per-struct means a new field needs nothing at all, which is
+/// the only version of the rule that survives being forgotten.
+///
+/// The other half of the promise is what a missing field falls back to: the struct's own
+/// `Default`, *not* [`Style::from_egui`]. A style loaded from an old save is therefore a mix of
+/// what was saved and this crate's defaults, and never of the host's egui theme.
+///
 /// Example:
 ///
 /// ```rust
@@ -48,6 +66,7 @@ pub enum TabAddAlign {
 /// ```
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 #[allow(missing_docs)]
 pub struct Style {
     /// Sets padding to indent from the edges of the window. By `Default` it's `None`.
@@ -58,9 +77,6 @@ pub struct Style {
 
     pub buttons: ButtonsStyle,
     pub separator: SeparatorStyle,
-    /// Added after this struct was already being persisted by consumers, hence the
-    /// `serde(default)`: a saved style written before it existed still loads.
-    #[cfg_attr(feature = "serde", serde(default))]
     pub cross_split_toggle: CrossSplitToggleStyle,
     pub tab_bar: TabBarStyle,
     pub tab: TabStyle,
@@ -70,6 +86,7 @@ pub struct Style {
 /// Specifies the look and feel of buttons.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct ButtonsStyle {
     /// Color of the close tab button.
     pub close_tab_color: Color32,
@@ -138,6 +155,7 @@ pub struct ButtonsStyle {
 /// Specifies the look and feel of node separators.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct SeparatorStyle {
     /// Width of the rectangle separator between nodes. By `Default` it's `1.0`.
     pub width: f32,
@@ -180,6 +198,7 @@ pub struct SeparatorStyle {
 /// of a click all change with it.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct CrossSplitToggleStyle {
     /// Side of the square the button is drawn as while it is not holding the pointer, in
     /// points. By `Default` it's `14.0`.
@@ -197,9 +216,28 @@ pub struct CrossSplitToggleStyle {
     pub hold_extra: f32,
 }
 
+impl CrossSplitToggleStyle {
+    /// The width of the button in its widest form: the drawn square plus both margins, which is
+    /// the zone it answers to while it is holding the pointer.
+    ///
+    /// Public because it is the one number about the button that anything *outside* the button
+    /// needs — a harness aiming a press at a divider has to know what the button covers, so as
+    /// not to press it by accident. It is arithmetic, not policy: re-deriving it elsewhere is
+    /// how a copy goes stale, and one already had (it still said
+    /// `(width + extra_interact_width).max(14.0)` a release after the magnet landed).
+    ///
+    /// What a crossing actually gets is this, shrunk to the room it has — see
+    /// `Crossings::room_at` and `DockArea::toggle_room` — so this is an upper bound on screen,
+    /// never an equality.
+    pub fn widest(&self) -> f32 {
+        self.size + 2.0 * (self.catch_extra + self.hold_extra)
+    }
+}
+
 /// Specifies the look and feel of tab bars.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct TabBarStyle {
     /// Background color of tab bar. By `Default` it's [`Color32::WHITE`].
     pub bg_fill: Color32,
@@ -228,6 +266,7 @@ pub struct TabBarStyle {
 /// Specifies the look and feel of an individual tab.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct TabStyle {
     /// Style of the tab when it is active.
     pub active: TabInteractionStyle,
@@ -271,6 +310,7 @@ pub struct TabStyle {
 /// Specifies the look and feel of individual tabs while they are being interacted with.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct TabInteractionStyle {
     /// Color of the outline around tabs. By `Default` it's [`Color32::BLACK`].
     pub outline_color: Color32,
@@ -288,6 +328,7 @@ pub struct TabInteractionStyle {
 /// Specifies the look and feel of the tab body.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct TabBodyStyle {
     /// Inner margin of tab body. By `Default` it's `Margin::same(4.0)`.
     pub inner_margin: Margin,
@@ -305,6 +346,7 @@ pub struct TabBodyStyle {
 /// Specifies the look and feel of the tab drop overlay.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct OverlayStyle {
     /// Sets selection color for the placing area of the tab where this tab targeted on it.
     /// By `Default` it's `(0, 191, 255)` (light blue) with `0.5` capacity.
@@ -343,6 +385,7 @@ pub struct OverlayStyle {
 /// Specifies the feel of the tab drop overlay, i.e anything non visual about the overlay.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct OverlayFeel {
     /// range is `0.0..=1.0`.
     pub window_drop_coverage: f32,
@@ -378,6 +421,7 @@ pub enum OverlayType {
 /// Highlighting on the currently hovered leaf.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct LeafHighlighting {
     /// Fill color.
     pub color: Color32,

@@ -179,7 +179,7 @@ impl Crossings {
 /// kept its size while its hold margin was eaten would lose the hysteresis exactly on the
 /// layouts where a hand is least steady.
 fn toggle_metrics(toggle: &CrossSplitToggleStyle, room: f32) -> (f32, f32, f32) {
-    let widest = toggle.size + 2.0 * (toggle.catch_extra + toggle.hold_extra);
+    let widest = toggle.widest();
     // A style of all zeroes asks for no button; `room / 0` would ask for a NaN one.
     let scale = if widest > 0.0 {
         (room / widest).clamp(0.0, 1.0)
@@ -1405,7 +1405,15 @@ mod tests {
     #[test]
     fn a_toggle_is_never_wider_than_the_room_it_has() {
         let style = CrossSplitToggleStyle::default();
+        // Spelled out rather than asked of `CrossSplitToggleStyle::widest`, which is what every
+        // other caller now uses: this is the test *of* that arithmetic, and an oracle that reads
+        // the function it is checking agrees with it by construction.
         let widest = style.size + 2.0 * (style.catch_extra + style.hold_extra);
+        assert_eq!(
+            widest,
+            style.widest(),
+            "the widest form is one number in two places"
+        );
 
         for room in [0.0, 1.0, 7.5, widest - 0.1, widest, widest + 50.0, 4000.0] {
             let (size, catch, hold) = toggle_metrics(&style, room);

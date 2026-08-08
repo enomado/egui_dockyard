@@ -593,7 +593,11 @@ impl Sim {
             frame: 0,
             next_tab: 1,
             screen: SCREEN,
-            style: Style::default(),
+            style: {
+                let mut style = Style::default();
+                style.overlay.feel.max_preference_time = PREFERENCE_TIME;
+                style
+            },
             effective: [0; OUTCOMES],
             aimed: 0,
             refused: [0; REFUSALS],
@@ -1108,13 +1112,17 @@ impl Sim {
     /// one. The separator gestures refuse such a point, the same way they refuse one under a
     /// floating window, and for the same reason: it no longer means what the step says.
     fn toggle_over(&self, point: Pos2) -> bool {
-        // The button at its widest: the drawn square plus both margins, which is what it reaches
-        // while it is holding the pointer. The crate shrinks this to fit a cramped crossing, so
-        // the zone avoided here is never smaller than the zone that answers — and it is the
-        // *answering* zone that matters, since a separator step landing inside it would press a
-        // button instead of grabbing a divider.
-        let toggle = &self.style.cross_split_toggle;
-        let side = toggle.size + 2.0 * (toggle.catch_extra + toggle.hold_extra);
+        // The button at its widest, asked of the crate rather than worked out here. The crate
+        // shrinks it to fit a cramped crossing, so the zone avoided is never smaller than the
+        // zone that answers — and it is the *answering* zone that matters, since a separator
+        // step landing inside it would press a button instead of grabbing a divider.
+        //
+        // This harness re-derives the crate's geometry almost everywhere on purpose: that is
+        // what lets it notice the crate offering a button where it should not. This particular
+        // number is the exception, because it is arithmetic rather than a rule — and the copy
+        // that used to live here had already gone stale once, still reading
+        // `(width + extra_interact_width).max(14.0)` after the magnet landed.
+        let side = self.style.cross_split_toggle.widest();
         self.cross_toggles()
             .into_iter()
             .any(|cross| Rect::from_center_size(cross.at, Vec2::splat(side)).contains(point))
@@ -3133,6 +3141,25 @@ fn dbg_moved_leaf() {
     }
 }
 
+/// How long the overlay keeps a preference for the leaf the pointer arrived on, in this
+/// harness.
+///
+/// The crate's default is 0.3 s — a flicker guard for a hand that sweeps across two leaves on
+/// its way to a third — and [`Sim::drag`] has to rest at its destination for at least that long,
+/// or the drop resolves against a leaf the pointer merely passed over. Twenty frames per drag,
+/// and drags are most of what the sweep does: it was the single largest line in its wall clock.
+///
+/// Shortening it here is free of the usual danger, because the pause and the lock read the *same
+/// number*: the harness waits `frames_for(style.overlay.feel.max_preference_time)`, so a drop is
+/// still aimed at the leaf the step named, whatever this is set to. What is given up is that the
+/// sweep no longer exercises a *long* lock — nothing else in the dock is keyed to the duration,
+/// and the guard's behaviour is a function of it, not of its size.
+///
+/// Measured before taking it: the sweep went from 20.4 s to 16.7 s, and its coverage came out
+/// byte-identical — every outcome count, every cross-watch number, the same scenes. A cheaper
+/// run of the same sweep, rather than a cheaper sweep.
+const PREFERENCE_TIME: f32 = 0.05;
+
 /// How many seeds the sweep runs, and how long each scenario is.
 ///
 /// Each step is a handful of frames, so this is seconds, not milliseconds — the budget was set
@@ -3150,7 +3177,9 @@ fn dbg_moved_leaf() {
 /// long enough for the overlay's preference lock to expire — about twenty frames per drag, and
 /// drags are most of what the sweep does. That is not a cost worth trading away: without the
 /// pause, a drop resolves against whichever leaf the pointer happened to cross on the way, so
-/// every `Aim` in the vocabulary meant something other than what it said.
+/// every `Aim` in the vocabulary meant something other than what it said. Most of it has since
+/// been bought back by shortening the lock itself rather than the pause — see
+/// [`PREFERENCE_TIME`], which is the same run of the same sweep, four seconds cheaper.
 const SEEDS: u64 = 96;
 const STEPS: usize = 24;
 

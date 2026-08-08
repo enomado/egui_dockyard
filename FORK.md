@@ -111,55 +111,35 @@ in [fuzz/README.md](fuzz/README.md).
 Loose ends noticed while working, each with why it is worth touching. Not a plan — a list of
 things a later session should not have to rediscover.
 
-**`Crossings::room_at` only looks at the boundaries of its own two bands.** A part of a band is
-opaque to it, but a part is a whole subtree and may carry perpendicular separators of its own a
-level down. A button bounded by "the nearest boundary in this band" can therefore still cover one
-of those. Not reachable with the default style — the button is 38 px at its widest and
-`separator.extra` keeps every part 175 px long — and the honest bound would be a distance to the
-nearest separator *drawn*, which the layout pass knows and the detector does not.
+The eight entries that stood here are answered, in the four commits that follow the
+collapsed-window work; what they were is in `git log`, and the bugs among them are written up in
+[FINDINGS.md](FINDINGS.md). One was answered by turning out to be **wrong**, which is worth saying
+out loud: "the vendor that actually builds carries no tests" described a defect that is really a
+decision, taken deliberately and written down in the vendor's own manifest — the vendored package
+is not a workspace member, cargo does not resolve `[dev-dependencies]` for a path dependency that
+is not one, and a copy of the suite there would have been synchronised by hand for zero runs. What
+*was* broken was the tool: the script that used to run that copy had not noticed the move and could
+only exit non-zero. It now runs both links of the chain that actually guards the vendor — the
+vendored `src` is byte-for-byte the fork's, and the fork's suite is green.
 
-**Two copies of "how wide the button gets".** `toggle_metrics` in the crate and `Sim::toggle_over`
-in the DST both compute `size + 2 * (catch_extra + hold_extra)`. The harness re-derives the crate's
-geometry on purpose everywhere else — that is what lets it notice the crate offering a button
-where it should not — but this particular number is arithmetic rather than a rule, and the two
-drifting apart would show up as separator steps quietly pressing a toggle. It was stale once
-already: it still said `(width + extra_interact_width).max(14.0)` after the magnet landed.
+**A press aimed at a divider is tested; a shape drawn over one is not.**
+`a_window_paints_no_text_outside_itself` probes with *text*, because a galley carries its string
+and a failure can name what escaped. Everything else the dock paints — tab bar fills, buttons, the
+body's stroke — goes unchecked, since `FullOutput` hands back shapes without saying which layer
+they came from, and "this rectangle is outside that window" is only a violation if it belongs to
+the dock. Attributing them would need the crate to paint through something that records
+provenance, which is a bigger change than the property is worth today.
 
-**The sweep now buys its honesty in wall clock.** `Sim::drag` rests at its destination for the
-overlay's whole preference time, which is about twenty frames per drag, and drags are most of what
-the sweep does: 11 s to 21 s. It also changed which scenes 96 seeds reach — cross presses went
-from 17 to 10, `in_a_long_band` from 2 to 4. The coverage floors are asserted, so a further drop
-fails loudly rather than quietly; the levers if it comes to that are `SEEDS` and the harness's own
-`max_preference_time`, and the second one is the cheaper of the two.
+**`tools/test_egui_dock.sh` compares the vendor against a *branch* and then tests a *working
+tree*.** The two are the same thing on a clean fork, and the script says so when they are not,
+which is enough for a human running it by hand and not enough for anything automatic. The strict
+version tests the branch — `git archive` into a sandbox, as the comparison already does — at the
+cost of not being able to run the suite over uncommitted work, which is most of what it is used
+for.
 
-**`Style::cross_split_toggle` carries `serde(default)` and the fields around it do not.** Adding
-it to a struct that consumers may already have persisted needed the attribute; every other field
-of `Style` predates anyone saving one. So the next field added has the same problem and no
-precedent visible from its neighbours — either `#[serde(default)]` belongs on the struct, or the
-crate should say plainly that `Style` is not a save format.
-
-**`Ui::set_clip_rect` replaces, and the crate calls it bare in three places.** One of them was
-handing the tab bar a licence to paint outside its leaf (see FINDINGS). The other two — the leaf's
-own clip, and the tab body's — only ever shrink what they were given, so they are correct *today*,
-by an argument that has to be made again every time one of them is edited. A `clip_to` helper that
-intersects, and nothing calling the bare method, would make the rule mechanical instead of
-remembered.
-
-**A collapsed leaf under a *horizontal* split gets a whole column and draws one row in it.**
-`collapsed_leaf_count` is a sum down a vertical chain and a `max` across a horizontal one, which is
-right for sizing the strip; but the special case in `compute_rect_sizes` is only written for
-vertical splits, so a collapsed leaf beside a taller column is stretched to that column's height
-and paints a tab bar with empty space under it. Nobody has complained, and it is not obvious what
-the alternative should look like — which is exactly why it is worth deciding rather than leaving to
-whichever branch happens to run.
-
-**`border_clearance` insets a rectangle by the *largest* of four corner radii.** A rectangle cannot
-be inset per corner, so a style that rounds one corner hard and the rest not at all pays the hard
-corner's price on all four. Honest and cheap; the alternative is clipping the content to a rounded
-rectangle, which egui does not do.
-
-**The vendor that actually builds carries no tests.** `patches/egui_dock-*` in our own tree mirrors
-`src` only — `tools/vendor_vs_fork.sh` says so on every run — so the gates (`core_is_egui_free`, the
-DST sweep, the geometry properties) and the proptest regression seeds guard the fork while the
-*vendor* is what gets compiled into the app. A patch that lands in the vendor alone is unguarded by
-construction.
+**The sweep no longer exercises a long preference lock.** `PREFERENCE_TIME` cuts the overlay's
+flicker guard to 0.05 s in the harness so that a drag need not rest twenty frames; the pause and
+the lock read the same number, so every drop still lands where its step aimed, and the coverage
+came out identical. What is gone is any scenario where the lock is *long enough to matter* —
+nothing in the dock is keyed to the duration today, and if something ever is, this is where it
+will not be noticed.

@@ -25,13 +25,13 @@
 use std::collections::VecDeque;
 
 use egui::{
-    CursorIcon, LayerId, Order, Pos2, Rect, Sense, StrokeKind, Ui, UiBuilder, epaint::CornerRadius,
-    pos2, vec2,
+    CursorIcon, LayerId, Order, Pos2, Rect, Sense, StrokeKind, Ui, UiBuilder, Vec2,
+    epaint::CornerRadius, pos2, vec2,
 };
 
 use crate::core::tree::regroup::Regroup;
 use crate::dock_area::events::DockEvent;
-use crate::{DockArea, NodeId, NodePath, SeparatorStyle};
+use crate::{CrossSplitToggleStyle, DockArea, NodeId, NodePath, SeparatorStyle};
 
 /// One side of a split, with the chain of same-orientation splits at its root flattened: `n`
 /// parts side by side, with `n - 1` dividers between them.
@@ -337,6 +337,7 @@ impl<Tab> DockArea<'_, Tab> {
         ui: &mut Ui,
         outer: NodePath,
         style: &SeparatorStyle,
+        toggle: &CrossSplitToggleStyle,
     ) {
         if !self.show_cross_split_toggle {
             return;
@@ -350,7 +351,7 @@ impl<Tab> DockArea<'_, Tab> {
         // moment the first one fires.
         let mut pressed = None;
         for (index, &(at, center)) in crossings.at.iter().enumerate() {
-            if self.draw_one_toggle(ui, &crossings, at, center, style) {
+            if self.draw_one_toggle(ui, &crossings, at, center, style, toggle) {
                 pressed = Some(index);
             }
         }
@@ -362,6 +363,25 @@ impl<Tab> DockArea<'_, Tab> {
     }
 
     /// One toggle button. Returns whether it was clicked this frame.
+    ///
+    /// # It claims no space
+    ///
+    /// The button is drawn into a child [`Ui`] made with [`Ui::new_child`], and that is not a
+    /// stylistic choice over `ui.scope_builder`: a *scope* ends by folding the child's
+    /// `min_rect` into the parent and advancing its cursor past it. The parent here is the `Ui`
+    /// the entire dock is drawn into, and in a floating window that `Ui`'s `min_rect` is the
+    /// size the window asks for — so each button drawn grew the window by one item spacing,
+    /// every frame, and `constrain_to` turned that into a slide up the screen once it reached
+    /// the bottom. See `a_cross_in_a_window_does_not_make_the_window_creep`. A button sitting
+    /// on a separator occupies a place the layout has already accounted for; it must take none
+    /// of its own.
+    ///
+    /// # It catches the pointer from outside itself
+    ///
+    /// Two radii, and what they are for is in [`CrossSplitToggleStyle`]: the pointer is caught
+    /// from `catch_extra` outside the drawn square, and held until it leaves a zone
+    /// `hold_extra` wider than that. Which of the two applies is state — "is this button
+    /// currently holding the pointer" — so it is remembered per button between frames.
     fn draw_one_toggle(
         &self,
         ui: &mut Ui,
@@ -369,9 +389,8 @@ impl<Tab> DockArea<'_, Tab> {
         at: [usize; 2],
         center: Pos2,
         style: &SeparatorStyle,
+        toggle: &CrossSplitToggleStyle,
     ) -> bool {
-        let button_size = (style.width + style.extra_interact_width).max(14.0);
-        let button_rect = Rect::from_center_size(center, vec2(button_size, button_size));
         // Keyed by the two dividers that meet here rather than by their position in the band:
         // an id has to survive a neighbouring divider being dragged past, and an index does
         // not.
@@ -382,43 +401,75 @@ impl<Tab> DockArea<'_, Tab> {
         ));
         let layer_id = LayerId::new(Order::Foreground, button_id);
 
-        ui.scope_builder(UiBuilder::new().layer_id(layer_id), |ui| {
-            let response = ui
-                .interact(button_rect, button_id, Sense::click())
-                .on_hover_cursor(CursorIcon::PointingHand);
+        let drawn_idle = Rect::from_center_size(center, Vec2::splat(toggle.size));
+        let catch_rect = drawn_idle.expand(toggle.catch_extra);
 
-            let color = if response.hovered() {
-                style.color_hovered
+        // The grip is remembered as *when* it was last held, not as a flag. A crossing can stop
+        // existing while it holds the pointer — the layout changes under it — and a bare `true`
+        // left in memory would arm the button the moment the same two dividers line up again,
+        // widening its reach for a frame at a point the pointer merely happens to be near. A
+        // pass number cannot go stale: it either names the frame before this one, or it does
+        // not.
+        let pass = ui.ctx().cumulative_pass_nr();
+        let held_on: Option<u64> = ui.data(|data| data.get_temp(button_id));
+        let holding = held_on.is_some_and(|last| last + 1 >= pass);
+        let hit_rect = if holding {
+            catch_rect.expand(toggle.hold_extra)
+        } else {
+            catch_rect
+        };
+
+        let ui = &mut ui.new_child(UiBuilder::new().layer_id(layer_id).max_rect(hit_rect));
+
+        let response = ui
+            .interact(hit_rect, button_id, Sense::click())
+            .on_hover_cursor(CursorIcon::PointingHand);
+
+        // A press keeps its grip even if the pointer slides off, the same way any button does;
+        // without it, releasing a hair outside would both cancel the click and disarm.
+        let holds_now = response.hovered() || response.is_pointer_button_down_on();
+        ui.data_mut(|data| {
+            if holds_now {
+                data.insert_temp(button_id, pass);
             } else {
-                style.color_idle
-            };
-            ui.painter().rect(
-                button_rect,
-                CornerRadius::from(button_size * 0.25),
-                color,
-                egui::Stroke::NONE,
-                StrokeKind::Inside,
-            );
-            // A small pinwheel of four arrows pointing outward, hinting at "swap the
-            // grouping":
-            let stroke = egui::Stroke::new(1.5, style.color_dragged);
-            let arm = button_size * 0.28;
-            for angle_deg in [45.0_f32, 135.0, 225.0, 315.0] {
-                let angle = angle_deg.to_radians();
-                let dir_vec = vec2(angle.cos(), angle.sin());
-                let tip = center + dir_vec * arm;
-                let base = center + dir_vec * (arm * 0.3);
-                ui.painter().line_segment([base, tip], stroke);
-                let perp = vec2(-dir_vec.y, dir_vec.x) * (arm * 0.25);
-                ui.painter()
-                    .line_segment([tip, tip - dir_vec * (arm * 0.35) + perp], stroke);
-                ui.painter()
-                    .line_segment([tip, tip - dir_vec * (arm * 0.35) - perp], stroke);
+                data.remove_temp::<u64>(button_id);
             }
+        });
 
-            response.clicked()
-        })
-        .inner
+        // Grown to exactly the catch zone while it holds the pointer: the target you can hit is
+        // then the target you can see, and the growth itself is the feedback that you have it.
+        let button_rect = if holds_now { catch_rect } else { drawn_idle };
+        let button_size = button_rect.width();
+
+        let color = if holds_now {
+            style.color_hovered
+        } else {
+            style.color_idle
+        };
+        ui.painter().rect(
+            button_rect,
+            CornerRadius::from(button_size * 0.25),
+            color,
+            egui::Stroke::NONE,
+            StrokeKind::Inside,
+        );
+        // A small pinwheel of four arrows pointing outward, hinting at "swap the grouping":
+        let stroke = egui::Stroke::new(1.5, style.color_dragged);
+        let arm = button_size * 0.28;
+        for angle_deg in [45.0_f32, 135.0, 225.0, 315.0] {
+            let angle = angle_deg.to_radians();
+            let dir_vec = vec2(angle.cos(), angle.sin());
+            let tip = center + dir_vec * arm;
+            let base = center + dir_vec * (arm * 0.3);
+            ui.painter().line_segment([base, tip], stroke);
+            let perp = vec2(-dir_vec.y, dir_vec.x) * (arm * 0.25);
+            ui.painter()
+                .line_segment([tip, tip - dir_vec * (arm * 0.35) + perp], stroke);
+            ui.painter()
+                .line_segment([tip, tip - dir_vec * (arm * 0.35) - perp], stroke);
+        }
+
+        response.clicked()
     }
 
     /// Transposes the grouping around crossing `index`, keeping every leaf exactly where it is
@@ -549,6 +600,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::geom::{Point, Size};
     use crate::layout::DockLayout;
     use crate::{DockState, Node, NodeId, Split, Style, SurfaceIndex, TabViewer};
 
@@ -967,6 +1019,87 @@ mod tests {
         );
     }
 
+    /// Reported bug: with tabs open in a floating window that holds a cross, the window crept
+    /// upwards frame after frame, for as long as it was on screen and untouched.
+    ///
+    /// The button used to be drawn through [`Ui::scope_builder`], which ends by calling
+    /// `advance_cursor_after_rect` on the **parent** `Ui` — the one the whole dock is drawn
+    /// into. So every toggle on screen pushed that `Ui`'s cursor a spacing past the bottom of
+    /// the dock and grew its `min_rect` with it. On the main surface that is invisible: nothing
+    /// is allocated after the dock, and the panel's size does not come from its content. Inside
+    /// an [`egui::Window`] the content's `min_rect` *is* the size the window asks for, so the
+    /// window grew by a spacing every frame — and `constrain_to(bounds)`, which keeps it on
+    /// screen, turned growth at the bottom edge into a slide at the top.
+    ///
+    /// A window is therefore the only scene that can see this, and the oracle is the weakest
+    /// one there is: a scene nobody touches does not move.
+    #[test]
+    fn a_cross_in_a_window_does_not_make_the_window_creep() {
+        let ctx = Context::default();
+        let id = Id::new(DOCK_ID);
+        // The window is 400 px tall, so its two rows are well under the default 175 px margin
+        // and `parts_can_be_renested` would decline — with no button there is no bug to see.
+        let style = band_style();
+
+        let mut state = DockState::new(vec![0u32]);
+        let window = state.add_window(vec![1u32]);
+        state
+            .get_window_state_mut(window)
+            .expect("the window was just added")
+            .set_position(Point::new(120.0, 120.0))
+            .set_size(Size::new(600.0, 400.0));
+
+        // A 2x2 cross inside the window.
+        let top_left = state[window].root().unwrap();
+        let [_, top_right] = state.split(
+            NodePath::new(window, top_left),
+            Split::Right,
+            0.5,
+            Node::leaf(2u32),
+        );
+        let outer = NodePath::new(window, state[window].root().unwrap());
+        state.split(
+            NodePath::new(window, top_left),
+            Split::Below,
+            0.5,
+            Node::leaf(3u32),
+        );
+        state.split(
+            NodePath::new(window, top_right),
+            Split::Below,
+            0.5,
+            Node::leaf(4u32),
+        );
+
+        // Let the window settle at the size it was asked for: `set_size` is one-shot, and the
+        // frames after it are the ones that auto-size from the content.
+        for _ in 0..4 {
+            run_frame(&ctx, &mut state, &style, id, vec![]);
+        }
+
+        assert_eq!(
+            toggle_centers(&ctx, &mut state, &style, id, outer).len(),
+            1,
+            "the window holds no cross, so there is no button whose drawing could move it"
+        );
+
+        let window_rect = |ctx: &Context| {
+            DockLayout::load(ctx, id)
+                .rect(outer)
+                .expect("the window surface was laid out this frame")
+        };
+        let settled = window_rect(&ctx);
+        for _ in 0..10 {
+            run_frame(&ctx, &mut state, &style, id, vec![]);
+        }
+        let later = window_rect(&ctx);
+
+        assert!(
+            (settled.min - later.min).length() < 0.5 && (settled.max - later.max).length() < 0.5,
+            "ten quiet frames moved the window from {settled:?} to {later:?}"
+        );
+    }
+
     /// Clicks once at `at`, over several frames (press + release + settle).
     fn click(ctx: &Context, state: &mut DockState<u32>, style: &Style, id: Id, at: Pos2) {
         use egui::{Event, Modifiers, PointerButton};
@@ -997,6 +1130,121 @@ mod tests {
             }],
         );
         run_frame(ctx, state, style, id, vec![]);
+    }
+
+    /// Rests the pointer at `at` for a few frames, without pressing anything.
+    ///
+    /// More than one frame on purpose: egui decides what is hovered at the *end* of a frame,
+    /// from the widget rectangles registered during it, so a widget learns it is hovered one
+    /// frame after the pointer arrives.
+    fn hover(ctx: &Context, state: &mut DockState<u32>, style: &Style, id: Id, at: Pos2) {
+        for _ in 0..3 {
+            run_frame(ctx, state, style, id, vec![egui::Event::PointerMoved(at)]);
+        }
+    }
+
+    /// Clicks at `at` and reports whether the grouping flipped — that is, whether the press
+    /// reached the toggle rather than the separator underneath it.
+    fn click_flips(
+        ctx: &Context,
+        state: &mut DockState<u32>,
+        style: &Style,
+        id: Id,
+        outer: NodePath,
+        at: Pos2,
+    ) -> bool {
+        let was_horizontal = state[outer].is_horizontal();
+        click(ctx, state, style, id, at);
+        state[outer].is_horizontal() != was_horizontal
+    }
+
+    /// A fresh 2x2 cross, rendered, with the crossing's position measured off the screen.
+    ///
+    /// Its own [`Context`], and that is the point: whether the button is holding the pointer
+    /// lives in egui memory, and two scenes built the same way have the same node ids and so
+    /// the same button id. Sharing a context between two presses would let the first one leave
+    /// the button armed for the second — which is exactly the difference the tests below are
+    /// trying to measure.
+    fn cross_scene(style: &Style, id: Id) -> (Context, DockState<u32>, NodePath, Pos2) {
+        let ctx = Context::default();
+        let (mut state, outer_id, _) = build_cross(true, 0.5, 0.5);
+        let outer = NodePath::new(SurfaceIndex::main(), outer_id);
+        render(&ctx, &mut state, style, id);
+        let center =
+            toggle_center(&ctx, &mut state, style, id, outer).expect("the toggle is there");
+        (ctx, state, outer, center)
+    }
+
+    /// The magnet: a press that misses the drawn square by less than `catch_extra` is still the
+    /// button, not the separator underneath it.
+    ///
+    /// A miss here is not a no-op — the press lands on the separator and starts a resize — so
+    /// the second half of the test is what keeps the first honest: just outside the catch zone,
+    /// with the button cold, the press must *not* toggle. Otherwise "the click toggled" would
+    /// also be true of a button that had quietly swallowed the whole line.
+    #[test]
+    fn the_toggle_catches_a_press_that_misses_the_drawn_square() {
+        let id = Id::new(DOCK_ID);
+        let style = band_style();
+        let toggle = &style.cross_split_toggle;
+
+        // Along the outer divider, so a press that is not caught lands squarely on a separator.
+        let near = Vec2::new(0.0, toggle.size * 0.5 + toggle.catch_extra - 1.0);
+        let far = Vec2::new(
+            0.0,
+            toggle.size * 0.5 + toggle.catch_extra + toggle.hold_extra - 1.0,
+        );
+
+        let (ctx, mut state, outer, center) = cross_scene(&style, id);
+        assert!(
+            click_flips(&ctx, &mut state, &style, id, outer, center + near),
+            "a press {}px off the crossing, inside the catch zone, did not reach the toggle",
+            near.y
+        );
+
+        let (ctx, mut state, outer, center) = cross_scene(&style, id);
+        assert!(
+            !click_flips(&ctx, &mut state, &style, id, outer, center + far),
+            "a press {}px off the crossing reached a button whose catch zone ends at {}px",
+            far.y,
+            toggle.size * 0.5 + toggle.catch_extra
+        );
+    }
+
+    /// The hysteresis: the zone that *keeps* the pointer is wider than the zone that caught it.
+    ///
+    /// One point, pressed twice: once with the pointer arriving cold, once after it has rested
+    /// on the button. Only the second toggles. A single radius cannot tell those two apart, and
+    /// that is the whole point — sitting at the edge of one radius, a pixel of jitter changes
+    /// the cursor, the highlight, and what a click will do.
+    ///
+    /// The cold half of this is the same press the magnet test uses as its control, on purpose:
+    /// what is a miss when you arrive is a hit when you were already there.
+    #[test]
+    fn a_button_holding_the_pointer_keeps_it_past_the_catch_zone() {
+        let id = Id::new(DOCK_ID);
+        let style = band_style();
+        let toggle = &style.cross_split_toggle;
+
+        let out_of_catch = Vec2::new(
+            0.0,
+            toggle.size * 0.5 + toggle.catch_extra + toggle.hold_extra - 1.0,
+        );
+
+        let (ctx, mut state, outer, center) = cross_scene(&style, id);
+        assert!(
+            !click_flips(&ctx, &mut state, &style, id, outer, center + out_of_catch),
+            "the point this test is about is inside the *catch* zone, so it proves nothing"
+        );
+
+        let (ctx, mut state, outer, center) = cross_scene(&style, id);
+        hover(&ctx, &mut state, &style, id, center);
+        assert!(
+            click_flips(&ctx, &mut state, &style, id, outer, center + out_of_catch),
+            "the button let the pointer go {}px out, inside its {}px hold zone",
+            out_of_catch.y,
+            toggle.size * 0.5 + toggle.catch_extra + toggle.hold_extra
+        );
     }
 
     /// Where the toggle buttons on `outer`'s line currently sit, in screen order along it.

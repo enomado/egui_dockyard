@@ -58,6 +58,10 @@ pub struct Style {
 
     pub buttons: ButtonsStyle,
     pub separator: SeparatorStyle,
+    /// Added after this struct was already being persisted by consumers, hence the
+    /// `serde(default)`: a saved style written before it existed still loads.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub cross_split_toggle: CrossSplitToggleStyle,
     pub tab_bar: TabBarStyle,
     pub tab: TabStyle,
     pub overlay: OverlayStyle,
@@ -154,6 +158,43 @@ pub struct SeparatorStyle {
 
     /// Dragged color of the rectangle separator. By `Default` it's [`Color32::WHITE`].
     pub color_dragged: Color32,
+}
+
+/// Geometry of the cross-split toggle: the small button offered where two separators cross,
+/// which swaps the grouping around that point without moving a pixel.
+///
+/// Colors are not here — the button is drawn in the separator's own palette
+/// ([`SeparatorStyle::color_idle`] / [`SeparatorStyle::color_hovered`] /
+/// [`SeparatorStyle::color_dragged`]), because it *is* part of the separator as far as the eye
+/// is concerned. What this struct carries is the one thing the button cannot inherit: how big
+/// a target it is.
+///
+/// # Why there are two margins
+///
+/// The button sits on top of a separator a couple of points wide, so missing it is not a
+/// no-op — the press lands on the separator underneath and starts a resize drag instead. It
+/// therefore catches the pointer from outside the square it is drawn in (`catch_extra`), and,
+/// once it has caught it, holds on from further out still (`hold_extra`). Without that second,
+/// wider radius a pointer resting near the edge of the first one flips between "toggle" and
+/// "resize the separator" on every pixel of jitter: the cursor, the highlight and the meaning
+/// of a click all change with it.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+pub struct CrossSplitToggleStyle {
+    /// Side of the square the button is drawn as while it is not holding the pointer, in
+    /// points. By `Default` it's `14.0`.
+    pub size: f32,
+
+    /// How far outside that square the pointer is still caught, in points. By `Default` it's
+    /// `6.0`.
+    ///
+    /// A button holding the pointer is drawn filling exactly this zone, so what is live is
+    /// what can be seen.
+    pub catch_extra: f32,
+
+    /// How far outside the catch zone the pointer is held once caught, in points. By `Default`
+    /// it's `6.0`. Setting it to `0.0` removes the hysteresis.
+    pub hold_extra: f32,
 }
 
 /// Specifies the look and feel of tab bars.
@@ -359,6 +400,7 @@ impl Default for Style {
             main_surface_border_rounding: CornerRadius::default(),
             buttons: ButtonsStyle::default(),
             separator: SeparatorStyle::default(),
+            cross_split_toggle: CrossSplitToggleStyle::default(),
             tab_bar: TabBarStyle::default(),
             tab: TabStyle::default(),
             overlay: OverlayStyle::default(),
@@ -407,6 +449,16 @@ impl Default for SeparatorStyle {
             color_idle: Color32::BLACK,
             color_hovered: Color32::GRAY,
             color_dragged: Color32::WHITE,
+        }
+    }
+}
+
+impl Default for CrossSplitToggleStyle {
+    fn default() -> Self {
+        Self {
+            size: 14.0,
+            catch_extra: 6.0,
+            hold_extra: 6.0,
         }
     }
 }

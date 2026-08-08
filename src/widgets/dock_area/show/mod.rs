@@ -710,7 +710,8 @@ impl<Tab> DockArea<'_, Tab> {
         // Clone out of `style` first: it may be borrowed from `self.style`, and
         // `draw_cross_split_toggle` needs `&mut self`.
         let separator_style = style.separator.clone();
-        self.draw_cross_split_toggle(ui, path, &separator_style);
+        let toggle_style = style.cross_split_toggle.clone();
+        self.draw_cross_split_toggle(ui, path, &separator_style, &toggle_style);
     }
 }
 

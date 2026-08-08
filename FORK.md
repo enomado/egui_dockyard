@@ -134,6 +134,24 @@ two device pixels of misalignment as one line, at ppp 1 it accepts one. The numb
 ppp 1. Whether it should be scaled, or should be derived from the separator width instead, has
 not been thought about.
 
+**The toggle's catch zone is a hole in the separator it sits on.** The button now answers to a
+press up to `size / 2 + catch_extra` from the crossing (13 px by default, 19 while it holds the
+pointer), and every one of those points used to be a place you could grab the separator and drag.
+That is the trade the magnet buys and it is the right one — a miss used to start a resize nobody
+asked for — but nothing states the limit anywhere: a style that grows `catch_extra` past a short
+part's half-length would leave a divider with no grabbable stretch at all. Worth either a bound
+derived from the shortest part on the line, or a plain sentence saying the knob can eat a drag.
+
+**Nothing stops the next widget drawn at an absolute position from claiming layout space.** The
+window-creep bug was one call — `ui.scope_builder`, whose contract is to fold the child into the
+parent — placed in code that draws over geometry the layout already owns. The rule is not
+mechanical (the dragged tab in `leaf.rs` uses the same call and genuinely wants its slot in the
+tab bar), so it cannot be a lint; but the dock's outermost `Ui` is exactly the thing a floating
+window measures itself by, and today nothing says so at the place where it matters. A cheap gate
+would be the shape of `a_cross_in_a_window_does_not_make_the_window_creep` — a window left alone
+for ten frames does not move — run over a scene with every ornament the dock draws on it, not just
+a cross.
+
 **The sweep reaches long bands thinly.** `CrossWatch::in_a_long_band` counted 2 of 17 presses on
 the seeds as they stand, and `Step::BuildCross { deep: true }` only ever lengthens *one* side to
 three parts. Nothing in the sweep builds a crossing that is deep on both sides, or a line

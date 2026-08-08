@@ -117,28 +117,32 @@ struct Crossings {
 }
 
 impl Crossings {
-    /// How far apart two dividers may be and still be one line: **one device pixel**.
+    /// The floor under [`CrossSplitToggleStyle::align_tolerance`]: **one device pixel**.
     ///
-    /// Not a taste setting — it is the finest answer the screen can give, and it is exactly the
-    /// gap under which the button can keep its promise. Every boundary in a [`Band`] is the
-    /// midpoint of two edges [`DockArea::compute_rect_sizes`] has already snapped to whole
-    /// device pixels, so two dividers aimed at one line come out at most one device pixel
-    /// apart; a transposition averages the pair, which moves each of them by at most half of
-    /// that — back onto the pixel it was already drawn on. Accept a wider gap and the "+" is a
-    /// visible jog, and pressing it *does* move the picture.
-    const TOLERANCE_DEVICE_PIXELS: f32 = 1.0;
+    /// A floor, not the policy — the policy is the style's, in points, and it is normally the
+    /// wider of the two. What this pins down is what the *smallest* useful answer means. Every
+    /// boundary in a [`Band`] is the midpoint of two edges [`DockArea::compute_rect_sizes`] has
+    /// already snapped to whole device pixels, so two dividers aimed at one line come out at
+    /// most one device pixel apart. A tolerance below that would refuse pairs that are drawn on
+    /// the same pixel — "the same line" would mean "the same float", which is not a thing a
+    /// layout can promise and not a thing an eye can check.
+    const TOLERANCE_FLOOR_DEVICE_PIXELS: f32 = 1.0;
 
-    /// [`Self::TOLERANCE_DEVICE_PIXELS`] in points, at a given `pixels_per_point`.
+    /// How far apart two dividers may sit and still be one crossing, in points: the style's
+    /// `align_tolerance`, never less than one device pixel.
     ///
-    /// This is the whole reason the number is not a constant in points, which is what it used
-    /// to be: a flat `1.0` is one device pixel on the ppp-1 screen it was picked on and two of
-    /// them at ppp 2, so the same crate was twice as willing to call a jog a cross on a
-    /// high-density display.
+    /// The floor is expressed in device pixels and not in points, which is the whole reason it
+    /// is a function of `pixels_per_point` rather than a constant: a flat `1.0` is one device
+    /// pixel on the ppp-1 screen it was picked on and two of them at ppp 2, so the same crate
+    /// was twice as willing to call a jog a cross on a high-density display.
     ///
     /// The slack is float arithmetic, not policy: a bound is a sum of two snapped edges halved,
-    /// so a gap that *is* one device pixel can land a few ulps the wrong side of the limit.
-    fn tolerance(pixels_per_point: f32) -> f32 {
-        (Self::TOLERANCE_DEVICE_PIXELS + 1e-3) / pixels_per_point
+    /// so a gap that *is* the tolerance can land a few ulps the wrong side of the limit.
+    fn tolerance(toggle: &CrossSplitToggleStyle, pixels_per_point: f32) -> f32 {
+        toggle
+            .align_tolerance
+            .max(Self::TOLERANCE_FLOOR_DEVICE_PIXELS / pixels_per_point)
+            + 1e-3
     }
 
     /// The widest square the button at crossing `index` may occupy.
@@ -354,12 +358,14 @@ impl<Tab> DockArea<'_, Tab> {
     /// `outer` must already be known to be a split (parent) node; callers of `show_separator`
     /// establish that before this runs.
     ///
-    /// `pixels_per_point` is what turns [`Crossings::TOLERANCE_DEVICE_PIXELS`] into a distance
-    /// in the points this geometry is measured in — see [`Crossings::tolerance`].
+    /// How far out of line the two dividers may be and still be one crossing comes from
+    /// `toggle`; `pixels_per_point` is what puts the floor under it in the points this geometry
+    /// is measured in — see [`Crossings::tolerance`].
     fn detect_crossings(
         &self,
         outer: NodePath,
         extra: f32,
+        toggle: &CrossSplitToggleStyle,
         pixels_per_point: f32,
     ) -> Option<Crossings> {
         let outer_horizontal = self.dock_state[outer].is_horizontal();
@@ -386,7 +392,7 @@ impl<Tab> DockArea<'_, Tab> {
         // same line and, unlike a nested scan, cannot hand one divider two partners — which
         // would put two buttons on one point the moment two dividers ever sat a pixel apart.
         let (first, second) = (band0.divider_positions(), band1.divider_positions());
-        let tolerance = Crossings::tolerance(pixels_per_point);
+        let tolerance = Crossings::tolerance(toggle, pixels_per_point);
         let (mut i, mut j) = (0, 0);
         let mut at = Vec::new();
         while i < first.len() && j < second.len() {
@@ -487,7 +493,8 @@ impl<Tab> DockArea<'_, Tab> {
             return;
         }
         let pixels_per_point = ui.ctx().pixels_per_point();
-        let Some(crossings) = self.detect_crossings(outer, style.extra, pixels_per_point) else {
+        let Some(crossings) = self.detect_crossings(outer, style.extra, toggle, pixels_per_point)
+        else {
             return;
         };
 
@@ -585,9 +592,11 @@ impl<Tab> DockArea<'_, Tab> {
             }
         });
 
-        // Grown to exactly the catch zone while it holds the pointer: the target you can hit is
-        // then the target you can see, and the growth itself is the feedback that you have it.
-        let button_rect = if holds_now { catch_rect } else { drawn_idle };
+        // One rectangle, held or not. The margins widen what answers to the pointer; they do
+        // not widen what is painted. Growing the square to the catch zone was tried — it made
+        // the button more than double under the cursor at the default style, which reads as the
+        // thing being dragged rather than offered. Colour carries the "you have it" instead.
+        let button_rect = drawn_idle;
         let button_size = button_rect.width();
 
         let color = if holds_now {
@@ -633,8 +642,14 @@ impl<Tab> DockArea<'_, Tab> {
     ///
     /// The four rectangles of a 2x2 are what makes that case look like a swap of two groupings;
     /// in general there are `n + m` of them and the "swap" reading falls away, but the promise
-    /// does not: not a pixel moves, and pressing the button at the same point again brings the
-    /// original grouping back.
+    /// does not: nothing moves but the two dividers that were out of line, and pressing the
+    /// button at the same point again brings the original grouping back.
+    ///
+    /// Those two are what the magnet is for. They become one line — their average, see the `line`
+    /// below — so each moves by half of whatever gap
+    /// [`CrossSplitToggleStyle::align_tolerance`] let through, and on the pair that was already
+    /// aligned that is nothing at all. It is the one movement a press is allowed to make, and it
+    /// is the point of pressing.
     ///
     /// This runs in the *middle* of the separator pass (its only caller is a toggle button,
     /// drawn at the tail of `show_separator` for `outer`), and `show_separator` is still going
@@ -1081,9 +1096,17 @@ mod tests {
         let bottom_divider_x =
             0.5 * (rect(&ctx, bottom_left).right() + rect(&ctx, bottom_mid).left());
         let top_divider_x = 0.5 * (rect(&ctx, top_left).right() + rect(&ctx, top_right).left());
+        // Measured against the *floor* — one device pixel — and not against the style's magnet,
+        // which is points wide and would happily call a botched aim a crossing. This scene puts
+        // the two dividers on the same pixel by measurement; a guard that accepted whatever the
+        // magnet accepts would stop noticing when that aim went wrong.
+        let strict = CrossSplitToggleStyle {
+            align_tolerance: 0.0,
+            ..CrossSplitToggleStyle::default()
+        };
         assert!(
             (bottom_divider_x - top_divider_x).abs()
-                <= Crossings::tolerance(ctx.pixels_per_point()),
+                <= Crossings::tolerance(&strict, ctx.pixels_per_point()),
             "the scene was not built as intended: the two dividers are at {top_divider_x} and \
              {bottom_divider_x}, so there is no crossing for the detector to miss"
         );
@@ -1282,14 +1305,16 @@ mod tests {
         run_frame(ctx, state, style, id, vec![]);
     }
 
-    /// "The same line" is one **device** pixel, so what it means in points depends on
-    /// `pixels_per_point`.
+    /// How far out of line two dividers may be and still be offered a button is the style's
+    /// `align_tolerance`, in points — and it never falls below one **device** pixel, which is
+    /// what `0.0` means and why that meaning survives a change of `pixels_per_point`.
     ///
-    /// One point of misalignment is one device pixel at ppp 1 and two at ppp 2, and two is a
-    /// jog you can see — press the button there and the transposition, which averages the pair,
-    /// moves the picture. The tolerance used to be a flat 1.0 point, so the crate was exactly
-    /// twice as willing to call a jog a cross on a high-density screen. This is that difference,
-    /// on one scene: offered at ppp 1, refused at ppp 2.
+    /// Both halves are here because each alone would pass on a broken rule. Only the floor, and
+    /// the knob could be read as a constant; only the knob, and a `0.0` style would refuse pairs
+    /// drawn on the very same pixel — "the same line" would mean "the same float". The floor's
+    /// own point is density: one *point* of misalignment is one device pixel at ppp 1 and two at
+    /// ppp 2, so a floor stated in points would have been twice as loose on a high-density
+    /// screen (it once was — a flat `1.0`).
     ///
     /// The geometry is dictated rather than rendered. The distances at stake are smaller than
     /// the pixel snapping the layout pass applies, so a scene aimed through fractions cannot
@@ -1297,7 +1322,7 @@ mod tests {
     /// which gaps are accepted. The tree is a real 2x2 cross; only the rectangles are hand-cut,
     /// and they are cut as a partition of the screen, the way the layout pass would.
     #[test]
-    fn two_dividers_are_one_line_within_a_device_pixel() {
+    fn the_magnet_reaches_as_far_as_the_style_says_and_never_less_than_a_device_pixel() {
         let (mut state, outer_id, [top_left, bottom_left, top_right, bottom_right]) =
             build_cross(true, 0.5, 0.5);
         let outer = NodePath::new(SurfaceIndex::main(), outer_id);
@@ -1339,33 +1364,61 @@ mod tests {
             layout
         };
 
-        let mut offered = |gap: f32, pixels_per_point: f32| {
+        let mut offered = |gap: f32, pixels_per_point: f32, align_tolerance: f32| {
+            let toggle = CrossSplitToggleStyle {
+                align_tolerance,
+                ..CrossSplitToggleStyle::default()
+            };
             let mut area = DockArea::new(&mut state).id(Id::new(DOCK_ID));
             area.layout = scene(gap);
-            area.detect_crossings(outer, band_style().separator.extra, pixels_per_point)
-                .is_some_and(|crossings| !crossings.at.is_empty())
+            area.detect_crossings(
+                outer,
+                band_style().separator.extra,
+                &toggle,
+                pixels_per_point,
+            )
+            .is_some_and(|crossings| !crossings.at.is_empty())
         };
 
+        // The knob: what is offered is what the style asked for, in points, at any density.
         assert!(
-            offered(0.0, 1.0) && offered(0.0, 2.0),
+            offered(7.0, 1.0, 8.0) && offered(7.0, 2.0, 8.0),
+            "a gap inside the style's tolerance is a crossing the magnet is meant to close"
+        );
+        assert!(
+            !offered(9.0, 1.0, 8.0) && !offered(9.0, 2.0, 8.0),
+            "a gap outside the style's tolerance is a jog, and the magnet does not reach it"
+        );
+        assert!(
+            offered(9.0, 1.0, 12.0),
+            "the reach is the style's to set: the same gap a tighter style refused"
+        );
+        assert!(
+            !offered(7.0, 1.0, 2.0),
+            "a tighter style than the default has to bind, or the knob is decoration"
+        );
+
+        // The floor: `0.0` is one device pixel, and one *device* pixel at every density.
+        assert!(
+            offered(0.0, 1.0, 0.0) && offered(0.0, 2.0, 0.0),
             "two dividers on exactly the same line are a cross at any density"
         );
         assert!(
-            offered(1.0, 1.0),
+            offered(1.0, 1.0, 0.0),
             "one point apart is one device pixel at ppp 1 — the finest the screen can tell apart"
         );
         assert!(
-            !offered(1.0, 2.0),
+            !offered(1.0, 2.0, 0.0),
             "one point apart is two device pixels at ppp 2, which is a jog, not a cross"
         );
         assert!(
-            offered(0.5, 2.0),
-            "half a point is one device pixel at ppp 2, so the tolerance shrank with the pixel \
+            offered(0.5, 2.0, 0.0),
+            "half a point is one device pixel at ppp 2, so the floor shrank with the pixel \
              rather than vanishing"
         );
         assert!(
-            !offered(2.0, 1.0),
-            "the tolerance is one device pixel, not any pixel"
+            !offered(2.0, 1.0, 0.0),
+            "the floor is one device pixel, not any pixel"
         );
     }
 
@@ -1683,9 +1736,14 @@ mod tests {
     ) -> Vec<Pos2> {
         let mut area = DockArea::new(state).id(id);
         area.layout = DockLayout::load(ctx, id);
-        area.detect_crossings(outer, style.separator.extra, ctx.pixels_per_point())
-            .map(|crossings| crossings.at.iter().map(|&(_, center)| center).collect())
-            .unwrap_or_default()
+        area.detect_crossings(
+            outer,
+            style.separator.extra,
+            &style.cross_split_toggle,
+            ctx.pixels_per_point(),
+        )
+        .map(|crossings| crossings.at.iter().map(|&(_, center)| center).collect())
+        .unwrap_or_default()
     }
 
     /// Where the *only* toggle button on `outer`'s line sits. Panics if there is more than one:

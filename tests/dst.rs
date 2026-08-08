@@ -160,6 +160,14 @@ struct CrossPoint {
     /// How many crossings this one's line carries, itself included. More than one means a press
     /// has to pivot around the crossing pressed rather than around "the crossing".
     on_line: usize,
+    /// How far the two boundaries that meet here are actually out of line, in points.
+    ///
+    /// Not a coverage field: the "nothing moved" oracle needs it. A press averages the pair, so
+    /// a crossing found `gap` apart is one where the picture is *supposed* to move — by `gap / 2`
+    /// on either side of it, and by nothing anywhere else. Judged against the style's whole
+    /// tolerance instead, the oracle would allow that movement on every press, including the ones
+    /// that were already collinear and had nothing to close.
+    gap: f32,
 }
 
 /// How far past a bare 2x2 [`Step::BuildCross`] builds.
@@ -974,11 +982,15 @@ impl Sim {
     /// screen, and a rule that looks one level down therefore answers differently for the same
     /// pixels.
     fn cross_toggles(&self) -> Vec<CrossPoint> {
-        /// The crate's `Crossings::TOLERANCE_DEVICE_PIXELS`, in the points this harness measures
-        /// in: it runs at one device pixel per point, so the two numbers coincide here.
-        /// Deliberately not looser — a harness that accepted near-misses the crate rejects would
-        /// press empty pixels and call the silence a pass.
-        const TOLERANCE: f32 = 1.0;
+        // How far out of line two boundaries may be and still carry a button: the style's own
+        // magnet, floored the way the crate floors it (`Crossings::tolerance`) — this harness
+        // runs at one device pixel per point, so the floor is 1.0 here.
+        //
+        // Read off the style rather than written down, because a number written down goes stale
+        // in both directions and each way is a hole: looser than the crate and the harness
+        // presses empty pixels and calls the silence a pass; tighter, and every crossing the
+        // crate offers in the gap between the two is one the sweep never presses.
+        let tolerance = self.style.cross_split_toggle.align_tolerance.max(1.0);
 
         let layout = self.layout();
         self.state
@@ -1008,7 +1020,7 @@ impl Sim {
                 let mut points = Vec::new();
                 while i < first.len() && j < second.len() {
                     let gap = first[i] - second[j];
-                    if gap.abs() <= TOLERANCE {
+                    if gap.abs() <= tolerance {
                         let inner = (first[i] + second[j]) * 0.5;
                         points.push(CrossPoint {
                             outer: path,
@@ -1020,6 +1032,7 @@ impl Sim {
                             parts: [band0.len() - 1, band1.len() - 1],
                             // Filled in once the walk knows how many it found.
                             on_line: 0,
+                            gap: gap.abs(),
                         });
                         i += 1;
                         j += 1;
@@ -1671,6 +1684,7 @@ impl Sim {
                     at,
                     parts,
                     on_line,
+                    gap,
                 } = crosses[cross % crosses.len()];
                 // Only the window guard here: `toggle_over` is what the *separator* steps use to
                 // stay off this button, and `at` is the button, so applying it here would make
@@ -1714,21 +1728,27 @@ impl Sim {
                     // Judged on every leaf in the dock, not just the four of the cross — a
                     // regrouping that disturbed something elsewhere would be just as wrong.
                     //
-                    // A pixel of slack, because a pixel is what the crate itself calls collinear
-                    // when it decides the cross is there at all; holding the result to a finer
-                    // rule than the detection would be judging it by a promise it never made.
+                    // The slack is the misalignment this very press was closing, halved, plus a
+                    // pixel: the two dividers that met `gap` apart become their average, so each
+                    // moves `gap / 2` and the leaves on them follow. Taken from the crossing that
+                    // was pressed and not from the style's tolerance, which is the reach of the
+                    // magnet rather than the distance any one press covers — a press on an
+                    // already-collinear pair is still held to a pixel, which is what the strict
+                    // form of this oracle was for.
+                    let slack = 0.5 * gap + 1.0;
                     let after = self.leaf_rects();
                     let moved = rects_before.iter().find_map(|(leaf, was)| {
                         let (_, now) = after.iter().find(|(other, _)| other == leaf)?;
                         let off = (now.min - was.min)
                             .length()
                             .max((now.max - was.max).length());
-                        (off > 1.0).then_some((*leaf, *was, *now))
+                        (off > slack).then_some((*leaf, *was, *now))
                     });
                     if let Some((leaf, was, now)) = moved {
                         forbidden = Some(format!(
-                            "the cross-split toggle regroups a 2x2 without moving anything on \
-                             screen, and leaf {leaf:?} went from {was:?} to {now:?}. The two \
+                            "the cross-split toggle regroups a 2x2 moving nothing on screen but \
+                             the {gap}pt of misalignment it closes, and leaf {leaf:?} went from \
+                             {was:?} to {now:?} — further than the {slack}pt that allows. The two \
                              groupings describe the same four rectangles; a leaf that moved means \
                              the new fractions do not reproduce the old picture"
                         ));

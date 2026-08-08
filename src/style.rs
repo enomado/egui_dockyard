@@ -200,20 +200,40 @@ pub struct SeparatorStyle {
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(default))]
 pub struct CrossSplitToggleStyle {
-    /// Side of the square the button is drawn as while it is not holding the pointer, in
-    /// points. By `Default` it's `14.0`.
+    /// Side of the square the button is drawn as, in points. By `Default` it's `14.0`.
+    ///
+    /// One size, hovered or not: the margins below widen what answers to the pointer, never
+    /// what is painted. A button that grew under the cursor was tried and taken back out —
+    /// at the default margins it more than doubled, and a control that changes size on
+    /// approach reads as a thing being dragged, not as a thing being offered.
     pub size: f32,
 
     /// How far outside that square the pointer is still caught, in points. By `Default` it's
     /// `6.0`.
-    ///
-    /// A button holding the pointer is drawn filling exactly this zone, so what is live is
-    /// what can be seen.
     pub catch_extra: f32,
 
     /// How far outside the catch zone the pointer is held once caught, in points. By `Default`
     /// it's `6.0`. Setting it to `0.0` removes the hysteresis.
     pub hold_extra: f32,
+
+    /// How far apart the two dividers may sit and still be offered a button, in points. By
+    /// `Default` it's `8.0`.
+    ///
+    /// This is the magnet's reach, and it is a different question from the two margins above:
+    /// they are about missing a button *with the pointer*, this one is about whether the button
+    /// is there at all. Two dividers a few points out of line are a cross a hand meant to make
+    /// and did not quite; the button is what offers to close the gap, so a tolerance that only
+    /// admitted pairs already on the same pixel offered it exactly where it was not needed.
+    ///
+    /// The price is stated plainly, because there is one: a transposition averages the pair, so
+    /// pressing the button on a pair `d` points apart moves each of them by `d / 2`. That is the
+    /// magnet doing its job — the two lines come out as one — but it is a movement, and it grows
+    /// with this number. It is also what bounds it: at some width the "+" is drawn on a jog
+    /// visible enough that a press reads as the layout jumping rather than snapping.
+    ///
+    /// Floored at one device pixel, so `0.0` still means "the same line" rather than "bit-exact",
+    /// and means it identically at every `pixels_per_point` — see `Crossings::tolerance`.
+    pub align_tolerance: f32,
 }
 
 impl CrossSplitToggleStyle {
@@ -503,6 +523,7 @@ impl Default for CrossSplitToggleStyle {
             size: 14.0,
             catch_extra: 6.0,
             hold_extra: 6.0,
+            align_tolerance: 8.0,
         }
     }
 }

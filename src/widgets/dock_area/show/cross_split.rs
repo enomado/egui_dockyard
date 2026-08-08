@@ -193,6 +193,19 @@ fn toggle_metrics(toggle: &CrossSplitToggleStyle, room: f32) -> (f32, f32, f32) 
     )
 }
 
+/// How far `point` is from `rect` in the metric a *square* reaches in: the larger of the two
+/// axis gaps, and zero if the point is inside.
+///
+/// The button is a square centred on the crossing, so a square of half-side `h` covers `rect`
+/// exactly when **both** gaps are under `h` — which makes the larger of the two the distance
+/// that matters. Measuring in a straight line instead would call a divider that is far away
+/// along one axis and level along the other "close", and shrink the button for nothing.
+fn square_gap(rect: Rect, point: Pos2) -> f32 {
+    let x = (rect.min.x - point.x).max(point.x - rect.max.x).max(0.0);
+    let y = (rect.min.y - point.y).max(point.y - rect.max.y).max(0.0);
+    x.max(y)
+}
+
 /// One edge of a rectangle along an axis: `x` for a horizontal one, `y` for a vertical one.
 fn edge(rect: Rect, horizontal: bool, far: bool) -> f32 {
     match (horizontal, far) {
@@ -404,6 +417,56 @@ impl<Tab> DockArea<'_, Tab> {
         })
     }
 
+    /// The room the button at crossing `index` may take: what the two bands leave it, bounded
+    /// once more by every *other* divider actually drawn in this surface.
+    ///
+    /// [`Crossings::room_at`] reads the bands, and a band is a list of parts — each of which is a
+    /// whole subtree, opaque to it. A part two columns wide may carry a divider of its own a
+    /// level down, sitting a few pixels from the crossing, and a bound that only knows "the
+    /// nearest boundary in *this* band" cheerfully lets the button cover it. Covering it is not
+    /// cosmetic: the button answers to presses over its whole reach and sits in a
+    /// [`Order::Foreground`] layer, so every point it takes is a point where that divider can no
+    /// longer be grabbed.
+    ///
+    /// The honest bound is the distance to the nearest divider on screen, and the layout pass
+    /// knows exactly where those are — `separator_rect` is the same derivation the dividers are
+    /// drawn from, so this cannot answer about a line that is not there. The three dividers the
+    /// crossing is *made of* are skipped: the button is meant to sit on them, and they run
+    /// through its centre.
+    ///
+    /// Same convention as `room_at`: `room` is the button's full width and is bounded by a
+    /// one-sided distance, so at the limit the button reaches half way to what it must not
+    /// cover. Nothing in the default style comes near either bound — `separator.extra` keeps
+    /// every part 175 px long, against a 38 px button at its widest.
+    fn toggle_room(
+        &self,
+        crossings: &Crossings,
+        index: usize,
+        separator: &SeparatorStyle,
+        pixels_per_point: f32,
+    ) -> f32 {
+        let ([i, j], center) = crossings.at[index];
+        let surface = crossings.outer.surface;
+        let own = [
+            crossings.outer.node,
+            crossings.bands[0].dividers[i],
+            crossings.bands[1].dividers[j],
+        ];
+
+        let mut room = crossings.room_at(index);
+        for node in self.dock_state[surface].breadth_first() {
+            if own.contains(&node) {
+                continue;
+            }
+            let path = NodePath::new(surface, node);
+            let Some(divider) = self.separator_rect(path, separator, pixels_per_point) else {
+                continue;
+            };
+            room = room.min(square_gap(divider, center));
+        }
+        room
+    }
+
     /// Draws a toggle button at every crossing on `outer`'s line and, on click, transposes the
     /// grouping around the one that was pressed.
     ///
@@ -483,8 +546,10 @@ impl<Tab> DockArea<'_, Tab> {
         ));
         let layer_id = LayerId::new(Order::Foreground, button_id);
 
-        // Never wider than the crossing has room for — see `toggle_metrics`.
-        let (size, catch_extra, hold_extra) = toggle_metrics(toggle, crossings.room_at(index));
+        // Never wider than the crossing has room for — see `toggle_metrics` for how the three
+        // lengths are cut down, and `toggle_room` for what "room" answers to.
+        let room = self.toggle_room(crossings, index, style, ui.ctx().pixels_per_point());
+        let (size, catch_extra, hold_extra) = toggle_metrics(toggle, room);
         let drawn_idle = Rect::from_center_size(center, Vec2::splat(size));
         let catch_rect = drawn_idle.expand(catch_extra);
 
@@ -1449,6 +1514,82 @@ mod tests {
         let center =
             toggle_center(&ctx, &mut state, style, id, outer).expect("the toggle is there");
         (ctx, state, outer, center)
+    }
+
+    /// A divider hidden *inside* a part still gets to be grabbed.
+    ///
+    /// The bands the crossing is read off see their parts as single opaque things, so a divider
+    /// one level down inside a part is invisible to `Crossings::room_at` however close to the
+    /// crossing it is. The button is drawn in a foreground layer and answers to presses over its
+    /// whole reach, so a bound that cannot see that divider hands its grab zone away — the
+    /// divider is on screen, the cursor changes over it, and pressing it toggles the grouping
+    /// instead.
+    ///
+    /// The scene puts one 10 px from the crossing, which the default bound would have called
+    /// "450 px of room". Both halves are asserted, because either alone passes for the wrong
+    /// reason: that the divider drags says nothing if the button has simply stopped existing,
+    /// and that the button works says nothing about what it covers.
+    #[test]
+    fn a_divider_inside_a_part_is_not_swallowed_by_the_button() {
+        /// Far enough from the crossing to be a different place, close enough that a button at
+        /// its full 38 px width would cover it.
+        const GAP: f32 = 10.0;
+
+        let id = Id::new(DOCK_ID);
+        let style = band_style();
+        let ctx = Context::default();
+
+        let (mut state, outer_id, [top_left, ..]) = build_cross(true, 0.5, 0.5);
+        let outer = NodePath::new(SurfaceIndex::main(), outer_id);
+        render(&ctx, &mut state, &style, id);
+        let center =
+            toggle_center(&ctx, &mut state, &style, id, outer).expect("the toggle is there");
+
+        // Cut the quadrant above-left of the crossing in two, with the cut `GAP` short of the
+        // crossing. Splitting a part does not change the band it belongs to — the new node is of
+        // the other orientation, so the chain stops at it — and the crossing is still there.
+        let quadrant = leaf_rects(&DockLayout::load(&ctx, id), &[top_left])[0];
+        let fraction = (center.x - GAP - quadrant.min.x) / quadrant.width();
+        let [_, _] = state.split(
+            NodePath::new(SurfaceIndex::main(), top_left),
+            Split::Right,
+            fraction,
+            Node::leaf(9u32),
+        );
+        render(&ctx, &mut state, &style, id);
+
+        // Where it actually landed: a fraction is applied to the rectangle the renderer hands the
+        // node, so aiming in points and reading back in points is the only way to know.
+        let divider = leaf_rects(&DockLayout::load(&ctx, id), &[top_left])[0]
+            .max
+            .x;
+        assert!(
+            (center.x - divider - GAP).abs() < 2.0,
+            "the scene was meant to put a divider {GAP}px from the crossing at {}, and it is at \
+             {divider}",
+            center.x
+        );
+        assert!(
+            toggle_center(&ctx, &mut state, &style, id, outer).is_some(),
+            "splitting a part removed the crossing, so this scene tests nothing"
+        );
+
+        // Press the hidden divider at its closest point to the crossing. A click is the probe,
+        // not a drag: egui hands a drag to the topmost widget that *senses* drag, and the button
+        // senses only clicks — so a drag reaches the separator underneath whatever the button
+        // covers, and would report this bug as fixed while it was still there.
+        let press = Pos2::new(divider, center.y - 5.0);
+        assert!(
+            !click_flips(&ctx, &mut state, &style, id, outer, press),
+            "a press {GAP}px from the crossing, on a divider of its own, toggled the grouping: \
+             the button is sitting on a divider it cannot see"
+        );
+
+        // And the button is still a button, at the crossing itself.
+        assert!(
+            click_flips(&ctx, &mut state, &style, id, outer, center),
+            "the crossing lost its button altogether, so the assertion above passes for free"
+        );
     }
 
     /// The magnet: a press that misses the drawn square by less than `catch_extra` is still the

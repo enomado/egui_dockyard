@@ -14,7 +14,8 @@ use crate::dock_area::tab_removal::ForcedRemoval;
 use crate::layout::DockLayout;
 use crate::tab_viewer::OnCloseResponse;
 use crate::{
-    AllowedSplits, DockArea, Node, OverlayType, Style, SurfaceIndex, TabDestination, TabViewer,
+    AllowedSplits, DockArea, Node, OverlayType, SeparatorStyle, Style, SurfaceIndex,
+    TabDestination, TabViewer,
     utils::{expand_to_pixel, fade_dock_style, map_to_pixel},
 };
 
@@ -506,6 +507,68 @@ impl<Tab> DockArea<'_, Tab> {
         }
     }
 
+    /// The rectangle the divider of the split at `path` is drawn in — and, expanded by
+    /// [`SeparatorStyle::extra_interact_width`](crate::SeparatorStyle::extra_interact_width),
+    /// grabbed by.
+    ///
+    /// `None` where there is no divider on screen to speak of: a node that is not a split, one
+    /// the layout pass has no rectangle for, or a vertical split with a collapsed child — that
+    /// last one is cut at the strip's edge rather than at its ratio, and `show_separator` does
+    /// not draw or hit-test it at all.
+    ///
+    /// A function, and the only derivation of this rectangle in the crate, for the reason
+    /// [`split_rect`] gives: the drawn divider, the rectangle it is grabbed by, and anything
+    /// that needs to know where it *is* have to name the same line. The third of those is new —
+    /// the cross-split button is sized by how close the nearest other divider is (see
+    /// `DockArea::toggle_room`) — and re-deriving it there would have been the third copy of an
+    /// arithmetic that has already drifted once.
+    pub(super) fn separator_rect(
+        &self,
+        path: NodePath,
+        separator: &SeparatorStyle,
+        pixels_per_point: f32,
+    ) -> Option<Rect> {
+        let node = &self.dock_state[path.surface][path.node];
+        let split = node.get_split()?;
+        let fraction = split.fraction;
+        let horizontal = node.is_horizontal();
+
+        if !horizontal {
+            let [left, right] = self.child_paths(path);
+            if self.dock_state[left].is_collapsed() || self.dock_state[right].is_collapsed() {
+                return None;
+            }
+        }
+
+        let rect = split_rect(self.layout.rect(path)?, pixels_per_point);
+        let (near, range) = if horizontal {
+            (rect.min.x, rect.width())
+        } else {
+            (rect.min.y, rect.height())
+        };
+        let midpoint = SeparatorBand::new(fraction, range, separator.extra).midpoint(near, range);
+        let low = map_to_pixel(
+            midpoint - separator.width * 0.5,
+            pixels_per_point,
+            f32::round,
+        );
+        let high = map_to_pixel(
+            midpoint + separator.width * 0.5,
+            pixels_per_point,
+            f32::round,
+        );
+
+        let mut drawn = rect;
+        if horizontal {
+            drawn.min.x = low;
+            drawn.max.x = high;
+        } else {
+            drawn.min.y = low;
+            drawn.max.y = high;
+        }
+        Some(drawn)
+    }
+
     fn show_separator(
         &mut self,
         ui: &mut Ui,
@@ -533,6 +596,13 @@ impl<Tab> DockArea<'_, Tab> {
             .rect(path)
             .expect("a separator is only drawn for a node that was just laid out");
 
+        // Where the divider is *this frame* — one derivation, shared with everything else that
+        // needs to know (see `separator_rect`). The collapsed cases it answers `None` for have
+        // already returned above.
+        let drawn = self
+            .separator_rect(path, &style.separator, pixels_per_point)
+            .expect("a separator is only drawn for a split the layout pass just cut");
+
         duplicate! {
             [
                 orientation   dim_point  dim_size;
@@ -544,19 +614,15 @@ impl<Tab> DockArea<'_, Tab> {
                 // same way — see `split_rect`, which is why that is a function and not two
                 // lines inlined twice.
                 let rect = split_rect(node_rect, pixels_per_point);
-                let mut separator = rect;
+                let separator = drawn;
 
-                // Where the boundary is *this frame*, which is not necessarily the number the
-                // tree stores: a ratio the current geometry cannot honour is shown inside the
-                // band without being written back — see `SeparatorBand`. Everything below reads
-                // the band, so the separator that is drawn, the rectangle it is grabbed by and
-                // the cut `compute_rect_sizes` made all name the same line.
+                // The band the *gesture* answers to: a ratio the current geometry cannot honour
+                // is shown clamped without being written back — see `SeparatorBand`. Where that
+                // clamped ratio puts the line on screen is `separator` above, so the divider
+                // drawn, the rectangle it is grabbed by and the cut `compute_rect_sizes` made
+                // all name one line.
                 let range = rect.dim_size();
                 let band = SeparatorBand::new(split.fraction, range, style.separator.extra);
-
-                let midpoint = band.midpoint(rect.min.dim_point, range);
-                separator.min.dim_point = midpoint - style.separator.width * 0.5;
-                separator.max.dim_point = midpoint + style.separator.width * 0.5;
 
                 let mut expand = Vec2::ZERO;
                 expand.dim_point += style.separator.extra_interact_width / 2.0;
@@ -594,20 +660,6 @@ impl<Tab> DockArea<'_, Tab> {
                 } else {
                     None
                 };
-
-                // Same `midpoint` as above — the fraction cannot have moved in between, since
-                // nothing writes it until the gesture block further down. Recomputed here for
-                // years, which is how the two derivations of it drifted apart in the first place.
-                separator.min.dim_point = map_to_pixel(
-                    midpoint - style.separator.width * 0.5,
-                    pixels_per_point,
-                    f32::round,
-                );
-                separator.max.dim_point = map_to_pixel(
-                    midpoint + style.separator.width * 0.5,
-                    pixels_per_point,
-                    f32::round,
-                );
 
                 let color = if response.dragged() {
                     style.separator.color_dragged

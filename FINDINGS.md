@@ -12,6 +12,129 @@ Ordered newest first.
 
 ---
 
+## A collapsed floating window was sized in one coordinate system and drawn in another, so its last row of tabs hung out of the frame
+
+**Status upstream:** not reported.
+
+**Symptom.** Collapse every leaf of a floating window — the arrow at the left of each tab bar —
+and the window becomes a strip of tab bars, one row per leaf. With one leaf the strip was
+already too tight; with two, the bottom row was drawn *through* the window's bottom border and
+out onto the desktop below it, its left-hand buttons sliced in half by the frame while the tab
+button next to them floated free outside. With three rows, the same, one row lower.
+
+**Root cause.** Two numbers meet where a collapsed window is sized, and both were wrong.
+
+*The height the rows need.* A strip of `n` collapsed rows was costed at `n * tab_bar.height`.
+But the rows are stacked by splits, and every split puts a `separator.width` divider between its
+two children — `n - 1` of them, unpaid for. Worse, the divider was centred *on* the boundary the
+collapsed side was cut at:
+
+```rust
+let border_y = rect.min.y + (left_collapsed_count as f32) * style.tab_bar.height;
+let left_separator_border  = map_to_pixel(border_y - style.separator.width * 0.5, ...);
+let right_separator_border = map_to_pixel(border_y + style.separator.width * 0.5, ...);
+```
+
+so each row also gave up half a divider from its own tab bar. At the default one-pixel divider
+that is a hairline, and it is the *shape* of the error that matters: the strip is asked to fit
+into less than it draws, and nothing anywhere calls that an error.
+
+*The height the window is set to.* `Window::min_height` / `max_height` name a window's **outer**
+height — egui says so on the methods: "including frame margins, stroke, and the title bar". The
+number handed to them was measured in the *content* area inside that frame. At the default style
+that is 14 px, most of a tab bar row, lost at every one of the three places a window's height is
+decided: minimized, collapsed, and `WindowState::expanded_height` — the height a window is
+restored to when it is opened again. That third one accumulates: each round trip records the
+shrunken height as the new truth, so collapse-and-expand three times and the window has lost a
+whole row.
+
+**Fix.** One function for each of the two numbers, and no arithmetic left at the call sites.
+
+* `collapsed_strip_height(rows, style)` — `rows` tab bars and the `rows - 1` dividers between
+  them. The collapsed side is then given exactly that, with the divider drawn *beside* the strip
+  rather than through it.
+* `window_chrome_height(frame, style)` — everything between a window's outer height and the
+  content area the dock draws in: the frame's margin and stroke, `Style::dock_area_padding`, and
+  the clearance the surface keeps from its own border. Applied at all three sites, `create_window`
+  included.
+
+**Evidence.** `tests/a_window_fits_what_it_shows.rs`. `every_collapsed_row_gets_a_whole_tab_bar`
+and `the_rows_of_a_collapsed_window_fit_inside_its_frame` walk one to four rows and compare the
+rectangles the layout pass published against what a tab bar is. The round trip is driven through
+the button rather than the model — the model call alone never records a height — and asserts,
+three times over, that the window comes back the size it was; deleting the conversion loses it
+14 px per trip, which is what the assertion reports.
+
+---
+
+## A tab bar painted outside the leaf that owns it, because a `Ui`'s clip rectangle is replaced rather than intersected
+
+**Status upstream:** not reported. The line is upstream's.
+
+**Symptom.** The bottom row of the collapsed window above did not merely fail to fit — it was not
+cut off either. Its tabs were painted over the window's border and beyond it, while the buttons
+at the other end of the same row stopped dead at the frame. One row, two different behaviours at
+its two ends.
+
+**Root cause.** `Ui::set_clip_rect` **replaces** the clip rectangle; it does not intersect with
+what the parent had. `show_leaf` clips to the leaf's rectangle, and then the tab bar undoes it:
+
+```rust
+let mut clip_rect = tabbar_outer_rect;   // always a full tab_bar.height tall
+clip_rect.set_width(available_width);
+tabs_ui.set_clip_rect(clip_rect);        // ...and the leaf's clip is gone
+```
+
+A tab bar is always a whole `tab_bar.height` tall, whatever the leaf it sits in has room for, so
+the difference between the two is exactly the licence this line hands out. That is why the two
+ends of the row behaved differently: the buttons are drawn in the leaf's own `Ui` and were
+clipped, the tabs are drawn in this child and were not.
+
+**Fix.** `tabs_ui.set_clip_rect(clip_rect.intersect(ui.clip_rect()))`. A leaf with no room for
+its tab bar now shows a *cut* tab bar, which is what a leaf too small for its contents should
+look like.
+
+**Evidence.** `a_window_paints_no_text_outside_itself` squeezes a three-row window to half the
+height its rows need — the property is only interesting when the geometry *cannot* be satisfied —
+and checks every text painted that frame against the window it belongs to, taking each shape's
+own clip rectangle into account. Text is the probe because a galley carries its string, so a
+failure names the label that escaped rather than describing a rectangle.
+
+---
+
+## A surface drew a border and then painted over it, most visibly at its rounded corners
+
+**Status upstream:** not reported. The line is upstream's.
+
+**Symptom.** Give the dock a border with any rounding at all and the corners are not there: the
+first thing drawn inside the surface — a tab bar, a filled rectangle with square corners — covers
+the arc. On a window surface the whole border went, rounding or not.
+
+**Root cause.** `allocate_area_for_root_node` strokes the border `StrokeKind::Inside` its
+rectangle and then hands the *same* rectangle over as the area to draw in, inset by half the
+stroke and only on the main surface:
+
+```rust
+ui.painter().rect_stroke(rect, style.main_surface_border_rounding, ..., StrokeKind::Inside);
+if surface == SurfaceIndex::main() {
+    rect = rect.expand(-style.main_surface_border_stroke.width / 2.0);
+}
+```
+
+Half the stroke leaves the outer half of it to be painted over; a rounded corner is worse, because
+the arc bulges inwards from the corner point and no inset along the edges accounts for it.
+
+**Fix.** `border_clearance(style)` — the full stroke width, plus `r - r / sqrt(2)` for the largest
+corner radius, which is exactly how far a quarter arc of radius `r` reaches in from its corner.
+Applied for every surface, not just the main one. It costs nothing at the default style, where the
+rounding is zero and so is the stroke.
+
+**Evidence.** `a_surface_does_not_cover_the_border_it_draws` sets a 3 px border rounded by 14 and
+compares the rectangle the surface got against the rectangle the border was drawn around. Stated
+on rectangles rather than pixels, so it holds for whatever radius a style asks for.
+
+---
+
 ## A "+" between a two-part row and a three-part row was not offered a toggle, because the detector read the tree instead of the picture
 
 **Status upstream:** not applicable — the cross-split toggle is this fork's own feature.

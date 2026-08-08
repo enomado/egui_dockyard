@@ -5,9 +5,36 @@ use egui::{
 
 use crate::{
     DockArea, NodePath, Style, SurfaceIndex, TabViewer, WindowIndex,
-    dock_area::{events::DockEvent, state::State, tab_removal::TabRemoval},
+    dock_area::{
+        events::DockEvent,
+        show::{border_clearance, collapsed_strip_height},
+        state::State,
+        tab_removal::TabRemoval,
+    },
     utils::{fade_visuals, rect_set_size_centered},
 };
+
+/// Everything between a floating window's outer height and the height the dock gets to draw in.
+///
+/// `Window::min_height` / `max_height` name the **outer** size of a window — egui says so on the
+/// methods themselves — while every height the dock computes (a strip of collapsed tab bars, the
+/// height a window is restored to when it expands) is measured in the content area inside all of
+/// this. Handing one to the other unconverted is a window short by exactly this much, which is
+/// how a collapsed window came to be 14 px too small at the default style: enough that its last
+/// row of tabs was drawn over its own bottom border.
+///
+/// Three things stand between the two, and all three are here so that no caller has to remember
+/// the list:
+///
+/// * the window frame — its margin and its stroke;
+/// * [`Style::dock_area_padding`], which `allocate_area_for_root_node` takes off the top;
+/// * the clearance the same function keeps from the border it draws, at both ends.
+fn window_chrome_height(frame: &Frame, style: &Style) -> f32 {
+    let padding = style.dock_area_padding.map_or(0.0, |margin| {
+        f32::from(margin.top) + f32::from(margin.bottom)
+    });
+    frame.total_margin().sum().y + padding + 2.0 * border_clearance(style)
+}
 
 impl<Tab> DockArea<'_, Tab> {
     pub(super) fn show_window_surface(
@@ -27,11 +54,6 @@ impl<Tab> DockArea<'_, Tab> {
         let id = format!("window SurfaceIndex({})", window.0 + 1).into();
         let bounds = self.window_bounds.unwrap();
         let open = true;
-        let egui_window = crate::dock_area::window_ui::create_window(
-            self.dock_state.get_window_state_mut(surf_index).unwrap(),
-            id,
-            bounds,
-        );
 
         // Calculate fading of the window (if any)
         let (fade_factor, fade_style) = match fade_style {
@@ -79,24 +101,45 @@ impl<Tab> DockArea<'_, Tab> {
             frame.shadow.color = frame.shadow.color.linear_multiply(fade_factor);
         }
 
-        let tab_bar_height = self.style.as_ref().unwrap().tab_bar.height;
+        // Every height below is measured in the *content* area the dock draws in; a window is
+        // sized by its **outer** height. `chrome` is the whole of the difference, and it is
+        // applied in exactly the three places a window's height is decided: here for a
+        // minimized window, here for a collapsed one, and inside `create_window` for the
+        // height an expanding window is restored to.
+        let (chrome, minimized_height, collapsed_height) = {
+            let style = self.style.as_ref().unwrap();
+            let chrome = window_chrome_height(&frame, style);
+            let rows = self.dock_state[surf_index].collapsed_leaf_count();
+            (
+                chrome,
+                // A minimized window is one row: expand button, title, and the tab count.
+                style.tab_bar.height + chrome,
+                collapsed_strip_height(rows, style) + chrome,
+            )
+        };
+
+        let egui_window = crate::dock_area::window_ui::create_window(
+            self.dock_state.get_window_state_mut(surf_index).unwrap(),
+            id,
+            bounds,
+            chrome,
+        );
+
         let minimized = self
             .dock_state
             .get_window_state(surf_index)
             .unwrap()
             .is_minimized();
         if minimized {
-            let height = tab_bar_height;
             egui_window
                 .resizable([true, false])
-                .max_height(height)
-                .min_height(height)
+                .max_height(minimized_height)
+                .min_height(minimized_height)
         } else if self.dock_state[surf_index].is_collapsed() {
-            let height = self.dock_state[surf_index].collapsed_leaf_count() as f32 * tab_bar_height;
             egui_window
                 .resizable([true, false])
-                .max_height(height)
-                .min_height(height)
+                .max_height(collapsed_height)
+                .min_height(collapsed_height)
         } else {
             egui_window
         }

@@ -13,8 +13,18 @@ use crate::WindowState;
 /// Consumes the pending "move/resize me" requests recorded in the state — they are
 /// one-shot by design, so calling this twice in a frame would drop them.
 ///
+/// `chrome` is everything between the window's outer height and the content area inside it —
+/// see `window_chrome_height`. It is needed because [`WindowState::expanded_height`] records
+/// what the *dock* was tall, and a window is sized by its outer height: without the conversion
+/// every collapse-and-expand round trip shrank the window by one frame's worth of margin.
+///
 /// The `'static` lifetime means the window's `open` field is always `None`.
-pub(super) fn create_window(state: &mut WindowState, id: Id, bounds: Rect) -> Window<'static> {
+pub(super) fn create_window(
+    state: &mut WindowState,
+    id: Id,
+    bounds: Rect,
+    chrome: f32,
+) -> Window<'static> {
     let new = state.is_new();
     let mut window_constructor = Window::new("").id(id).constrain_to(bounds).title_bar(false);
 
@@ -26,6 +36,7 @@ pub(super) fn create_window(state: &mut WindowState, id: Id, bounds: Rect) -> Wi
     }
     // Reset the height of the window if it is now expanded
     if new && let Some(height) = state.expanded_height() {
+        let height = height + chrome;
         window_constructor = window_constructor.max_height(height).min_height(height);
     }
     state.set_new(false);

@@ -385,9 +385,11 @@ impl<Tab> DockArea<'_, Tab> {
             style.main_surface_border_stroke,
             StrokeKind::Inside,
         );
-        if surface == SurfaceIndex::main() {
-            rect = rect.expand(-style.main_surface_border_stroke.width / 2.0);
-        }
+        // Start drawing inside the border, not on it — see `border_clearance`. Every surface,
+        // not only the main one: the stroke is painted for all of them, and a window surface
+        // used not to step back from it at all, so a bordered window drew its border and then
+        // covered it with the first tab bar.
+        rect = rect.expand(-border_clearance(style));
         ui.allocate_rect(rect, Sense::hover());
 
         let Some(root) = self.dock_state[surface].root() else {
@@ -428,49 +430,35 @@ impl<Tab> DockArea<'_, Tab> {
         {
             let rect = split_rect(parent_rect, pixels_per_point);
 
-            if left_collapsed {
-                // EITHER only left collapsed OR left and right both collapsed
-                let border_y = rect.min.y + (left_collapsed_count as f32) * style.tab_bar.height;
-                let left_separator_border = map_to_pixel(
-                    border_y - style.separator.width * 0.5,
-                    pixels_per_point,
-                    f32::round,
-                );
-                let right_separator_border = map_to_pixel(
-                    border_y + style.separator.width * 0.5,
-                    pixels_per_point,
-                    f32::round,
-                );
-                let left = rect
-                    .intersect(Rect::everything_above(left_separator_border))
-                    .intersect(max_rect);
-                let right = rect
-                    .intersect(Rect::everything_below(right_separator_border))
-                    .intersect(max_rect);
-                self.layout.set_rect(left_path, left);
-                self.layout.set_rect(right_path, right);
+            // The collapsed side is not cut at a ratio — it is given exactly what its rows
+            // need, and the divider goes *beside* that, not through it. It used to straddle
+            // the boundary, taking half its width out of the collapsed rows: with the
+            // boundary at `rows * tab_bar.height` the last row was drawn a hairline taller
+            // than the space it had, and the whole strip was one divider short per row.
+            //
+            // Which end the strip is anchored to is the only difference between the two
+            // cases, so all that differs below is where the divider's two edges land.
+            let (near, far) = if left_collapsed {
+                // EITHER only left collapsed OR both: the strip is the top of the node, and
+                // the divider begins where it ends.
+                let strip_end = rect.min.y + collapsed_strip_height(left_collapsed_count, style);
+                (strip_end, strip_end + style.separator.width)
             } else {
-                // Only right collapsed
-                let border_y = rect.max.y - (right_collapsed_count as f32) * style.tab_bar.height;
-                let left_separator_border = map_to_pixel(
-                    border_y - style.separator.width * 0.5,
-                    pixels_per_point,
-                    f32::round,
-                );
-                let right_separator_border = map_to_pixel(
-                    border_y + style.separator.width * 0.5,
-                    pixels_per_point,
-                    f32::round,
-                );
-                let left = rect
-                    .intersect(Rect::everything_above(left_separator_border))
-                    .intersect(max_rect);
-                let right = rect
-                    .intersect(Rect::everything_below(right_separator_border))
-                    .intersect(max_rect);
-                self.layout.set_rect(left_path, left);
-                self.layout.set_rect(right_path, right);
-            }
+                // Only right collapsed: the strip is the bottom of the node.
+                let strip_start = rect.max.y - collapsed_strip_height(right_collapsed_count, style);
+                (strip_start - style.separator.width, strip_start)
+            };
+
+            let left_separator_border = map_to_pixel(near, pixels_per_point, f32::round);
+            let right_separator_border = map_to_pixel(far, pixels_per_point, f32::round);
+            let left = rect
+                .intersect(Rect::everything_above(left_separator_border))
+                .intersect(max_rect);
+            let right = rect
+                .intersect(Rect::everything_below(right_separator_border))
+                .intersect(max_rect);
+            self.layout.set_rect(left_path, left);
+            self.layout.set_rect(right_path, right);
             return;
         }
 
@@ -727,6 +715,44 @@ impl<Tab> DockArea<'_, Tab> {
 /// every scene we could reach (measured: 0.08 px at `ppp = 1.3`, against 0.17 px of the
 /// pixel-rounding both sides share anyway), which is exactly why it would have been found by
 /// someone looking at the code rather than at the screen.
+/// How tall a strip of `rows` collapsed leaves is: a tab bar each, and a divider between
+/// every two of them.
+///
+/// The dividers are the part that was missing. A collapsed leaf draws a tab bar and nothing
+/// else, so `rows * tab_bar.height` is what the *bars* come to — but the leaves are stacked by
+/// splits, and every split puts a `separator.width` divider between its two children. Leave the
+/// `rows - 1` dividers out and the strip is asked to fit into less than it draws, which is not
+/// an error anywhere: the last row is simply cut off by whatever encloses it.
+///
+/// Zero rows is not a strip and has no height — and no divider count either, which is why the
+/// subtraction is guarded rather than written straight out.
+pub(super) fn collapsed_strip_height(rows: i32, style: &Style) -> f32 {
+    if rows <= 0 {
+        return 0.0;
+    }
+    rows as f32 * style.tab_bar.height + (rows - 1) as f32 * style.separator.width
+}
+
+/// How far inside its own rectangle a surface has to start drawing to leave the border it
+/// paints there visible.
+///
+/// The border is stroked `StrokeKind::Inside`, so its full width is inside the rectangle — and
+/// if it is rounded, the arc bulges further in than that at each corner. A circle of radius `r`
+/// inscribed in the corner leaves the corner point `r - r / sqrt(2)` away from the arc along
+/// each axis, and that is the whole of the difference: content inset by this much clears both
+/// the stroke and the rounding, at every corner, for any radius a style asks for.
+///
+/// Inset by half the stroke and nothing else — which is what this used to be — and the first
+/// thing drawn paints over the outer half of the border, over the whole of the arc at the
+/// corners, and the border the style asked for is simply not there.
+fn border_clearance(style: &Style) -> f32 {
+    let radius = style.main_surface_border_rounding;
+    let max_radius = radius.nw.max(radius.ne).max(radius.sw).max(radius.se);
+    // 1 - 1/sqrt(2), the sagitta of a quarter arc as a fraction of its radius.
+    const ARC_BULGE: f32 = 0.292_893_2;
+    style.main_surface_border_stroke.width + f32::from(max_radius) * ARC_BULGE
+}
+
 fn split_rect(node_rect: Rect, pixels_per_point: f32) -> Rect {
     debug_assert!(!node_rect.any_nan() && node_rect.is_finite());
     expand_to_pixel(node_rect, pixels_per_point)

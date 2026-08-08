@@ -3152,8 +3152,11 @@ fn dbg_moved_leaf() {
 /// Shortening it here is free of the usual danger, because the pause and the lock read the *same
 /// number*: the harness waits `frames_for(style.overlay.feel.max_preference_time)`, so a drop is
 /// still aimed at the leaf the step named, whatever this is set to. What is given up is that the
-/// sweep no longer exercises a *long* lock — nothing else in the dock is keyed to the duration,
-/// and the guard's behaviour is a function of it, not of its size.
+/// sweep no longer exercises a *long* lock — and, for the same reason, could never have gated the
+/// duration in the first place: a sweep that waits exactly as long as it is told stays green for
+/// any number at all. That property has a file of its own,
+/// `tests/the_preference_lock_is_a_duration.rs`, where the same gesture is run frame-for-frame
+/// against two different locks and lands in two different places.
 ///
 /// Measured before taking it: the sweep went from 20.4 s to 16.7 s, and its coverage came out
 /// byte-identical — every outcome count, every cross-watch number, the same scenes. A cheaper

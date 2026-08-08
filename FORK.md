@@ -137,9 +137,22 @@ version tests the branch — `git archive` into a sandbox, as the comparison alr
 cost of not being able to run the suite over uncommitted work, which is most of what it is used
 for.
 
-**The sweep no longer exercises a long preference lock.** `PREFERENCE_TIME` cuts the overlay's
-flicker guard to 0.05 s in the harness so that a drag need not rest twenty frames; the pause and
-the lock read the same number, so every drop still lands where its step aimed, and the coverage
-came out identical. What is gone is any scenario where the lock is *long enough to matter* —
-nothing in the dock is keyed to the duration today, and if something ever is, this is where it
-will not be noticed.
+**The sweep no longer exercises a long preference lock.** — *answered, and the sweep could never
+have done it.* `PREFERENCE_TIME` cuts the guard to 0.05 s and the harness's pause is computed
+*from that same number*, so the sweep is green for any value whatsoever: it was never a gate on
+the duration, before or after the cut. The property has its own file now,
+[tests/the_preference_lock_is_a_duration.rs](tests/the_preference_lock_is_a_duration.rs) — the
+same gesture, frame for frame, against a 0.3 s lock and a 0.1 s one, landing in two different
+places, plus the shipped default checked on both sides of its own threshold.
+
+**The flicker guard holds for a window and not between two main-surface leaves. Intended?**
+Found while writing the file above, and pinned there as a characterisation rather than a promise.
+`update_lock` computes `window_hold` only when the held target is *not* on the main surface, and
+clears the lock as soon as the pointer is off the hovered rectangle otherwise — so between two
+main-surface leaves the preference lasts exactly the one frame `set_drag_and_drop` was refused,
+whatever `max_preference_time` says. The guard is documented in general terms ("a hand that
+sweeps across two leaves on its way to a third"), and that hand is *most* often sweeping across
+the main surface, where it does not apply. Either the doc or the condition is wrong; deciding
+which needs someone's intent, not a test. Making it symmetric is a two-line change and turns
+`between_main_surface_leaves_the_preference_does_not_outlive_a_frame` red, which is where the
+decision should be recorded.

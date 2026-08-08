@@ -161,7 +161,7 @@ impl<'tree, Tab> DockArea<'tree, Tab> {
     ///
     /// Not only on a 2x2: a crossing is any position that both of a split's two children are
     /// divided at, however many parts each of them has. See
-    /// [`crate::DockEvent::CrossSplitTransposed`], which also states what the gesture does *not*
+    /// [`DockEvent::CrossSplitTransposed`], which also states what the gesture does *not*
     /// promise about split ids.
     ///
     /// By default it's `true`.

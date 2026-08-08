@@ -130,12 +130,8 @@ enum Step {
     /// the generator produced exactly zero crosses by chance, so the toggle below had nothing
     /// to press and every assertion about it was vacuous.
     ///
-    /// `deep` builds the *reported* shape instead of a bare 2x2: one side gets a third part, cut
-    /// so that the shared divider is no longer the one at the root of that side's chain. The
-    /// picture is the same kind of "+", and for as long as the crate compared root dividers it
-    /// was the picture the crate could not see. A sweep that can only build 2x2s cannot tell
-    /// that regression from a working detector.
-    BuildCross { leaf: usize, deep: bool },
+    /// `deepen` says how far past a bare 2x2 to go — see [`Deepen`].
+    BuildCross { leaf: usize, deepen: Deepen },
     /// Press the toggle the dock offers where two perpendicular dividers cross, which swaps
     /// the grouping of a 2x2 (rows-of-columns <-> columns-of-rows) in place.
     ///
@@ -145,6 +141,51 @@ enum Step {
     ToggleCrossSplit { cross: usize },
     /// Let a frame pass with no input at all.
     Idle,
+}
+
+/// One "+" the dock is offering a toggle on, as [`Sim::cross_toggles`] reads it off the screen.
+///
+/// Carries what the sweep needs to say *which* shape it pressed, and not one field more: a
+/// coverage counter that cannot name the shape it counted is a number that always looks healthy.
+#[derive(Clone, Copy, Debug)]
+struct CrossPoint {
+    /// The split whose two children the crossing was found between.
+    outer: NodePath,
+    /// Where to press.
+    at: Pos2,
+    /// How many parts each of the two bands has. A `[2, 2]` is a plain 2x2; anything longer
+    /// means a chain has to be taken apart and re-nested, and `[3, 3]` means both of them do.
+    parts: [usize; 2],
+    /// How many crossings this one's line carries, itself included. More than one means a press
+    /// has to pivot around the crossing pressed rather than around "the crossing".
+    on_line: usize,
+}
+
+/// How far past a bare 2x2 [`Step::BuildCross`] builds.
+///
+/// Three shapes rather than a `bool`, because the two things a 2x2 cannot exercise are
+/// different things, and one of them was invisible for as long as the flag had two states.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Deepen {
+    /// A bare 2x2: two parts each side, one crossing between them.
+    ///
+    /// The one shape the crate got right even while it compared the two sides' *root* dividers
+    /// instead of reading the picture — which is exactly why a sweep that only builds these
+    /// cannot tell that regression from a working detector.
+    None,
+
+    /// A third part on one side. The shared divider is then no longer the one at the root of
+    /// that side's chain, which is the reported shape the band model was written for.
+    OneBand,
+
+    /// A third part on *both* sides, cut at the same place.
+    ///
+    /// Two things at once, and neither is reachable any other way here. Both bands are chains,
+    /// so a transposition has to take two of them apart and re-nest both — `rebuild_chain` gets
+    /// to be wrong in a way that one long band and one short one cannot show. And the two new
+    /// dividers line up, so the line carries a *second* "+": two buttons, and a press on one of
+    /// them has to pivot around that one rather than around "the crossing".
+    BothBands,
 }
 
 /// What a drop somewhere means, in the dock's own terms.
@@ -381,6 +422,20 @@ struct CrossWatch {
     /// picture. Without this number the sweep would report full coverage of a law it never
     /// reached.
     in_a_long_band: usize,
+    /// ...of which crossed *two* long bands at once, so the transposition had two chains to take
+    /// apart and re-nest rather than one.
+    ///
+    /// A separate number from the one above because "one long band and one short" leaves half of
+    /// `rebuild_chain` running on a single part, which is the one case it cannot get wrong. The
+    /// pool of split ids the rebuild draws from is shared between the two chains, and a miscount
+    /// in it only shows when both of them are consuming it.
+    in_two_long_bands: usize,
+    /// ...of which sat on a line carrying more than one "+".
+    ///
+    /// A transposition pivots around *the crossing pressed*, and a line with a single crossing
+    /// cannot tell that apart from pivoting around "the crossing". With two, pressing the wrong
+    /// one leaves a different tree behind — and the same picture, so only the tree can say.
+    on_a_crowded_line: usize,
 }
 
 /// What a step actually did to the dock — measured after the fact, not assumed from its name.
@@ -858,6 +913,45 @@ impl Sim {
             .collect()
     }
 
+    /// Adds a third part to the band rooted at `chain`, and puts that band's existing divider
+    /// back on `line`.
+    ///
+    /// The part is added *above* the chain rather than inside one of its parts: splitting the
+    /// chain node itself puts a fresh divider at the root and pushes the existing one a level
+    /// down, which is the whole point — a shared divider that is not the root one is the shape a
+    /// detector reading the tree cannot see. It is also why the existing one has to be put back:
+    /// it now lives in a shorter interval, so the fraction that used to mean "halfway down the
+    /// half" no longer lands on the same pixel. The number that does is read off the line it has
+    /// to meet.
+    fn deepen_band(&mut self, surface: SurfaceIndex, chain: NodeId, line: f32) {
+        let chain_path = NodePath::new(surface, chain);
+        let tab = self.fresh_tab();
+        self.state
+            .split(chain_path, Split::Below, 0.75, Node::leaf(tab));
+        self.run_frame(vec![]);
+
+        let shrunk = self
+            .layout()
+            .get(chain_path)
+            .expect("the deepened band was laid out")
+            .rect;
+        let fraction = (line - shrunk.min.y) / shrunk.height();
+        // Only if the line is still reachable from inside the shorter interval. A leaf in a
+        // small floating window leaves no room for it, and a step that wrote the number anyway
+        // would hand the sweep a tree the crate would never produce — which is what happened:
+        // `validate` reported a fraction of 1.003 and a child with no room, from the scaffolding
+        // rather than from the dock. Skipping leaves a three-part band whose dividers simply do
+        // not line up, and the toggle is not offered there. That is a scene, not a failure.
+        let margin = self.style.separator.extra / shrunk.height();
+        if (margin..=1.0 - margin).contains(&fraction) {
+            self.state[chain_path]
+                .get_split_mut()
+                .expect("a chain node is a split")
+                .fraction = fraction;
+        }
+        self.run_frame(vec![]);
+    }
+
     /// Every cross-split toggle the dock is currently offering, with the point to press.
     ///
     /// Re-derived from the published geometry rather than asked of the crate, the same way
@@ -878,9 +972,11 @@ impl Sim {
     /// the "root" one is decided by the order the splits were made in, not by anything on
     /// screen, and a rule that looks one level down therefore answers differently for the same
     /// pixels.
-    fn cross_toggles(&self) -> Vec<(NodePath, Pos2, usize)> {
-        /// Same number as `Crossings::TOLERANCE` in the crate. Deliberately not looser: a
-        /// harness that accepted near-misses the crate rejects would press empty pixels.
+    fn cross_toggles(&self) -> Vec<CrossPoint> {
+        /// The crate's `Crossings::TOLERANCE_DEVICE_PIXELS`, in the points this harness measures
+        /// in: it runs at one device pixel per point, so the two numbers coincide here.
+        /// Deliberately not looser — a harness that accepted near-misses the crate rejects would
+        /// press empty pixels and call the silence a pass.
         const TOLERANCE: f32 = 1.0;
 
         let layout = self.layout();
@@ -913,17 +1009,17 @@ impl Sim {
                     let gap = first[i] - second[j];
                     if gap.abs() <= TOLERANCE {
                         let inner = (first[i] + second[j]) * 0.5;
-                        points.push((
-                            path,
-                            if outer_horizontal {
+                        points.push(CrossPoint {
+                            outer: path,
+                            at: if outer_horizontal {
                                 Pos2::new(outer, inner)
                             } else {
                                 Pos2::new(inner, outer)
                             },
-                            // How long the longer of the two bands is, so the sweep can tell a
-                            // plain 2x2 from a crossing that needs a chain rebuilt.
-                            (band0.len() - 1).max(band1.len() - 1),
-                        ));
+                            parts: [band0.len() - 1, band1.len() - 1],
+                            // Filled in once the walk knows how many it found.
+                            on_line: 0,
+                        });
                         i += 1;
                         j += 1;
                     } else if gap < 0.0 {
@@ -931,6 +1027,10 @@ impl Sim {
                     } else {
                         j += 1;
                     }
+                }
+                let on_line = points.len();
+                for point in &mut points {
+                    point.on_line = on_line;
                 }
                 Some(points)
             })
@@ -1008,12 +1108,16 @@ impl Sim {
     /// one. The separator gestures refuse such a point, the same way they refuse one under a
     /// floating window, and for the same reason: it no longer means what the step says.
     fn toggle_over(&self, point: Pos2) -> bool {
-        // The crate's own arithmetic for the button it draws.
-        let side =
-            (self.style.separator.width + self.style.separator.extra_interact_width).max(14.0);
+        // The button at its widest: the drawn square plus both margins, which is what it reaches
+        // while it is holding the pointer. The crate shrinks this to fit a cramped crossing, so
+        // the zone avoided here is never smaller than the zone that answers — and it is the
+        // *answering* zone that matters, since a separator step landing inside it would press a
+        // button instead of grabbing a divider.
+        let toggle = &self.style.cross_split_toggle;
+        let side = toggle.size + 2.0 * (toggle.catch_extra + toggle.hold_extra);
         self.cross_toggles()
             .into_iter()
-            .any(|(_, at, _)| Rect::from_center_size(at, Vec2::splat(side)).contains(point))
+            .any(|cross| Rect::from_center_size(cross.at, Vec2::splat(side)).contains(point))
     }
 
     /// Runs quiet frames until the geometry stops moving; `false` if it never did.
@@ -1216,6 +1320,13 @@ impl Sim {
     /// The intermediate moves are not decoration: egui only calls a press a *drag* once the
     /// pointer has travelled past a threshold, and the dock resolves the destination from where
     /// the pointer was on the frame before the release.
+    /// How many frames cover `seconds` of the harness's clock, with one to spare — the timers in
+    /// the dock are `<`-comparisons against elapsed time, so landing exactly on the boundary is
+    /// not enough.
+    fn frames_for(&self, seconds: f32) -> u32 {
+        (seconds * 60.0).ceil() as u32 + 1
+    }
+
     fn drag(&mut self, from: Pos2, to: Pos2) {
         self.run_frame(vec![Event::PointerMoved(from)]);
         self.run_frame(vec![Event::PointerButton {
@@ -1227,6 +1338,17 @@ impl Sim {
         for step in 1..=4u8 {
             let t = f32::from(step) / 4.0;
             self.run_frame(vec![Event::PointerMoved(from + (to - from) * t)]);
+        }
+        // Rest at the destination before letting go, and rest long enough.
+        //
+        // The overlay keeps a *preference* for the target the pointer arrived on and ignores
+        // later ones for `overlay.feel.max_preference_time` — a flicker guard written for a hand
+        // that sweeps across two leaves on its way to a third. Four frames is how long this
+        // harness takes to cross a whole window, so without a pause the drop resolves against a
+        // leaf the pointer merely passed over: found as a bystander leaf gaining a tab, from a
+        // step that had aimed two rows above it. A hand pauses before it releases; so does this.
+        for _ in 0..self.frames_for(self.style.overlay.feel.max_preference_time) {
+            self.run_frame(vec![Event::PointerMoved(to)]);
         }
         self.run_frame(vec![Event::PointerButton {
             pos: to,
@@ -1480,7 +1602,7 @@ impl Sim {
                 Vec::new()
             }
 
-            Step::BuildCross { leaf, deep } => {
+            Step::BuildCross { leaf, deepen } => {
                 let target = leaves[leaf % leaves.len()];
                 // All three at 0.5: the two halves of the outer split span the full height, so
                 // splitting each at the same fraction puts their dividers on one line — a "+"
@@ -1496,7 +1618,7 @@ impl Sim {
                 );
                 self.run_frame(vec![]);
 
-                if deep {
+                if deepen != Deepen::None {
                     // The line the two halves share, before anything moves it.
                     let layout = self.layout();
                     let rect = |id: NodeId| {
@@ -1507,43 +1629,21 @@ impl Sim {
                     };
                     let line = (rect(target.node).max.y + rect(below).min.y) * 0.5;
 
-                    // A third part on the left, added *above* its chain rather than inside a
-                    // part: splitting the chain node itself puts a fresh divider at the root and
-                    // pushes the shared one a level down, which is the whole point. It is also
-                    // why the shared one then has to be put back — it now lives in a shorter
-                    // interval, so the fraction that used to mean "halfway down the half" no
-                    // longer lands on the same pixel. The number that does is read off the
-                    // divider it has to meet.
-                    let chain = self.state[target.surface]
-                        .parent(target.node)
-                        .expect("the left half of a cross is a split");
-                    let chain_path = NodePath::new(target.surface, chain);
-                    let t4 = self.fresh_tab();
-                    self.state
-                        .split(chain_path, Split::Below, 0.75, Node::leaf(t4));
-                    self.run_frame(vec![]);
+                    // Both chain roots read *before* either is deepened: deepening one replaces
+                    // that half's root with a fresh split, so a lookup afterwards would name the
+                    // new node rather than the one holding the shared divider.
+                    let chain_of = |sim: &Self, part: NodeId| {
+                        sim.state[target.surface]
+                            .parent(part)
+                            .expect("each half of a cross is a split")
+                    };
+                    let left_chain = chain_of(self, target.node);
+                    let right_chain = chain_of(self, right);
 
-                    let shrunk = self
-                        .layout()
-                        .get(chain_path)
-                        .expect("the deepened cross was laid out")
-                        .rect;
-                    let fraction = (line - shrunk.min.y) / shrunk.height();
-                    // Only if the line is still reachable from inside the shorter interval.
-                    // A leaf in a small floating window leaves no room for it, and a step that
-                    // wrote the number anyway would hand the sweep a tree the crate would never
-                    // produce — which is what happened: `validate` reported a fraction of 1.003
-                    // and a child with no room, from the scaffolding rather than from the dock.
-                    // Skipping leaves a three-part band whose dividers simply do not line up,
-                    // and the toggle is not offered there. That is a scene, not a failure.
-                    let margin = self.style.separator.extra / shrunk.height();
-                    if (margin..=1.0 - margin).contains(&fraction) {
-                        self.state[chain_path]
-                            .get_split_mut()
-                            .expect("a chain node is a split")
-                            .fraction = fraction;
+                    self.deepen_band(target.surface, left_chain, line);
+                    if deepen == Deepen::BothBands {
+                        self.deepen_band(target.surface, right_chain, line);
                     }
-                    self.run_frame(vec![]);
                 }
                 vec![target]
             }
@@ -1561,7 +1661,12 @@ impl Sim {
                 if crosses.is_empty() {
                     return None;
                 }
-                let (path, at, parts) = crosses[cross % crosses.len()];
+                let CrossPoint {
+                    outer: path,
+                    at,
+                    parts,
+                    on_line,
+                } = crosses[cross % crosses.len()];
                 // Only the window guard here: `toggle_over` is what the *separator* steps use to
                 // stay off this button, and `at` is the button, so applying it here would make
                 // the step refuse itself. It did, silently, for a whole run — every press was
@@ -1574,8 +1679,14 @@ impl Sim {
                 let rects_before = self.leaf_rects();
                 let focus_before = self.focus_trace();
                 self.cross.offered += 1;
-                if parts > 2 {
+                if parts.iter().any(|n| *n > 2) {
                     self.cross.in_a_long_band += 1;
+                }
+                if parts.iter().all(|n| *n > 2) {
+                    self.cross.in_two_long_bands += 1;
+                }
+                if on_line > 1 {
+                    self.cross.on_a_crowded_line += 1;
                 }
                 // A transposition rewrites the fractions of all three splits of the cross by
                 // construction — that is what regrouping the same four rectangles takes.
@@ -1916,7 +2027,7 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
             },
             16 => Step::BuildCross {
                 leaf: rng.below(8),
-                deep: rng.below(2) == 1,
+                deepen: [Deepen::None, Deepen::OneBand, Deepen::BothBands][rng.below(3)],
             },
             _ => Step::Idle,
         });
@@ -2986,17 +3097,17 @@ fn dbg_moved_leaf() {
             },
             Step::BuildCross {
                 leaf: 0,
-                deep: false,
+                deepen: Deepen::None,
             },
             Step::BuildCross {
                 leaf: 0,
-                deep: false,
+                deepen: Deepen::None,
             },
         ] {
             sim.apply(step);
         }
         let crosses = sim.cross_toggles();
-        let (_path, at, _parts) = crosses[0];
+        let at = crosses[0].at;
         let before = sim.leaf_rects();
         if idle_only {
             for _ in 0..4 {
@@ -3034,6 +3145,12 @@ fn dbg_moved_leaf() {
 /// layout-staleness bug of `transpose_cross_split` reintroduced: 48 seeds stayed green, and the
 /// first seed to catch it was 68. Doubling the sweep costs about four seconds and brings the
 /// known-reachable case inside the default run.
+///
+/// The wall clock roughly doubled again when [`Sim::drag`] started resting at its destination
+/// long enough for the overlay's preference lock to expire — about twenty frames per drag, and
+/// drags are most of what the sweep does. That is not a cost worth trading away: without the
+/// pause, a drop resolves against whichever leaf the pointer happened to cross on the way, so
+/// every `Aim` in the vocabulary meant something other than what it said.
 const SEEDS: u64 = 96;
 const STEPS: usize = 24;
 
@@ -3074,6 +3191,8 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         cross.offered += outcome.cross.offered;
         cross.flipped += outcome.cross.flipped;
         cross.in_a_long_band += outcome.cross.in_a_long_band;
+        cross.in_two_long_bands += outcome.cross.in_two_long_bands;
+        cross.on_a_crowded_line += outcome.cross.on_a_crowded_line;
 
         if let Some(failure) = outcome.failure {
             let minimal = quietly(|| shrink(&steps, &|candidate| run(candidate).failure.is_some()));
@@ -3120,6 +3239,22 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
          is the one shape the crate got right while it read the tree instead of the picture, so \
          a sweep that only ever presses those says nothing about the law it was rewritten for — \
          and nothing about a chain being taken apart and re-nested",
+        cross.offered
+    );
+    assert!(
+        cross.in_two_long_bands > 0,
+        "every one of the {} cross toggles pressed had a two-part band on at least one side. A \
+         chain of one part is the case `rebuild_chain` cannot get wrong, and the pool of split \
+         ids it draws from is shared between the two chains — a miscount in it is only reachable \
+         with both sides long",
+        cross.offered
+    );
+    assert!(
+        cross.on_a_crowded_line > 0,
+        "not one of the {} cross toggles pressed sat on a line carrying a second \"+\". A \
+         transposition pivots around the crossing that was pressed, and with only one on the \
+         line that is indistinguishable from pivoting around \"the crossing\" — the two produce \
+         the same picture and different trees",
         cross.offered
     );
 

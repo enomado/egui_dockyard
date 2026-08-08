@@ -127,6 +127,33 @@ pub enum TreeViolation {
         /// The offending focus target.
         node: NodeId,
     },
+
+    /// A split's `fraction` is `NaN` or infinite.
+    ///
+    /// This is how a division by a zero-extent rectangle arrives: the layout pass multiplies the
+    /// fraction by an extent, so a `NaN` here is a `NaN` rectangle, and a `NaN` rectangle fails
+    /// every comparison it is put through — including the ones that decide which branch the
+    /// renderer takes. The crate has been bitten by exactly this once.
+    SplitFractionNotFinite {
+        /// The split node. Its `fraction` is readable through [`Node::get_split`].
+        node: NodeId,
+    },
+
+    /// A split's `fraction` is outside `0.0..=1.0`, so it is not a fraction of anything.
+    ///
+    /// Nothing in the crate can produce one: the only two writers are a drag, which clamps to
+    /// what the geometry can honour, and a double-click, which writes `0.5`. It arrives from
+    /// outside — a hand-built tree, a loaded layout, or an arithmetic slip in code that derives
+    /// a fraction from measured pixels and does not ask whether the interval it measured can
+    /// hold the answer.
+    ///
+    /// It does not crash: the renderer clamps at draw time. That is the reason to report it —
+    /// the layout the tree describes and the layout on screen have quietly stopped being the
+    /// same thing, and every later edit is made against the wrong one.
+    SplitFractionOutOfRange {
+        /// The split node. Its `fraction` is readable through [`Node::get_split`].
+        node: NodeId,
+    },
 }
 
 /// A [`TreeViolation`] together with the surface whose tree it was found in.
@@ -241,6 +268,16 @@ impl<Tab> Tree<Tab> {
                         if self.parent(child) != Some(id) {
                             violations.push(TreeViolation::ChildLinkBroken { node: id, child });
                         }
+                    }
+                    // The two faults are reported apart because they arrive from different
+                    // places: a non-finite fraction is a division that should not have been
+                    // done, an out-of-range one is arithmetic that answered outside the interval
+                    // it was measuring. Only the first is checked first — `NaN` fails every
+                    // comparison, so the range test would let it through.
+                    if !split.fraction.is_finite() {
+                        violations.push(TreeViolation::SplitFractionNotFinite { node: id });
+                    } else if !(0.0..=1.0).contains(&split.fraction) {
+                        violations.push(TreeViolation::SplitFractionOutOfRange { node: id });
                     }
                 }
 
@@ -369,6 +406,58 @@ mod tests {
     /// Note what it takes to corrupt an arena tree: the public API cannot produce any of
     /// these states, so each test reaches into the private links directly. That is the
     /// point — the states that used to be reachable by ordinary use are gone.
+    /// A fraction is a fraction: finite, and between the two ends of the interval it names.
+    ///
+    /// Neither fault crashes anything — the layout pass clamps at draw time — which is exactly
+    /// why they need an oracle. Once one is stored, the tree and the screen describe different
+    /// layouts, and every later edit is made against the wrong one. The `NaN` case has been real
+    /// once (a division by a zero-extent rectangle) and the out-of-range case has been real
+    /// once too, from test scaffolding that computed a fraction against one rectangle and wrote
+    /// it into a node that had since been given a shorter one.
+    ///
+    /// The two are checked in that order in `validate`, and this pins the order: `NaN` fails
+    /// every comparison including `>` and `<`, so a range test asked first would pass it.
+    #[test]
+    fn oracle_bites_on_a_fraction_that_is_not_one() {
+        let build = |fraction: f32| {
+            let mut tree = Tree::new(vec![1, 2]);
+            let root = tree.root().unwrap();
+            tree.split_right(root, 0.5, vec![3]);
+            let split = tree.root().unwrap();
+            tree[split].get_split_mut().unwrap().fraction = fraction;
+            (tree.validate().unwrap_err(), split)
+        };
+
+        for bad in [1.003_f32, -0.2, 12.0] {
+            let (violations, split) = build(bad);
+            assert!(
+                violations.contains(&TreeViolation::SplitFractionOutOfRange { node: split }),
+                "a fraction of {bad} was accepted: {violations:?}"
+            );
+        }
+
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let (violations, split) = build(bad);
+            assert!(
+                violations.contains(&TreeViolation::SplitFractionNotFinite { node: split }),
+                "a fraction of {bad} was accepted, or was reported as merely out of range: \
+                 {violations:?}"
+            );
+        }
+
+        // And the ends of the interval are fractions. A split at 0.0 gives one child no room,
+        // which the separator margin then takes back at draw time — a legitimate layout, saved
+        // and loaded like any other, and not the oracle's business.
+        for fine in [0.0_f32, 1.0, 0.5] {
+            let mut tree = Tree::new(vec![1, 2]);
+            let root = tree.root().unwrap();
+            tree.split_right(root, 0.5, vec![3]);
+            let split = tree.root().unwrap();
+            tree[split].get_split_mut().unwrap().fraction = fine;
+            assert_eq!(tree.validate(), Ok(()), "a fraction of {fine} was rejected");
+        }
+    }
+
     #[test]
     fn oracle_bites_on_a_dangling_child() {
         let mut tree = Tree::new(vec![1, 2]);

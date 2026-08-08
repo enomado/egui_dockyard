@@ -748,6 +748,26 @@ fn split_rect(node_rect: Rect, pixels_per_point: f32) -> Rect {
 /// `2 * extra` the band is the single point `0.5`, so the ratio the user set is replaced by dead
 /// centre and growing the window back does not bring it home. A ratio is state; only a gesture
 /// gets to change it. Geometry gets to decide where it is honoured.
+///
+/// # Everything that writes a fraction, and whether it asks
+///
+/// The clamp is applied when the boundary is *drawn* and is never written back, so a ratio the
+/// band cannot hold is not an error anywhere — it is simply drawn somewhere else than it says.
+/// That makes every writer a place where the tree and the screen can quietly part company, and
+/// there are only four of them:
+///
+/// * the drag in [`DockArea::show_separator`] — clamps into `min..max`, so it asks;
+/// * the double-click in the same place — writes `0.5`, which is in every band there is, since
+///   `min = (extra / range).min(0.5)` and `max = 1.0 - min`;
+/// * [`DockArea::transpose_cross_split`], the one writer that derives a fraction from measured
+///   pixels — asks up front, for every fraction the rebuild will write, through
+///   `Band::parts_can_be_renested`, and declines the whole gesture rather than move a pixel;
+/// * [`DockState::split`] and friends, where the number comes from the caller.
+///
+/// Nothing derived from geometry escapes unasked today. What keeps that true is not this list —
+/// lists go stale — but [`TreeViolation::SplitFractionOutOfRange`](crate::TreeViolation), which
+/// catches the arithmetic that answers outside the interval it was measuring, wherever it is
+/// written from.
 #[derive(Clone, Copy, Debug)]
 struct SeparatorBand {
     /// Lowest fraction a gesture may write.

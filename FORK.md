@@ -111,17 +111,29 @@ in [fuzz/README.md](fuzz/README.md).
 Loose ends noticed while working, each with why it is worth touching. Not a plan — a list of
 things a later session should not have to rediscover.
 
-**A fraction derived from pixels can land outside the clamp band, and is drawn moved.**
-`separator.extra` floors how close a boundary may sit to either end of the interval it is cut
-from. Anything that computes a fraction from measured geometry and writes it is therefore making
-a claim the renderer may not honour — silently, since the clamp is applied at draw time and not
-written back. The cross-split path now checks this up front (`Band::parts_can_be_renested`) and
-declines rather than jump, but the check was written for that path only; the same shape of write
-exists elsewhere (`Step::BuildCross` in the DST hit it immediately, from the scaffolding side).
-Worth a sweep for "computes a fraction, writes it, does not ask whether the interval can hold it".
+**`Crossings::room_at` only looks at the boundaries of its own two bands.** A part of a band is
+opaque to it, but a part is a whole subtree and may carry perpendicular separators of its own a
+level down. A button bounded by "the nearest boundary in this band" can therefore still cover one
+of those. Not reachable with the default style — the button is 38 px at its widest and
+`separator.extra` keeps every part 175 px long — and the honest bound would be a distance to the
+nearest separator *drawn*, which the layout pass knows and the detector does not.
 
-**The sweep reaches long bands thinly.** `CrossWatch::in_a_long_band` counted 2 of 17 presses on
-the seeds as they stand, and `Step::BuildCross { deep: true }` only ever lengthens *one* side to
-three parts. Nothing in the sweep builds a crossing that is deep on both sides, or a line
-carrying more than one "+". The unit and property tests do; the sweep is what would catch those
-shapes interacting with drags, drops and window tearing.
+**Two copies of "how wide the button gets".** `toggle_metrics` in the crate and `Sim::toggle_over`
+in the DST both compute `size + 2 * (catch_extra + hold_extra)`. The harness re-derives the crate's
+geometry on purpose everywhere else — that is what lets it notice the crate offering a button
+where it should not — but this particular number is arithmetic rather than a rule, and the two
+drifting apart would show up as separator steps quietly pressing a toggle. It was stale once
+already: it still said `(width + extra_interact_width).max(14.0)` after the magnet landed.
+
+**The sweep now buys its honesty in wall clock.** `Sim::drag` rests at its destination for the
+overlay's whole preference time, which is about twenty frames per drag, and drags are most of what
+the sweep does: 11 s to 21 s. It also changed which scenes 96 seeds reach — cross presses went
+from 17 to 10, `in_a_long_band` from 2 to 4. The coverage floors are asserted, so a further drop
+fails loudly rather than quietly; the levers if it comes to that are `SEEDS` and the harness's own
+`max_preference_time`, and the second one is the cheaper of the two.
+
+**`Style::cross_split_toggle` carries `serde(default)` and the fields around it do not.** Adding
+it to a struct that consumers may already have persisted needed the attribute; every other field
+of `Style` predates anyone saving one. So the next field added has the same problem and no
+precedent visible from its neighbours — either `#[serde(default)]` belongs on the struct, or the
+crate should say plainly that `Style` is not a save format.

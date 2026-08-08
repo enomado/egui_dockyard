@@ -9,6 +9,7 @@ use egui::{
 
 use crate::NodePath;
 use crate::dock_area::events::DockEvent;
+use crate::dock_area::ids::tab_widget_id;
 use crate::dock_area::tab_removal::{ForcedRemoval, TabRemoval};
 use crate::tab_viewer::OnCloseResponse;
 use crate::{
@@ -287,12 +288,8 @@ impl<Tab> DockArea<'_, Tab> {
             .len();
 
         for tab_index in 0..tabs_len {
-            let id = self
-                .id
-                .with((path.surface, "surface"))
-                .with((path.node, "node"))
-                .with((tab_index, "tab"));
             let tab_index = TabIndex(tab_index);
+            let id = tab_widget_id(self.id, path, tab_index);
             let is_being_dragged = tabs_ui.ctx().is_being_dragged(id)
                 && tabs_ui.input(|i| i.pointer.is_decidedly_dragging())
                 && self.draggable_tabs;

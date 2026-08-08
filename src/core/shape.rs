@@ -23,12 +23,58 @@
 //! * Доли сплитов и счётчики свёрнутого входят в дамп: писатель, теряющий `fraction`,
 //!   обязан быть виден (на P2 такая мутация роняла 8 из 13 раскладок).
 
-use std::fmt::Write;
+use std::fmt::{Display, Write};
 
 use crate::core::DockState;
 use crate::core::surface_index::SurfaceIndex;
+use crate::core::tree::Tree;
 use crate::core::tree::node::Node;
 use crate::core::tree::node_id::NodeId;
+
+/// Форма одного поддерева одной строкой: ориентации сплитов, вложенность, табы каждого листа
+/// по порядку. Лист — `[a,b,]`, сплит — `V(левый|правый)` / `H(...)`.
+///
+/// Идентичности узлов в дамп намеренно НЕ входят: копирующая метла строит новую арену и
+/// раздаёт новые id, так что порядок слотов — деталь реализации, тогда как «какой сплит что
+/// держит и в каком порядке» — ровно то, что видит юзер.
+///
+/// # Почему это здесь, а не у каждого звателя
+///
+/// Ровно эта строка нужна двум разным утверждениям — оракулу копирующей метлы
+/// (`core::testkit::layout_by_surface`) и трейсу DST-симулятора, — и до 2026-08-08 жила
+/// двумя копиями, которые отличались уже сейчас (`is_vertical()` против ручного `matches!`).
+/// Разные утверждения вправе иметь свои дампы (см. шапку модуля про `dock_shape`), но
+/// ПРИМИТИВ, из которого они собираются, разъезжаться не должен: две копии одной строки — это
+/// та же форма, которой этот трек уже дважды был укушен.
+///
+/// Дамп предназначен для СРАВНЕНИЯ, а не для разбора: формат волен меняться, лишь бы менялся
+/// одинаково для обеих сторон сравнения.
+pub fn subtree_shape<Tab: Display>(tree: &Tree<Tab>, id: NodeId) -> String {
+    let mut out = String::new();
+    write_subtree_shape(tree, id, &mut out);
+    out
+}
+
+fn write_subtree_shape<Tab: Display>(tree: &Tree<Tab>, id: NodeId, out: &mut String) {
+    match &tree[id] {
+        Node::Leaf(leaf) => {
+            out.push('[');
+            for tab in leaf.iter_tabs() {
+                write!(out, "{tab},").unwrap();
+            }
+            out.push(']');
+        }
+        node => {
+            out.push(if node.is_vertical() { 'V' } else { 'H' });
+            let [first, second] = tree.children(id).unwrap();
+            out.push('(');
+            write_subtree_shape(tree, first, out);
+            out.push('|');
+            write_subtree_shape(tree, second, out);
+            out.push(')');
+        }
+    }
+}
 
 /// Позиция поверхности в сохранённой форме: main всегда 0, окно `n` — на `n + 1`.
 fn stored_position(index: SurfaceIndex) -> usize {
@@ -100,6 +146,32 @@ mod tests {
     use super::*;
     use crate::core::tree::Split;
     use crate::core::tree::node::Node;
+
+    /// Язык `subtree_shape` прибит буквой: у него теперь ДВА звателя с разными утверждениями
+    /// (оракул копирующей метлы и трейс DST), и оба сравнивают дамп с дампом — то есть
+    /// поехавший формат оба переживут молча. Проверяется здесь буквально, потому что больше
+    /// негде: у обоих звателей обе стороны сравнения поедут вместе.
+    #[test]
+    fn the_subtree_shape_writes_splits_nesting_and_tabs_in_order() {
+        let mut state = DockState::new(vec!["a".to_string()]);
+        let root = state.main_surface().root().unwrap();
+        let [_left, right] =
+            state
+                .main_surface_mut()
+                .split(root, Split::Below, 0.5, Node::leaf("b".to_string()));
+        state
+            .main_surface_mut()
+            .leaf_mut(right)
+            .unwrap()
+            .append_tab("c".to_string());
+        let root = state.main_surface().root().unwrap();
+
+        assert_eq!(
+            subtree_shape(state.main_surface(), root),
+            "V([a,]|[b,c,])",
+            "формат дампа поехал — обе стороны сравнения у звателей поедут вместе и не заметят"
+        );
+    }
 
     /// Дамп обязан РАЗЛИЧАТЬ доки, отличающиеся только тем, что он берётся судить.
     ///

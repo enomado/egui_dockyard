@@ -135,5 +135,8 @@ fuzz_target!(|data: &[u8]| {
 
     let twice = ron::ser::to_string_pretty(&back, ron::ser::PrettyConfig::default())
         .expect("a state that serialized once must serialize twice");
-    assert_eq!(once, twice, "round-trip is not idempotent — something is lost");
+    assert_eq!(
+        once, twice,
+        "round-trip is not idempotent — something is lost"
+    );
 });

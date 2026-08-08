@@ -466,35 +466,6 @@ fn leaves_of<Tab>(state: &DockState<Tab>, surface: SurfaceIndex) -> Vec<NodePath
         .collect()
 }
 
-/// The layout of one subtree, written down: split orientations, nesting, and the tabs of each
-/// leaf in order.
-///
-/// Node *ids* are deliberately not part of it. A copying sweep builds a fresh arena and hands
-/// out fresh ids, so slot order is an implementation detail — whereas which split holds what,
-/// and in which order, is exactly what the user sees.
-fn shape_of(tree: &crate::core::tree::Tree<u32>, id: crate::core::tree::NodeId, out: &mut String) {
-    use std::fmt::Write;
-
-    match &tree[id] {
-        Node::Leaf(leaf) => {
-            out.push('[');
-            for tab in leaf.iter_tabs() {
-                write!(out, "{tab},").unwrap();
-            }
-            out.push(']');
-        }
-        node => {
-            out.push(if node.is_vertical() { 'V' } else { 'H' });
-            let [first, second] = tree.children(id).unwrap();
-            out.push('(');
-            shape_of(tree, first, out);
-            out.push('|');
-            shape_of(tree, second, out);
-            out.push(')');
-        }
-    }
-}
-
 /// The layout of every surface that holds a tab, keyed by its index.
 ///
 /// This is the oracle of a *copying sweep*, and deliberately **not**
@@ -507,6 +478,10 @@ fn shape_of(tree: &crate::core::tree::Tree<u32>, id: crate::core::tree::NodeId, 
 ///   is invisible to the next operation, so it is not something this oracle should report;
 /// * trailing holes in the window vector may legally be popped, which shifts nothing that has
 ///   tabs in it.
+///
+/// The per-subtree string itself is [`crate::core::shape::subtree_shape`], shared with the DST
+/// trace: the two oracles say different things, but they say them in the same language, and a
+/// language re-derived per call site drifts.
 pub fn layout_by_surface(state: &DockState<u32>) -> Vec<(SurfaceIndex, String)> {
     state
         .iter_surfaces_indexed()
@@ -516,9 +491,7 @@ pub fn layout_by_surface(state: &DockState<u32>) -> Vec<(SurfaceIndex, String)> 
             // A surface holding no tabs drops out — see the doc comment for why that is not a
             // blind spot but the point.
             surface.iter_all_tabs().next()?;
-            let mut shape = String::new();
-            shape_of(tree, root, &mut shape);
-            Some((index, shape))
+            Some((index, crate::core::shape::subtree_shape(tree, root)))
         })
         .collect()
 }

@@ -85,7 +85,9 @@ fn main() -> ExitCode {
         let state = match ron::from_str::<DockState<Tab>>(&dock_state) {
             Ok(state) => {
                 if let Err(violations) = state.validate() {
-                    failures.push(format!("{name}: parses but is not well-formed: {violations:?}"));
+                    failures.push(format!(
+                        "{name}: parses but is not well-formed: {violations:?}"
+                    ));
                     continue;
                 }
                 state

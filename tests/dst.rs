@@ -36,9 +36,10 @@ use egui::{
     CentralPanel, Context, Event, Id, Modifiers, PointerButton, Pos2, RawInput, Rect, Ui, Vec2,
     WidgetText,
 };
+use egui_dock::shape::subtree_shape;
 use egui_dock::{
-    DockArea, DockLayout, DockState, Node, NodeId, NodePath, Split, Style, SurfaceIndex, TabViewer,
-    Tree,
+    DockArea, DockLayout, DockState, Node, NodeId, NodePath, Split, Style, SurfaceIndex, TabIndex,
+    TabViewer, Tree, tab_widget_id,
 };
 
 /// Screen the simulated dock starts on. Big enough that a few splits still leave leaves wider
@@ -686,17 +687,13 @@ impl Sim {
 
     /// Id of one tab's widget.
     ///
-    /// This mirrors the scheme in `show/leaf.rs`, which is private. The duplication is
-    /// deliberate and it is *checked*: the tests below assert that the id resolves, so a change
-    /// to the scheme fails this harness loudly instead of quietly turning every drag into a
-    /// press on empty space. Aiming at a guessed offset inside the tab bar was tried first and
-    /// did exactly that — the bar has leading buttons, so the press landed 8 px to the left of
-    /// the first tab and nothing moved.
+    /// The scheme used to be *copied* here from the private `show/leaf.rs`. The copy was
+    /// checked — the tests below assert that the id resolves, so a scheme change failed this
+    /// harness loudly rather than quietly turning every drag into a press on empty space — but
+    /// a checked copy is still a copy, and only this harness had thought to check it. The dock
+    /// now states the scheme once, in [`tab_widget_id`], for exactly this kind of caller.
     fn tab_id(&self, leaf: NodePath, tab: usize) -> Id {
-        Id::new(DOCK_ID)
-            .with((leaf.surface, "surface"))
-            .with((leaf.node, "node"))
-            .with((tab, "tab"))
+        tab_widget_id(Id::new(DOCK_ID), leaf, TabIndex(tab))
     }
 
     /// Where a tab was drawn during the last frame.
@@ -1847,7 +1844,7 @@ impl Sim {
             };
             let _ = write!(out, "s{}:", surface_label(index));
             match tree.root() {
-                Some(root) => shape_of(tree, root, &mut out),
+                Some(root) => out.push_str(&subtree_shape(tree, root)),
                 None => out.push_str("()"),
             }
             out.push(' ');
@@ -1932,32 +1929,6 @@ fn surface_label(index: SurfaceIndex) -> usize {
     match index {
         SurfaceIndex::Main => 0,
         SurfaceIndex::Window(window) => window.0 + 1,
-    }
-}
-
-/// The layout of one subtree: split orientations, nesting, and the tabs of each leaf in order.
-fn shape_of(tree: &Tree<String>, id: NodeId, out: &mut String) {
-    match &tree[id] {
-        Node::Leaf(leaf) => {
-            out.push('[');
-            for tab in leaf.iter_tabs() {
-                let _ = write!(out, "{tab},");
-            }
-            out.push(']');
-        }
-        node => {
-            out.push(if matches!(node, Node::Vertical(_)) {
-                'V'
-            } else {
-                'H'
-            });
-            let [first, second] = tree.children(id).unwrap();
-            out.push('(');
-            shape_of(tree, first, out);
-            out.push('|');
-            shape_of(tree, second, out);
-            out.push(')');
-        }
     }
 }
 
@@ -2361,17 +2332,77 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
         .unwrap_or_else(|| String::from("<non-string panic payload>"))
 }
 
-/// Runs `body` with panic output suppressed.
+thread_local! {
+    /// Is *this* thread inside [`quietly`]?
+    static PANICS_ARE_SILENCED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `body` with panic output suppressed **on this thread only**.
 ///
-/// Shrinking re-runs a failing scenario dozens of times, and each run prints its panic. The
-/// hook is process-wide, so this is deliberately kept around the shrink loop only — a failure
-/// found by the sweep still prints normally the first time it happens.
+/// Shrinking re-runs a failing scenario dozens of times, and each run prints its panic — noise
+/// that buries the one report worth reading.
+///
+/// A panic hook is process-wide, and swapping it for a silent one for the duration was the
+/// first version of this: cheap, but it gags every *other* test running at that moment, and
+/// the test harness runs them in parallel by default. A test that fails while some other test
+/// happens to be shrinking would lose its message and report as a bare "panicked at unknown".
+/// So the hook is installed once and stays installed; what is scoped is a thread-local flag it
+/// consults, and a thread that never asked prints exactly as it did before.
 fn quietly<T>(body: impl FnOnce() -> T) -> T {
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let result = body();
-    std::panic::set_hook(previous);
-    result
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !PANICS_ARE_SILENCED.with(std::cell::Cell::get) {
+                previous(info);
+            }
+        }));
+    });
+
+    /// Restores the flag even if `body` unwinds past us — a caller that catches the panic
+    /// further up would otherwise keep a silenced thread for the rest of the run.
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PANICS_ARE_SILENCED.with(|silenced| silenced.set(self.0));
+        }
+    }
+
+    let _restore = Restore(PANICS_ARE_SILENCED.with(std::cell::Cell::get));
+    PANICS_ARE_SILENCED.with(|silenced| silenced.set(true));
+    body()
+}
+
+/// The silence is one thread's, and it ends when the scope does.
+///
+/// Both halves are about *someone else's* report, which is why they are asserted rather than
+/// assumed: the mechanism that suppresses output is shared by the whole process, so the only
+/// thing keeping another test's panic message alive is the scoping. Making the flag a process
+/// -wide `static` — which is what the previous implementation amounted to — turns the first
+/// assertion red.
+#[test]
+fn silencing_panics_reaches_only_the_thread_that_asked_and_ends_with_its_scope() {
+    let elsewhere = quietly(|| {
+        std::thread::spawn(|| PANICS_ARE_SILENCED.with(std::cell::Cell::get))
+            .join()
+            .unwrap()
+    });
+    assert!(
+        !elsewhere,
+        "a thread that never asked for silence was silenced: a test failing next to a shrink \
+         would lose its panic message"
+    );
+    assert!(
+        !PANICS_ARE_SILENCED.with(std::cell::Cell::get),
+        "the silence outlived its scope"
+    );
+
+    // A body that panics leaves through the `Drop`, not the assignment below it.
+    let _ = std::panic::catch_unwind(|| quietly(|| panic!("a shrink candidate that panics")));
+    assert!(
+        !PANICS_ARE_SILENCED.with(std::cell::Cell::get),
+        "an unwinding body left this thread silenced for the rest of the run"
+    );
 }
 
 /// Shrinks a failing scenario to a minimal one that still fails, by delta debugging: drop whole

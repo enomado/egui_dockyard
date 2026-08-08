@@ -391,7 +391,7 @@ impl<Tab> DockArea<'_, Tab> {
         // not only the main one: the stroke is painted for all of them, and a window surface
         // used not to step back from it at all, so a bordered window drew its border and then
         // covered it with the first tab bar.
-        rect = rect - border_clearance(style);
+        rect -= border_clearance(style);
         ui.allocate_rect(rect, Sense::hover());
 
         let Some(root) = self.dock_state[surface].root() else {
@@ -881,6 +881,13 @@ impl SeparatorBand {
         // "no constraint" keeps this a total function of its arguments instead of a special
         // case every caller has to remember; the callers that could act on it guard on `range`
         // anyway, because `delta / range` is not finite here.
+        //
+        // The negation is load-bearing and clippy's rewrite of it is not equivalent: `range`
+        // is `f32`, so a NaN — which is what a degenerate rectangle hands us — answers `false`
+        // to *every* comparison. `!(range > 0.0)` is therefore true for NaN and takes this
+        // early return, while the suggested `range <= 0.0` is false for it and would carry the
+        // NaN into the arithmetic below, where it silently becomes a fraction.
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
         if !(range > 0.0) {
             return Self {
                 min: 0.0,
@@ -917,5 +924,47 @@ impl SeparatorBand {
         } else {
             min
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SeparatorBand;
+
+    /// A degenerate node hands the band a `range` that is not a positive number, and the two
+    /// ways it can fail to be one are **not** the same test: zero is ordinary arithmetic, NaN
+    /// answers `false` to every comparison it is put in.
+    ///
+    /// This pins the `#[allow(clippy::neg_cmp_op_on_partial_ord)]` above `SeparatorBand::new`.
+    /// The lint's suggested rewrite — `range <= 0.0` — is false for NaN, so the guard would be
+    /// skipped and the NaN would flow into `fraction.clamp(min, max)` and out as a fraction the
+    /// tree then stores. Taking the suggestion turns the second half of this test red, which is
+    /// the whole reason the `allow` is allowed to stay.
+    #[test]
+    fn a_range_that_is_not_a_positive_number_constrains_nothing() {
+        for range in [0.0, -1.0, f32::NAN] {
+            let band = SeparatorBand::new(0.25, range, 4.0);
+            assert_eq!(
+                (band.min, band.max, band.effective),
+                (0.0, 1.0, 0.25),
+                "range {range} should have left the fraction alone"
+            );
+        }
+    }
+
+    /// The band is symmetric by construction, and the fraction is what the geometry can honour.
+    #[test]
+    fn a_margin_too_big_for_the_node_collapses_the_band_to_the_centre() {
+        let band = SeparatorBand::new(0.9, 10.0, 40.0);
+        assert_eq!(band.min, band.max, "an impossible margin leaves no band");
+        assert_eq!(
+            band.effective, band.min,
+            "the boundary sits where the band is"
+        );
+        assert!(
+            (band.effective - 0.5).abs() < f32::EPSILON,
+            "the least-bad answer with no room to give is an equal split, got {}",
+            band.effective
+        );
     }
 }

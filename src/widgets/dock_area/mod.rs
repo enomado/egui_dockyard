@@ -11,6 +11,9 @@ mod state;
 mod tab_removal;
 mod window_ui;
 
+/// The ids the dock draws its interactive parts under — one source for the scheme.
+pub mod ids;
+
 pub use allowed_splits::AllowedSplits;
 use egui::{Id, Modifiers, emath::*};
 pub use events::{DockAreaResponse, DockEvent};

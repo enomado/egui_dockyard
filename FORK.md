@@ -89,6 +89,15 @@ cargo clippy --all-targets
 cargo fmt --check
 ```
 
+None of those reach `fuzz/`. It and `fuzz/corpus_tool/` are separate packages, deliberately
+outside the workspace — that is how `cargo-fuzz` wants it, since building a fuzz target needs
+libfuzzer and a nightly flag — which also means a plain `cargo fmt --check` at the root has
+never had an opinion about them, and they drifted. Run it there too:
+
+```
+(cd fuzz && cargo fmt --check) && (cd fuzz/corpus_tool && cargo fmt --check)
+```
+
 See [examples/README.md](examples/README.md) for the example programs.
 
 ## Fuzzing

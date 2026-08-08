@@ -180,3 +180,19 @@ the main surface, where it does not apply. Either the doc or the condition is wr
 which needs someone's intent, not a test. Making it symmetric is a two-line change and turns
 `between_main_surface_leaves_the_preference_does_not_outlive_a_frame` red, which is where the
 decision should be recorded.
+
+**The sweep counts crossings it was offered, not gaps it closed.** `Sim::cross_toggles` now
+reads the tolerance off the style, so with the 8pt default the harness will press crossings that
+are genuinely out of line — but nothing says it ever *finds* one. The `cross` counters name the
+shapes (long band, crowded line) and not the misalignment, so "the magnet is exercised" is a
+guess: every press the sweep has ever made may have been on a pair the layout put on the same
+pixel anyway. One counter (`gap > 1pt`) and a `> 0` assertion in the coverage gate would settle
+it, and if it comes out zero the sweep needs a step that *builds* a near-miss on purpose —
+random fractions land two dividers within 8pt of each other rarely and never deliberately.
+
+**8pt of `align_tolerance` is a number picked at a keyboard.** It is the reach of the magnet and
+also, at half of it, the largest jump a press is allowed to make on screen — and that second
+reading is the one that decides whether it is too much. Nothing here has looked at it in a
+running dock: the tests state the rule, not the feel. Worth a pass in the app it was asked for,
+where too small is invisible (the button does not appear) and too large is loud (the layout
+jumps).

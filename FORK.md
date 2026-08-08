@@ -137,3 +137,29 @@ it to a struct that consumers may already have persisted needed the attribute; e
 of `Style` predates anyone saving one. So the next field added has the same problem and no
 precedent visible from its neighbours — either `#[serde(default)]` belongs on the struct, or the
 crate should say plainly that `Style` is not a save format.
+
+**`Ui::set_clip_rect` replaces, and the crate calls it bare in three places.** One of them was
+handing the tab bar a licence to paint outside its leaf (see FINDINGS). The other two — the leaf's
+own clip, and the tab body's — only ever shrink what they were given, so they are correct *today*,
+by an argument that has to be made again every time one of them is edited. A `clip_to` helper that
+intersects, and nothing calling the bare method, would make the rule mechanical instead of
+remembered.
+
+**A collapsed leaf under a *horizontal* split gets a whole column and draws one row in it.**
+`collapsed_leaf_count` is a sum down a vertical chain and a `max` across a horizontal one, which is
+right for sizing the strip; but the special case in `compute_rect_sizes` is only written for
+vertical splits, so a collapsed leaf beside a taller column is stretched to that column's height
+and paints a tab bar with empty space under it. Nobody has complained, and it is not obvious what
+the alternative should look like — which is exactly why it is worth deciding rather than leaving to
+whichever branch happens to run.
+
+**`border_clearance` insets a rectangle by the *largest* of four corner radii.** A rectangle cannot
+be inset per corner, so a style that rounds one corner hard and the rest not at all pays the hard
+corner's price on all four. Honest and cheap; the alternative is clipping the content to a rounded
+rectangle, which egui does not do.
+
+**The vendor that actually builds carries no tests.** `patches/egui_dock-*` in our own tree mirrors
+`src` only — `tools/vendor_vs_fork.sh` says so on every run — so the gates (`core_is_egui_free`, the
+DST sweep, the geometry properties) and the proptest regression seeds guard the fork while the
+*vendor* is what gets compiled into the app. A patch that lands in the vendor alone is unguarded by
+construction.

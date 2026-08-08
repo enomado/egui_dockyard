@@ -131,11 +131,15 @@ written for — the clip had been ungated since the strip arithmetic was fixed i
 Both in [FINDINGS.md](FINDINGS.md).
 
 **`tools/test_egui_dock.sh` compares the vendor against a *branch* and then tests a *working
-tree*.** The two are the same thing on a clean fork, and the script says so when they are not,
-which is enough for a human running it by hand and not enough for anything automatic. The strict
-version tests the branch — `git archive` into a sandbox, as the comparison already does — at the
-cost of not being able to run the suite over uncommitted work, which is most of what it is used
-for.
+tree*.** — *answered, and the entry named the smaller of the two defects.* The comparison's
+verdict was not machine-readable at all: it printed the divergence and exited **0** — the exit
+code came from the last `if` in the script, which had nothing to do with the comparison. Checked
+on a vendor copy with a single line changed: diff in the log, `EXIT=0`. There is now an explicit
+verdict and `exit 0/1`, the suite runs only if the comparison passed, and a third link tests the
+vendor against the fork's *working tree*. The strict variant this entry proposed — `git archive`
+into a sandbox — was rejected: it takes away the mode the script is mostly used in, a run over
+uncommitted work. Exit codes carry the distinction instead: **2** = nothing failed, but the chain
+did not close (dirty fork, or a filtered run).
 
 **The sweep no longer exercises a long preference lock.** — *answered, and the sweep could never
 have done it.* `PREFERENCE_TIME` cuts the guard to 0.05 s and the harness's pause is computed

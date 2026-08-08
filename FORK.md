@@ -114,6 +114,15 @@ cargo fuzz run -s none tree_ops fuzz/corpus/tree_ops
 cargo fuzz run -s none tree_persist fuzz/corpus/tree_persist fuzz/seeds/tree_persist
 ```
 
+Those two **keep fuzzing** — the corpus is a seed, not a work list, and the run ends when you
+stop it. To *replay* the corpus instead, which is the useful check after a change and takes
+seconds, add `-- -runs=0`:
+
+```
+cargo fuzz run -s none tree_ops     fuzz/corpus/tree_ops     -- -runs=0
+cargo fuzz run -s none tree_persist fuzz/corpus/tree_persist -- -runs=0
+```
+
 Details, the reasoning behind the seed corpus, and the list of what has been found so far are
 in [fuzz/README.md](fuzz/README.md).
 

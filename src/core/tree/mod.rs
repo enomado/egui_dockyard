@@ -189,12 +189,25 @@ impl<Tab> IndexMut<NodeId> for Tree<Tab> {
 
 impl<Tab> Tree<Tab> {
     /// Creates a new [`Tree`] with given `Vec` of `Tab`s in its root node.
+    ///
+    /// An **empty** `tabs` gives a tree with no root, which is what every other route to an
+    /// empty dock produces (closing the last tab, [`retain_tabs`](Self::retain_tabs),
+    /// [`filter_tabs`](Self::filter_tabs) — all of them go through
+    /// [`remove_leaf`](Self::remove_leaf), which empties the tree). A root leaf holding no tabs
+    /// used to be a second shape of the same state, and the two did not behave alike:
+    /// [`is_empty`](Self::is_empty) asks about the root, so the second answered "not empty",
+    /// and the renderer branches on that — the empty root leaf drew a strip of empty tab bar
+    /// and offered a leaf-sized drop target where the empty dock offers its whole area.
+    ///
+    /// Gate: `tests/an_empty_dock_has_one_shape.rs`.
     pub fn new(tabs: Vec<Tab>) -> Self {
         let mut tree = Self::default();
-        tree.root = Some(tree.nodes.insert(NodeEntry {
-            parent: None,
-            node: Node::leaf_with(tabs),
-        }));
+        if !tabs.is_empty() {
+            tree.root = Some(tree.nodes.insert(NodeEntry {
+                parent: None,
+                node: Node::leaf_with(tabs),
+            }));
+        }
         tree
     }
 
@@ -497,13 +510,10 @@ impl<Tab> Tree<Tab> {
     /// A fresh split node is allocated to hold the two of them; `target` keeps its id and
     /// its content, and simply gains a parent.
     ///
-    /// One case does not split at all: if `target` is a leaf holding no tabs, `new` takes its
-    /// place and both returned ids name it — see the code for why.
-    ///
     /// # Panics
     ///
     /// If `fraction` isn't in range 0..=1, if `new` is not a leaf with at least one tab,
-    /// or if `target` is not a node of this tree.
+    /// if `target` is not a node of this tree, or if `target` is a leaf holding no tabs.
     pub fn split(
         &mut self,
         target: NodeId,
@@ -516,19 +526,20 @@ impl<Tab> Tree<Tab> {
         assert!(self.contains(target), "no node {target} in this tree");
 
         // Splitting a pane that shows nothing cannot be honoured literally: one side of the
-        // result would be an empty leaf, and an empty leaf below the root is a phantom pane —
-        // it renders as a blank half with a separator the user can drag but never fill or
-        // close, and `validate` rejects it. The request behind the call ("put these tabs
-        // here") is served by giving the empty leaf the content instead, which is also what
-        // dropping a tab onto an empty dock looks like to the user.
+        // result would be an empty leaf — a phantom pane that renders as a blank half with a
+        // separator the user can drag but never fill or close, and which `validate` rejects.
         //
-        // Reachable through the public API: `DockState::new(vec![])` and an emptied
-        // `retain_tabs` both leave an empty root leaf, and dropping a tab onto it splits it.
-        // Found by the `tree_ops` fuzz target.
-        if self[target].get_leaf().is_some_and(LeafNode::is_empty) {
-            self.nodes.get_mut(target).unwrap().node = new;
-            return [target, target];
-        }
+        // This used to be repaired here (`new` took the empty leaf's place, and both returned
+        // ids named it), because `Tree::new(vec![])` left exactly such a leaf and dropping a
+        // tab onto it came through this method. That shape is gone: an empty dock is a tree
+        // with no root, and a tab dropped onto it arrives as `TabDestination::EmptySurface`.
+        // So no empty leaf can reach here through the crate any more, and the repair became a
+        // second statement of the rule — kept instead as the contract, loudly.
+        assert!(
+            !self[target].get_leaf().is_some_and(LeafNode::is_empty),
+            "split of {target}, which is a leaf holding no tabs; \
+             an empty leaf is not a state this tree admits (see `Tree::new`)"
+        );
 
         let grandparent = self.parent(target);
         let side_of_target = grandparent.map(|split_id| {
@@ -1003,27 +1014,34 @@ mod test {
     #[derive(Copy, Clone, Debug, PartialEq)]
     struct Tab(u64);
 
-    /// Splitting a pane that shows nothing fills it instead of producing a phantom half.
+    /// An empty dock has no node to split, so the empty vector builds no root.
     ///
-    /// Found by the `tree_ops` fuzz target: the empty root leaf that `Tree::new(vec![])` and
-    /// an emptied `retain_tabs` both leave behind used to end up as the *child* of a fresh
-    /// split — an empty leaf below the root, which is a blank pane the user can neither fill
-    /// nor close, and which the oracle rejects.
+    /// The `tree_ops` fuzz target found the predecessor of this: `Tree::new(vec![])` left an
+    /// empty root leaf, and splitting it made that leaf the *child* of a fresh split — a blank
+    /// pane the user could neither fill nor close, which the oracle rejects. The repair used
+    /// to live inside `split`; now the state it repaired cannot be built.
     #[test]
-    fn splitting_an_empty_leaf_fills_it_instead() {
-        let mut tree: Tree<Tab> = Tree::new(vec![]);
-        let root = tree.root().unwrap();
+    fn an_empty_tree_has_nothing_to_split() {
+        let tree: Tree<Tab> = Tree::new(vec![]);
 
-        let [old, new] = tree.split(root, Split::Right, 0.5, Node::leaf_with(vec![Tab(1)]));
-
-        assert_eq!(
-            [old, new],
-            [root, root],
-            "there was nothing to split off, so both halves are the same node"
-        );
-        assert_eq!(tree.len(), 1, "no split node was allocated");
-        assert_eq!(tree.num_tabs(), 1, "and the tabs arrived");
+        assert_eq!(tree.root(), None, "no root, so no id to hand to `split`");
+        assert_eq!(tree.len(), 0);
         assert_eq!(tree.validate(), Ok(()));
+    }
+
+    /// And if an empty leaf is fabricated anyway, `split` says so instead of quietly repairing
+    /// it: the arena is reachable from inside the crate, so the contract needs a witness.
+    #[test]
+    #[should_panic(expected = "which is a leaf holding no tabs")]
+    fn splitting_a_fabricated_empty_leaf_panics() {
+        let mut tree: Tree<Tab> = Tree::default();
+        let root = tree.nodes.insert(NodeEntry {
+            parent: None,
+            node: Node::leaf_with(Vec::new()),
+        });
+        tree.root = Some(root);
+
+        tree.split(root, Split::Right, 0.5, Node::leaf_with(vec![Tab(1)]));
     }
 
     /// Checks that `retain` works after removing a node

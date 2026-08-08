@@ -84,11 +84,12 @@ pub enum TreeViolation {
         child: NodeId,
     },
 
-    /// A non-root leaf that holds no tabs.
+    /// A leaf that holds no tabs.
     ///
     /// Removing the last tab from a leaf is supposed to collapse the leaf
     /// ([`Tree::remove_tab`] does this); a surviving empty leaf means some path removed tabs
-    /// without collapsing. The root leaf is exempt: an empty dock is a legitimate state.
+    /// without collapsing. The root is **not** exempt — an empty dock is a tree with no root
+    /// at all (see [`Tree::new`]), so an empty leaf is a fault wherever it sits.
     EmptyLeaf {
         /// The empty leaf.
         node: NodeId,
@@ -193,7 +194,8 @@ impl<Tab> Tree<Tab> {
     /// Checks the tree's structural invariants and returns every violation found.
     ///
     /// Read-only: nothing is mutated, nothing is repaired. An empty tree (no nodes at all) is
-    /// well-formed, as is a tree whose only node is an empty root leaf.
+    /// well-formed — that is an empty dock, and the only shape one has. A leaf holding no
+    /// tabs is not, wherever it sits; see [`TreeViolation::EmptyLeaf`].
     ///
     /// Intended as a test oracle rather than a runtime check — it walks every node, so it is
     /// linear in tree size and not meant for per-frame use.
@@ -284,10 +286,9 @@ impl<Tab> Tree<Tab> {
                 Node::Leaf(leaf) => {
                     let tabs = leaf.len();
                     if tabs == 0 {
-                        // The root leaf is allowed to be empty: that is just an empty dock.
-                        if Some(id) != self.root() {
-                            violations.push(TreeViolation::EmptyLeaf { node: id });
-                        }
+                        // No exemption for the root: an empty dock is a tree with *no root*,
+                        // so a leaf holding no tabs is a fault wherever it sits.
+                        violations.push(TreeViolation::EmptyLeaf { node: id });
                         if leaf.active_id().is_some() {
                             violations.push(TreeViolation::ActiveInvalid {
                                 node: id,
@@ -740,25 +741,27 @@ mod tests {
     }
 
     /// The same thing end to end, the way a user reaches it: drag the only tab of a window
-    /// onto an empty dock, asking for a split.
+    /// onto an empty dock.
+    ///
+    /// There is no node to aim at — an empty dock is a tree with no root — so the drop arrives
+    /// as [`TabDestination::EmptySurface`], which is exactly what the renderer offers over an
+    /// empty surface. This scene used to aim at the empty root leaf and ask for a split; that
+    /// leaf is gone, and with it the phantom pane a literal split would have made.
     #[test]
     fn dropping_a_tab_onto_an_empty_dock_leaves_no_phantom_pane() {
-        use crate::core::tree::{Split, TabInsert, TabPath};
+        use crate::core::tree::{TabDestination, TabPath};
 
         let mut dock_state = DockState::<u32>::new(vec![]);
         let window = dock_state.add_window(vec![1]);
         let source = dock_state[window].root().unwrap();
-        let target = dock_state[SurfaceIndex::main()].root().unwrap();
+        assert!(
+            dock_state.main_surface().root().is_none(),
+            "an empty dock offers its whole area, not a leaf"
+        );
 
         assert!(dock_state.move_tab(
             TabPath::new(window, source, TabIndex(0)),
-            (
-                NodePath {
-                    surface: SurfaceIndex::main(),
-                    node: target,
-                },
-                TabInsert::Split(Split::Left),
-            ),
+            TabDestination::EmptySurface(SurfaceIndex::main()),
         ));
 
         assert_eq!(dock_state.validate(), Ok(()));
@@ -766,7 +769,7 @@ mod tests {
         assert_eq!(
             dock_state.main_surface().len(),
             1,
-            "the empty pane took the tab instead of being split next to it"
+            "the tab arrived as the whole dock, not as one half of a split"
         );
     }
 

@@ -43,8 +43,9 @@ pub struct LeafNode<Tab> {
     /// Next identity to hand out. Monotonic within this leaf.
     next_tab_id: u32,
 
-    /// The opened tab, or `None` when the leaf has no tabs at all (only the root leaf is
-    /// allowed to be in that state — an empty dock).
+    /// The opened tab, or `None` when the leaf has no tabs at all — a state that only exists
+    /// between removing the last tab and the leaf being dropped, since a tree admits no empty
+    /// leaf (see [`Tree::new`](crate::core::tree::Tree::new)).
     active: Option<TabId>,
 
     /// The tab that was active immediately *before* [`active`](Self::active_id), or `None`

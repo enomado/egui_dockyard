@@ -1203,16 +1203,17 @@ mod test {
 
     /// The copying twin of `retain_none_then_push`.
     ///
-    /// The two sweeps leave the main surface in *different* shapes of empty: `retain_tabs`
-    /// rebuilds it as a tree with an empty root leaf (its surface was nulled, so `ensure_tree`
-    /// runs), while `filter_tabs` leaves a tree with no root at all (the main surface is never
-    /// nulled, so nothing rebuilds it). Both are legal empty docks — this pins that the
-    /// difference stays invisible to the next push.
+    /// Both sweeps leave the main surface in the *one* shape of empty — a tree with no root —
+    /// and a push into that tree builds a fresh root leaf. The two used to differ (the
+    /// constructor left an empty root leaf where the sweeps left none), which is what
+    /// `tests/an_empty_dock_has_one_shape.rs` now gates; these two keep the *next* operation
+    /// honest, which is what they were written for.
     #[test]
     fn filter_none_then_push() {
         let state = DockState::new(vec![0u32]);
         let mut filtered = state.filter_tabs(|_| false);
         assert_eq!(filtered.validate(), Ok(()));
+        assert!(filtered.main_surface().is_empty());
 
         filtered.push_to_focused_leaf(1);
 
@@ -1227,6 +1228,11 @@ mod test {
         let i = t.find_tab(&0).unwrap();
         t.remove_tab(i);
         t.retain_tabs(|_| false);
+        assert!(t.main_surface().is_empty());
+
         t.push_to_focused_leaf(0);
+
+        assert_eq!(t.validate(), Ok(()));
+        assert_eq!(t.iter_all_tabs().count(), 1);
     }
 }

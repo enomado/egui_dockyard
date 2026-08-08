@@ -472,10 +472,10 @@ fn leaves_of<Tab>(state: &DockState<Tab>, surface: SurfaceIndex) -> Vec<NodePath
 /// [`crate::core::shape::dock_shape`], which answers a different question (did the layout
 /// survive being written to a file and read back). Two differences, both load-bearing:
 ///
-/// * surfaces without tabs are skipped here. An empty dock has more than one legal shape — a
-///   tree with an empty root leaf (what an in-place sweep leaves) and a tree with no root at
-///   all (what a copying sweep leaves) — and `filter_none_then_push` pins that the difference
-///   is invisible to the next operation, so it is not something this oracle should report;
+/// * surfaces without tabs are skipped here. That is not a separate rule any more: a surface
+///   with no tabs is a surface with no root (an empty dock has exactly one shape — see
+///   [`Tree::new`](crate::core::tree::Tree::new)), so asking for the root is the whole of it.
+///   It used to be one, because a sweep could leave an empty root leaf behind;
 /// * trailing holes in the window vector may legally be popped, which shifts nothing that has
 ///   tabs in it.
 ///
@@ -487,10 +487,9 @@ pub fn layout_by_surface(state: &DockState<u32>) -> Vec<(SurfaceIndex, String)> 
         .iter_surfaces_indexed()
         .filter_map(|(index, surface)| {
             let tree = surface.node_tree()?;
+            // A surface holding no tabs has no root, and drops out here — see the doc comment
+            // for why that is not a blind spot but the point.
             let root = tree.root()?;
-            // A surface holding no tabs drops out — see the doc comment for why that is not a
-            // blind spot but the point.
-            surface.iter_all_tabs().next()?;
             Some((index, crate::core::shape::subtree_shape(tree, root)))
         })
         .collect()

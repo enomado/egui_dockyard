@@ -230,7 +230,22 @@ impl<Tab> Tree<Tab> {
     }
 
     /// Links `children` under a freshly built split.
+    ///
+    /// The stored `fraction` is repaired here, which is the one place both forms pass through.
+    /// `Deserialize` returning `Ok` promises a tree that passes its own oracle, and a file may
+    /// name a fraction that is not one: `NaN`, an infinity, or a number outside `0..=1`
+    /// (`validate` rejects all three, and the fuzz corpus holds files with each). Nothing is
+    /// lost by repairing rather than refusing — the renderer clamps at draw time anyway, so
+    /// the number in the file was already not the layout anyone saw; what changes is that the
+    /// tree in memory now says the same thing as the screen.
     fn adopt_split(&mut self, vertical: bool, children: [NodeId; 2], fraction: f32) -> NodeId {
+        // `NaN` fails every comparison, so it cannot be clamped — it is answered separately,
+        // with the same value a double-click on a separator writes.
+        let fraction = if fraction.is_finite() {
+            fraction.clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
         let split = SplitNode::new(children, fraction);
         let node = if vertical {
             Node::Vertical(split)
@@ -247,14 +262,15 @@ impl<Tab> Tree<Tab> {
     /// Builds a subtree of the current form.
     ///
     /// Returns `None` when nothing of the subtree survives. That happens for a leaf holding no
-    /// tabs: an empty leaf below the root is not a state the in-memory tree allows (removing
-    /// the last tab collapses the leaf), so a file describing one is repaired on the way in
-    /// rather than turned into a tree that fails its own invariants. A split left with a
-    /// single surviving child is replaced by that child — the same repair the pre-arena
+    /// tabs: an empty leaf is not a state the in-memory tree allows anywhere (removing the
+    /// last tab collapses the leaf, and an empty dock is a tree with no root — see
+    /// [`Tree::new`](crate::core::tree::Tree::new)), so a file describing one is repaired on
+    /// the way in rather than turned into a tree that fails its own invariants. A split left
+    /// with a single surviving child is replaced by that child — the same repair the pre-arena
     /// reader already applies to a split that lost one.
     ///
-    /// The root leaf is the documented exception (an empty dock is legitimate), and it is
-    /// handled by the caller, which never routes it through here.
+    /// The root is not an exception: a stored empty root leaf answers `None` here, and the
+    /// caller writes that straight into `tree.root`.
     fn build(&mut self, node: NodeIn<Tab>) -> Option<NodeId> {
         let vertical = matches!(node, NodeIn::Vertical { .. });
         match node {
@@ -323,10 +339,11 @@ impl<Tab> Tree<Tab> {
                     scroll,
                     collapsed,
                 } = leaf;
-                // Same repair as in the current form: an empty leaf anywhere but at the root
-                // is a state the tree does not allow, so it is dropped and its parent split
-                // collapses onto the surviving sibling below.
-                if tabs.is_empty() && index != 0 {
+                // Same repair as in the current form: an empty leaf is a state the tree does
+                // not allow, so it is dropped and its parent split collapses onto the
+                // surviving sibling below. At the heap root (`index == 0`) that leaves no
+                // tree at all — an empty dock.
+                if tabs.is_empty() {
                     return None;
                 }
                 self.build_leaf(tabs, active, prev_active, scroll, collapsed)
@@ -374,19 +391,11 @@ impl<'de, Tab: Deserialize<'de>> Deserialize<'de> for Tree<Tab> {
         match root {
             // Current form.
             Some(root) => {
-                tree.root = match root {
-                    // A leaf at the root may legitimately be empty — that is an empty dock,
-                    // and the only place `validate` allows one — so it bypasses the pruning
-                    // that `build` applies below the root.
-                    NodeIn::Leaf {
-                        tabs,
-                        active,
-                        prev_active,
-                        scroll,
-                        collapsed,
-                    } => Some(tree.build_leaf(tabs, active, prev_active, scroll, collapsed)),
-                    split => tree.build(split),
-                };
+                // The root goes through the same pruning as everything below it: a stored
+                // empty leaf, wherever it sits, is dropped. At the root that leaves a tree
+                // with no root, which is what an empty dock is — files written by builds
+                // that stored the empty root leaf load as the one shape that exists now.
+                tree.root = tree.build(root);
                 tree.focused_node = focused.and_then(|path| tree.walk(&path));
             }
             // Pre-arena form. An absent `root` and an empty `nodes` both mean "no tree",
@@ -736,19 +745,90 @@ mod tests {
 
     /// An empty dock survives a round trip as an empty dock, not as `null` turning into a
     /// tree with a phantom node.
+    ///
+    /// Both ways of naming one in code are the same tree now (see [`Tree::new`]), so the round
+    /// trip is asked of both.
     #[test]
     fn empty_trees_round_trip() {
-        let empty: Tree<String> = Tree::default();
-        let back: Tree<String> =
-            serde_json::from_str(&serde_json::to_string(&empty).unwrap()).unwrap();
-        assert!(back.is_empty());
-        assert_eq!(back.validate(), Ok(()));
+        for empty in [Tree::<String>::default(), Tree::<String>::new(vec![])] {
+            let back: Tree<String> =
+                serde_json::from_str(&serde_json::to_string(&empty).unwrap()).unwrap();
+            assert!(back.is_empty());
+            assert_eq!(back.len(), 0);
+            assert_eq!(back.validate(), Ok(()));
+        }
+    }
 
-        let root_only = Tree::<String>::new(vec![]);
-        let back: Tree<String> =
-            serde_json::from_str(&serde_json::to_string(&root_only).unwrap()).unwrap();
-        assert_eq!(back.len(), 1);
-        assert_eq!(back.validate(), Ok(()));
+    /// A file written before the empty root leaf was retired loads as the empty dock it
+    /// describes, not as a tree that fails its own oracle.
+    ///
+    /// Such files exist: `Tree::new(vec![])` used to build that leaf, and every application
+    /// starting from an empty dock saved one. The repair is the same one every empty leaf
+    /// gets — it is dropped — and at the root that leaves no root.
+    #[test]
+    fn a_stored_empty_root_leaf_loads_as_an_empty_dock() {
+        let json = r#"{
+            "root": { "Leaf": { "tabs": [], "active": 0 }},
+            "focused": null
+        }"#;
+
+        let tree: Tree<String> = serde_json::from_str(json).unwrap();
+
+        assert!(
+            tree.is_empty(),
+            "the stored empty leaf did not become a root"
+        );
+        assert_eq!(tree.len(), 0, "and left no node behind");
+        assert_eq!(tree.validate(), Ok(()));
+    }
+
+    /// Found by replaying the `tree_persist` corpus: a file naming a split fraction of 5.5
+    /// loaded into a tree that failed its own oracle (`SplitFractionOutOfRange`).
+    ///
+    /// Each of the three ways a stored fraction can fail to be one is repaired, and each is
+    /// checked here — a clamp alone would let `NaN` through, because `NaN` fails the
+    /// comparisons a clamp is made of.
+    #[test]
+    fn a_fraction_a_file_cannot_mean_is_repaired_on_load() {
+        for (stored, expected) in [("5.5", 1.0), ("-2.0", 0.0)] {
+            let json = format!(
+                r#"{{
+                    "root": {{ "Horizontal": {{
+                        "fraction": {stored},
+                        "children": [
+                            {{ "Leaf": {{ "tabs": ["a"], "active": 0 }} }},
+                            {{ "Leaf": {{ "tabs": ["b"], "active": 0 }} }}
+                        ]
+                    }} }},
+                    "focused": null
+                }}"#
+            );
+
+            let tree: Tree<String> = serde_json::from_str(&json).unwrap();
+
+            assert_eq!(tree.validate(), Ok(()), "stored fraction {stored}");
+            let root = tree.root().unwrap();
+            assert_eq!(
+                tree[root].get_split().unwrap().fraction,
+                expected,
+                "stored fraction {stored}"
+            );
+        }
+
+        // The non-finite cases cannot be written in JSON at all — `serde_json` refuses both
+        // `NaN` and an overflowing literal — while RON, which is what the corpus is written
+        // in, admits them. They are put to the repair directly instead. `NaN` is the case a
+        // clamp cannot answer: every comparison against it is false, so `clamp` hands it back.
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut tree: Tree<String> = Tree::new(vec!["a".to_string()]);
+            let left = tree.root().unwrap();
+            let right = tree.adopt(Node::leaf("b".to_string()));
+            let split = tree.adopt_split(false, [left, right], bad);
+            tree.root = Some(split);
+
+            assert_eq!(tree[split].get_split().unwrap().fraction, 0.5, "{bad}");
+            assert_eq!(tree.validate(), Ok(()), "{bad}");
+        }
     }
 
     /// Focus that a file cannot honour (it names a split) is dropped rather than stored as

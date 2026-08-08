@@ -12,6 +12,75 @@ Ordered newest first.
 
 ---
 
+## An empty dock had two shapes, and the one an application starts in did not look empty
+
+**Status upstream:** not reported.
+
+**Symptom.** `DockState::new(vec![])` — how an application that opens with nothing docked builds
+its state — drew a strip of empty tab bar across the top of the dock area, and offered a drop
+target the size of that strip's leaf. Close the last tab of the same dock instead, and the dock
+drew nothing and took a dropped tab anywhere in its whole area. Same state, two looks, decided by
+how the user got there.
+
+**Root cause.** Two shapes of "empty" existed and nothing said which was canonical:
+
+* `Tree::new(tabs)` always built a root leaf, so an empty `tabs` gave a leaf holding no tabs;
+* every removal route — `remove_tab` of the last tab, `retain_tabs`, `filter_tabs`, all through
+  `remove_leaf` — cleared the arena and left `root: None`.
+
+`Tree::is_empty` asks about the root, so the first shape answered "not empty", and the renderer
+branches on exactly that: `show_root_surface_inside` allocates the whole area as
+`TabDestination::EmptySurface` when the tree is empty, and otherwise renders nodes — a leaf with
+no tabs being a tab bar with nothing in it.
+
+The second shape also cost an exception, written down four times: `validate` exempted the root
+from `EmptyLeaf`; `Tree::split` carried a branch that filled an empty leaf instead of splitting
+it (a repair for "drop a tab onto an empty dock", which came through `split` only because of this
+shape); and the reader repeated the exemption for both the current and the pre-arena form. Four
+statements of one rule, and the rule was not even the one anybody wanted.
+
+**Fix.** An empty dock is a tree with **no root**, everywhere.
+
+* `Tree::new(vec![])` builds no root.
+* `validate` drops the exemption: a leaf holding no tabs is a violation wherever it sits.
+* `Tree::split` drops the repair and asserts instead — the state it repaired cannot be built any
+  more, and a fabricated one should be heard rather than quietly patched.
+* The reader routes the root through the same pruning as everything below it, so a layout saved
+  by an older build (an empty root leaf on disk) loads as the empty dock it describes.
+
+**Evidence.** `tests/an_empty_dock_has_one_shape.rs` puts all four routes to empty side by side
+and asserts both halves: the tree (no root, no nodes, clean `validate`) and the frame (no node
+geometry published, and the same shapes painted by every route). Restoring the old constructor
+turns both red — the second on "1 node(s) got a rectangle", which is the tab bar strip.
+`a_stored_empty_root_leaf_loads_as_an_empty_dock` covers the files already written.
+
+---
+
+## A saved layout could name a split fraction that is not a fraction, and the reader handed it straight to the tree
+
+**Status upstream:** not reported.
+
+**Symptom.** Loading a layout whose split says `fraction: 5.5` (or an infinity, or `NaN`) produced
+a `DockState` that fails its own oracle — `SplitFractionOutOfRange` / `SplitFractionNotFinite`.
+Nothing crashed: the renderer clamps at draw time, so the layout on screen and the layout in
+memory had quietly stopped being the same thing, and every later edit was made against the wrong
+one. Found by replaying the `tree_persist` corpus.
+
+**Root cause.** `Deserialize` returning `Ok` is a promise that what came back is well-formed, and
+the reader repaired shape (empty leaves, half-splits, focus that names a split) but not numbers.
+
+**Fix.** The repair goes in `adopt_split`, the one place both the current and the pre-arena form
+pass through: a finite fraction is clamped into `0..=1`, a non-finite one becomes `0.5` — the
+value a double-click on a separator writes. `NaN` needs the separate branch, because every
+comparison against it is false and `clamp` hands it back unchanged.
+
+**Evidence.** `a_fraction_a_file_cannot_mean_is_repaired_on_load`: `5.5` and `-2.0` through the
+reader (JSON cannot spell the non-finite ones — RON, which the corpus is written in, can), and
+`NaN`/`±inf` put to `adopt_split` directly. Removing the repair turns it red on the first case,
+and the corpus replay crashes again.
+
+---
+
 ## A collapsed floating window was sized in one coordinate system and drawn in another, so its last row of tabs hung out of the frame
 
 **Status upstream:** not reported.

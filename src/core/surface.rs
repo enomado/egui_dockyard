@@ -36,8 +36,8 @@ pub enum SurfaceMut<'a, Tab> {
 impl<'a, Tab> SurfaceRef<'a, Tab> {
     /// Is this an unoccupied window slot?
     ///
-    /// Note this is about the *slot*, not about content: a surface holding a tree with no
-    /// tabs is a legitimate empty dock and answers `false`.
+    /// Note this is about the *slot*, not about content: a surface holding an empty tree is a
+    /// legitimate empty dock and answers `false`.
     pub const fn is_empty(&self) -> bool {
         matches!(self, Self::Empty)
     }

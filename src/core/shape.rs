@@ -1,27 +1,28 @@
-//! Текстовый дамп формы дока — то, что имеет смысл сравнивать до и после round-trip'а.
+//! Textual dump of a dock's shape — the thing worth comparing before and after a round-trip.
 //!
-//! # Почему это здесь, а не у каждого звателя
+//! # Why it lives here and not at each caller
 //!
-//! Один и тот же дамп понадобился трижды: гейтам корпуса раскладок в приложении, гейту
-//! формата без приложения (`dock_layout_gate`) и — в своём варианте — DST-симулятору. Два
-//! первых сравнивают ОДНО И ТО ЖЕ свойство (пережила ли форма запись и чтение), и когда
-//! правило выводится заново в каждом месте вызова, копии разъезжаются молча: ровно так на
-//! P3 разъехались две метлы поверхностей.
+//! The same dump was needed three times: by the layout-corpus gates in the application, by the
+//! format gate that runs without the application (`dock_layout_gate`) and — in its own variant
+//! — by the DST simulator. The first two assert THE SAME property (did the shape survive a
+//! write and a read), and when the rule is re-derived at every call site the copies drift
+//! apart silently: that is exactly how the two surface sweeps drifted on P3.
 //!
-//! DST-трейс намеренно НЕ сведён сюда: он решает другую задачу — воспроизводимость прогона
-//! по сиду, — поэтому в нём нет ни долей сплитов, ни счётчиков свёрнутого, зато есть
-//! активный таб каждого листа. Это не «ещё одна копия», а другое утверждение.
+//! The DST trace is deliberately NOT folded in here: it answers a different question —
+//! reproducibility of a run from its seed — so it carries neither split fractions nor
+//! collapsed counters, but does carry the active tab of every leaf. That is not "one more
+//! copy", it is a different claim.
 //!
-//! # Что в дампе есть и почему
+//! # What the dump contains, and why
 //!
-//! * Поверхности нумеруются позицией в СОХРАНЁННОЙ форме (main = 0, окно N → N+1): дамп
-//!   сравнивается с дампом того же дока после round-trip'а, а в памяти main живёт отдельным
-//!   полем и окна считаются с нуля (P6). Без этого перевода дамп ловил бы собственную
-//!   адресацию, а не формат.
-//! * Узлы нумеруются обходом в ширину, а НЕ идентичностями: у дока до и после сохранения
-//!   идентичности заведомо разные — они не переживают файл и не должны.
-//! * Доли сплитов и счётчики свёрнутого входят в дамп: писатель, теряющий `fraction`,
-//!   обязан быть виден (на P2 такая мутация роняла 8 из 13 раскладок).
+//! * Surfaces are numbered by their position in the STORED shape (main = 0, window N → N+1):
+//!   the dump is compared against the dump of the same dock after a round-trip, while in
+//!   memory main lives in its own field and windows count from zero (P6). Without that
+//!   translation the dump would be catching its own addressing rather than the format.
+//! * Nodes are numbered by breadth-first traversal, NOT by identity: a dock before and after
+//!   saving has deliberately different identities — they do not survive the file and must not.
+//! * Split fractions and collapsed counters are part of the dump: a writer that loses
+//!   `fraction` has to be visible (on P2 that mutation failed 8 of 13 layouts).
 
 use std::fmt::{Display, Write};
 
@@ -31,24 +32,24 @@ use crate::core::tree::Tree;
 use crate::core::tree::node::Node;
 use crate::core::tree::node_id::NodeId;
 
-/// Форма одного поддерева одной строкой: ориентации сплитов, вложенность, табы каждого листа
-/// по порядку. Лист — `[a,b,]`, сплит — `V(левый|правый)` / `H(...)`.
+/// The shape of one subtree on a single line: split orientations, nesting, and the tabs of
+/// every leaf in order. A leaf is `[a,b,]`, a split is `V(left|right)` / `H(...)`.
 ///
-/// Идентичности узлов в дамп намеренно НЕ входят: копирующая метла строит новую арену и
-/// раздаёт новые id, так что порядок слотов — деталь реализации, тогда как «какой сплит что
-/// держит и в каком порядке» — ровно то, что видит юзер.
+/// Node identities are deliberately NOT part of the dump: the copying sweep builds a fresh
+/// arena and hands out fresh ids, so slot order is an implementation detail, whereas "which
+/// split holds what, and in which order" is exactly what the user sees.
 ///
-/// # Почему это здесь, а не у каждого звателя
+/// # Why it lives here and not at each caller
 ///
-/// Ровно эта строка нужна двум разным утверждениям — оракулу копирующей метлы
-/// (`core::testkit::layout_by_surface`) и трейсу DST-симулятора, — и до 2026-08-08 жила
-/// двумя копиями, которые отличались уже сейчас (`is_vertical()` против ручного `matches!`).
-/// Разные утверждения вправе иметь свои дампы (см. шапку модуля про `dock_shape`), но
-/// ПРИМИТИВ, из которого они собираются, разъезжаться не должен: две копии одной строки — это
-/// та же форма, которой этот трек уже дважды был укушен.
+/// This very string is needed by two different claims — the oracle of the copying sweep
+/// (`core::testkit::layout_by_surface`) and the trace of the DST simulator — and until
+/// 2026-08-08 it lived as two copies which had already drifted apart (`is_vertical()` versus a
+/// hand-written `matches!`). Different claims are entitled to their own dumps (see the module
+/// header on `dock_shape`), but the PRIMITIVE they are assembled from must not drift: two
+/// copies of one string are the same shape this track has already been bitten by twice.
 ///
-/// Дамп предназначен для СРАВНЕНИЯ, а не для разбора: формат волен меняться, лишь бы менялся
-/// одинаково для обеих сторон сравнения.
+/// The dump is meant for COMPARISON, not for parsing: the format is free to change as long as
+/// it changes identically for both sides of the comparison.
 pub fn subtree_shape<Tab: Display>(tree: &Tree<Tab>, id: NodeId) -> String {
     let mut out = String::new();
     write_subtree_shape(tree, id, &mut out);
@@ -76,7 +77,7 @@ fn write_subtree_shape<Tab: Display>(tree: &Tree<Tab>, id: NodeId, out: &mut Str
     }
 }
 
-/// Позиция поверхности в сохранённой форме: main всегда 0, окно `n` — на `n + 1`.
+/// Position of a surface in the stored shape: main is always 0, window `n` sits at `n + 1`.
 fn stored_position(index: SurfaceIndex) -> usize {
     match index {
         SurfaceIndex::Main => 0,
@@ -84,13 +85,14 @@ fn stored_position(index: SurfaceIndex) -> usize {
     }
 }
 
-/// Форма дока в виде текста: поверхности, узлы, доли сплитов, состав и порядок табов.
+/// The shape of a dock as text: surfaces, nodes, split fractions, tab contents and order.
 ///
-/// `tab_label` называет таб так, как удобно звателю (`Debug`, заголовок, имя варианта) —
-/// сама форма от этого не зависит, но расхождение состава табов должно быть читаемым.
+/// `tab_label` names a tab however the caller finds convenient (`Debug`, a title, a variant
+/// name) — the shape itself does not depend on that, but a difference in tab contents has to
+/// be readable.
 ///
-/// Дамп предназначен для СРАВНЕНИЯ (до/после сохранения), а не для разбора: его формат
-/// может меняться, лишь бы менялся одинаково для обеих сторон сравнения.
+/// The dump is meant for COMPARISON (before/after saving), not for parsing: its format may
+/// change as long as it changes identically for both sides of the comparison.
 pub fn dock_shape<Tab>(state: &DockState<Tab>, tab_label: impl Fn(&Tab) -> String) -> String {
     let mut out = String::new();
     for (surface_index, surface) in state.iter_surfaces_indexed() {
@@ -102,7 +104,7 @@ pub fn dock_shape<Tab>(state: &DockState<Tab>, tab_label: impl Fn(&Tab) -> Strin
         let position = |id: NodeId| order.iter().position(|other| *other == id);
         writeln!(
             out,
-            "surface {}: {} узлов, фокус {:?}",
+            "surface {}: {} nodes, focus {:?}",
             stored_position(surface_index),
             order.len(),
             tree.focused_leaf().and_then(position)
@@ -123,7 +125,7 @@ pub fn dock_shape<Tab>(state: &DockState<Tab>, tab_label: impl Fn(&Tab) -> Strin
                 node @ (Node::Horizontal(split) | Node::Vertical(split)) => {
                     writeln!(
                         out,
-                        "  {index}: {} fraction={} collapsed={} дети={:?}",
+                        "  {index}: {} fraction={} collapsed={} children={:?}",
                         if node.is_vertical() {
                             "vertical"
                         } else {
@@ -147,10 +149,11 @@ mod tests {
     use crate::core::tree::Split;
     use crate::core::tree::node::Node;
 
-    /// Язык `subtree_shape` прибит буквой: у него теперь ДВА звателя с разными утверждениями
-    /// (оракул копирующей метлы и трейс DST), и оба сравнивают дамп с дампом — то есть
-    /// поехавший формат оба переживут молча. Проверяется здесь буквально, потому что больше
-    /// негде: у обоих звателей обе стороны сравнения поедут вместе.
+    /// The language of `subtree_shape` is pinned to the letter: it now has TWO callers with
+    /// different claims (the oracle of the copying sweep and the DST trace), and both compare
+    /// a dump against a dump — that is, a format that drifts would be survived by both in
+    /// silence. It is checked literally here because there is nowhere else: at both callers
+    /// the two sides of the comparison drift together.
     #[test]
     fn the_subtree_shape_writes_splits_nesting_and_tabs_in_order() {
         let mut state = DockState::new(vec!["a".to_string()]);
@@ -169,15 +172,16 @@ mod tests {
         assert_eq!(
             subtree_shape(state.main_surface(), root),
             "V([a,]|[b,c,])",
-            "формат дампа поехал — обе стороны сравнения у звателей поедут вместе и не заметят"
+            "the dump format drifted — at the callers both sides of the comparison drift with \
+             it and notice nothing"
         );
     }
 
-    /// Дамп обязан РАЗЛИЧАТЬ доки, отличающиеся только тем, что он берётся судить.
+    /// The dump has to TELL APART docks that differ only in what it is meant to judge.
     ///
-    /// Зуб на «различие даром»: если бы дамп печатал одну лишь форму дерева, две раскладки
-    /// с разной долей сплита читались бы одинаково, и гейт round-trip'а молча перестал бы
-    /// ловить потерю `fraction`.
+    /// A tooth against "a difference for free": were the dump to print the tree shape alone,
+    /// two layouts with different split fractions would read identically, and the round-trip
+    /// gate would silently stop catching a lost `fraction`.
     #[test]
     fn the_shape_notices_a_fraction_a_focus_and_a_tab_order() {
         let mut state = DockState::new(vec!["a".to_string()]);
@@ -188,29 +192,29 @@ mod tests {
                 .split(root, Split::Right, 0.5, Node::leaf("b".to_string()));
         let base = dock_shape(&state, |tab| tab.clone());
 
-        // Доля сплита.
+        // Split fraction.
         let mut moved = state.clone();
         let split_id = moved.main_surface().root().unwrap();
         match &mut moved.main_surface_mut()[split_id] {
             Node::Horizontal(split) | Node::Vertical(split) => split.fraction = 0.25,
-            Node::Leaf(_) => unreachable!("корень сцены — сплит по построению"),
+            Node::Leaf(_) => unreachable!("the scene's root is a split by construction"),
         }
         assert_ne!(
             base,
             dock_shape(&moved, |tab| tab.clone()),
-            "дамп не заметил изменившуюся долю сплита"
+            "the dump missed a changed split fraction"
         );
 
-        // Фокус.
+        // Focus.
         let mut focused = state.clone();
         focused.main_surface_mut().set_focused_node(left);
         assert_ne!(
             base,
             dock_shape(&focused, |tab| tab.clone()),
-            "дамп не заметил переехавший фокус"
+            "the dump missed a moved focus"
         );
 
-        // Состав табов.
+        // Tab contents.
         let mut extra = state.clone();
         extra
             .main_surface_mut()
@@ -220,7 +224,7 @@ mod tests {
         assert_ne!(
             base,
             dock_shape(&extra, |tab| tab.clone()),
-            "дамп не заметил добавленный таб"
+            "the dump missed an added tab"
         );
     }
 }

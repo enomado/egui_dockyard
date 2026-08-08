@@ -18,7 +18,8 @@ pub mod translations;
 /// Window states which tells floating tabs how to be displayed inside their window,
 pub mod window_state;
 
-/// Текстовый дамп формы дока — общий для гейтов, сравнивающих док до и после сохранения.
+/// Textual dump of a dock's shape — shared by the gates that compare a dock before and after
+/// saving.
 pub mod shape;
 
 /// Vocabulary of dock operations shared by the property tests and the fuzzer.

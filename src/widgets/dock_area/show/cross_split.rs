@@ -1768,7 +1768,7 @@ mod tests {
     /// `the_toggle_leaves_the_geometry_map_describing_the_tree_it_just_wrote`.
     #[test]
     fn toggle_after_dragging_the_outer_divider_keeps_every_leaf_in_place() {
-        // Start as two columns, each with its own inner divider ("0 сплит горизонтальный").
+        // Start as two columns, each with its own inner divider (node 0 is a horizontal split).
         let (mut state, outer_id, leaves) = build_cross(true, 0.5, 0.5);
         let ctx = Context::default();
         let id = Id::new(DOCK_ID);

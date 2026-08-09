@@ -649,10 +649,14 @@ fn outcome_index(outcome: Outcome) -> Option<usize> {
 
 /// What one applied step did, as far as the oracles need to know.
 struct Effect {
-    /// Whether this step had no business changing *anything at all*.
+    /// Whether this step had no business changing *anything at all*, and why not — see
+    /// [`Stillness`]. Two different claims share one strict check (the whole identity map must
+    /// come through equal, not just the leaves named in `touched`) but are counted separately,
+    /// because they are different properties of the dock: one says rendering does not disturb
+    /// state, the other says a gesture that moved nothing announced nothing.
     ///
-    /// Only a frame with no input qualifies here, and getting to that answer took two wrong
-    /// ones, both corrected by measurement rather than by argument:
+    /// Getting to a check this strict took two wrong ones, both corrected by measurement rather
+    /// than by argument:
     ///
     /// * "the trace came out identical" is not it. Dropping the only tab of a leaf onto its
     ///   sibling's split button removes the emptied leaf and builds a new one — a real change
@@ -664,7 +668,7 @@ struct Effect {
     ///
     /// The cancelled drag is therefore pinned by a scripted test on the one scene where it is
     /// a no-op (a root leaf holding a single tab) rather than waited for here.
-    must_change_nothing: bool,
+    stillness: Stillness,
     /// The leaves the step was *about* — the source and target of a gesture, the node a
     /// scripted call names. Everything else has to come through untouched, identities and all.
     ///
@@ -722,6 +726,29 @@ enum CommitRule {
     /// Not this stage's business — the step goes through the model, or spans gestures whose event
     /// contract is judged elsewhere.
     Unjudged,
+}
+
+/// Why a step's [`Effect`] claims to have changed nothing at all, when it does.
+///
+/// Two claims, not one, because "idle" is ambiguous between "no frame ran" and "a frame ran and
+/// did nothing" — and the sweep's coverage gate is specifically about the first. Folding both
+/// into one counter let `Step::GrabSeparator`'s quiet press-and-release (real input: a press, a
+/// held frame, a release) satisfy a gate whose failure message reads "no frame ... ran without
+/// input" without a single such frame ever having run — the exact "green for free" this harness
+/// otherwise asserts against. See [`IdentityWatch`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stillness {
+    /// The step is free to change what `Effect::touched` names; nothing else is required to
+    /// hold the whole map equal.
+    None,
+    /// A frame that carried no input events at all — `Step::Idle`. What
+    /// `IdentityWatch::idle_frames` counts, and the only regime the sweep's "rendering alone
+    /// disturbs nothing" gate is about.
+    NoInput,
+    /// Input arrived — a press, a release — but the gesture's own contract says it moved
+    /// nothing, so the map still has to come through equal. A different property from
+    /// `NoInput`, counted in `IdentityWatch::quiet_gestures` rather than folded into it.
+    QuietGesture,
 }
 
 /// Every live leaf's identities, in tree order. See [`Sim::identities`].
@@ -1774,7 +1801,7 @@ impl Sim {
                 // Whatever it landed in did not exist a moment ago, so nothing survived that
                 // this step could have disturbed.
                 return Some(Effect {
-                    must_change_nothing: false,
+                    stillness: Stillness::None,
                     touched: self.live_leaves(),
                     commits: CommitRule::Unjudged,
                     boundaries: BoundaryRule::None,
@@ -1787,8 +1814,8 @@ impl Sim {
         // Anything the previous step left on the counter belongs to the previous step.
         self.take_commits();
 
-        // Set by the steps that are supposed to be no-ops; see `Effect`.
-        let mut must_change_nothing = false;
+        // Set by the steps that are supposed to be no-ops; see `Effect` and `Stillness`.
+        let mut stillness = Stillness::None;
         // Separator gestures are the ones whose event contract is judged here; everything else
         // announces on its own terms and is judged by the tests that own it.
         let mut commits = CommitRule::Unjudged;
@@ -1906,10 +1933,11 @@ impl Sim {
                 // hand opens. So nothing is exempt — every leaf that is still there must be
                 // identical, and the dock must announce nothing.
                 //
-                // `must_change_nothing` would say it more strongly and is deliberately not used:
-                // it feeds `IdentityWatch::idle_frames`, whose gate is about frames that ran with
-                // no input at all, and a step that moves the pointer would leave that number
-                // reading healthy without a single quiet frame behind it.
+                // `Stillness` would say it more strongly and is deliberately left `None`: neither
+                // of its variants is honest about a step that moves the pointer every frame — it
+                // is not `NoInput` (the pointer moved), and it is not the single settled
+                // press-and-release `QuietGesture` means either. Routing it through either would
+                // leave that counter reading healthy without the frame it claims to count.
                 commits = CommitRule::Exactly(0);
                 Vec::new()
             }
@@ -2130,7 +2158,7 @@ impl Sim {
                 let refocused = self.focus_trace() != focus_before;
                 commits = CommitRule::Exactly(usize::from(refocused));
                 if !refocused {
-                    must_change_nothing = true;
+                    stillness = Stillness::QuietGesture;
                     self.separator.quiet_grabs += 1;
                 }
                 Vec::new()
@@ -2313,7 +2341,7 @@ impl Sim {
             // A frame with no input at all: it is allowed to change nothing whatsoever, which
             // is why nothing is listed as touched.
             Step::Idle => {
-                must_change_nothing = true;
+                stillness = Stillness::NoInput;
                 commits = CommitRule::Exactly(0);
                 self.run_frame(vec![]);
                 Vec::new()
@@ -2354,7 +2382,7 @@ impl Sim {
             self.effective[slot] += 1;
         }
         Some(Effect {
-            must_change_nothing,
+            stillness,
             touched,
             commits,
             boundaries,
@@ -2743,11 +2771,21 @@ struct Run {
 ///
 /// Without these numbers the property is the usual green-for-free: a run whose every step
 /// changed everything has no bystanders to protect, and a run with no quiet frames never asks
-/// whether a frame can churn identities on its own. Both are asserted by the sweep.
+/// whether a frame can churn identities on its own. All three are asserted by the sweep — kept as
+/// three rather than two because `idle_frames` and `quiet_gestures` answer different questions
+/// (see [`Stillness`]) and folding them into one counter let the coverage gate for the first be
+/// satisfied by the second, which never runs a frame with no input at all.
 #[derive(Clone, Copy, Default, Debug)]
 struct IdentityWatch {
-    /// Frames with no input at all, whose *whole* identity map had to come through unchanged.
+    /// Frames with no input at all (`Stillness::NoInput`), whose *whole* identity map had to
+    /// come through unchanged.
     idle_frames: usize,
+    /// Steps whose gesture had input but claimed, in its own contract, to have moved nothing
+    /// (`Stillness::QuietGesture`) — a settled press-and-release on a separator today. Held to
+    /// the same whole-map check as `idle_frames`, but counted apart: a run can satisfy one of
+    /// these without ever reaching the other, and the sweep's coverage gates are about each in
+    /// particular, not about their sum.
+    quiet_gestures: usize,
     /// Bystander leaves checked across steps that were about something else.
     bystanders: usize,
 }
@@ -2757,10 +2795,10 @@ struct IdentityWatch {
 /// Returns the complaint, or `None` if the step behaved. Two regimes, because a step that did
 /// nothing has to answer a stronger question:
 ///
-/// * a step that had no business changing anything (a frame with no input; a tab dropped back
-///   onto its own node) — the whole identity map must be equal, keys, order and all. This is
-///   the regime that catches churn under a still picture, and the one the cancelled-drag bug of
-///   P12 would have failed;
+/// * a step that had no business changing anything — either `Stillness` variant, a frame with no
+///   input or a settled gesture that moved nothing — the whole identity map must be equal, keys,
+///   order and all. This is the regime that catches churn under a still picture, and the one the
+///   cancelled-drag bug of P12 would have failed;
 /// * anything else — the leaves the step was about are exempt (they are what it changed), and
 ///   every other leaf that still exists must be identical. Leaves that are *gone* are not
 ///   checked: a drop can empty a leaf, and a closed window takes its leaves with it.
@@ -2775,8 +2813,12 @@ fn identity_complaint(
     effect: &Effect,
     watch: &mut IdentityWatch,
 ) -> Option<String> {
-    if effect.must_change_nothing {
-        watch.idle_frames += 1;
+    match effect.stillness {
+        Stillness::NoInput => watch.idle_frames += 1,
+        Stillness::QuietGesture => watch.quiet_gestures += 1,
+        Stillness::None => {}
+    }
+    if effect.stillness != Stillness::None {
         if before != after {
             return Some(format!(
                 "a step that changed nothing visible still moved identities underneath:\n\
@@ -4114,6 +4156,7 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
             *slot += count;
         }
         identity.idle_frames += outcome.identity.idle_frames;
+        identity.quiet_gestures += outcome.identity.quiet_gestures;
         identity.bystanders += outcome.identity.bystanders;
         boundary.checked += outcome.boundary.checked;
         boundary.under_pressure += outcome.boundary.under_pressure;
@@ -4260,6 +4303,14 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         identity.idle_frames > 0,
         "no frame across {SEEDS} seeds ran without input, so the claim that rendering alone \
          disturbs nothing was never put to the test"
+    );
+    // Its own gate, not folded into the one above: a run could satisfy `idle_frames` with a
+    // `GrabSeparator` that never refocused and never sent a single `Step::Idle`, which would say
+    // nothing about rendering — see `Stillness`.
+    assert!(
+        identity.quiet_gestures > 0,
+        "no settled press-and-release across {SEEDS} seeds claimed to have moved nothing, so \
+         the claim that real input can still leave every identity untouched was never checked"
     );
     assert!(
         identity.bystanders > 0,

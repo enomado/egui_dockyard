@@ -253,7 +253,18 @@ egui drag at the end of a step is a tab's drag.
   count as one multi-click; the hold steps get away without a pause today because nothing in the
   tab path reacts to a double click. That is a fact about the crate, not about the harness, and it
   is written down nowhere.
-* **`IdentityWatch::idle_frames` counts steps, not frames.** `MoveWhileHeld` deliberately does not
-  feed it (see the arm's comment) — but the name and its gate's message say "a frame that ran with
-  no input", and the field is fed by anything with `must_change_nothing`. Worth splitting before
-  something else quietly satisfies it.
+* ~~**`IdentityWatch::idle_frames` counts steps, not frames.**~~ Done — split the one bool
+  (`Effect::must_change_nothing`) into an enum, `Stillness { None, NoInput, QuietGesture }`, and
+  gave `QuietGesture` (real input — a press, a held frame, a release — that the gesture's own
+  contract says moved nothing; today only `Step::GrabSeparator`'s no-op grab) its own counter,
+  `IdentityWatch::quiet_gestures`, instead of folding it into `idle_frames`. Measured first: before
+  the split, a 96-seed sweep's `idle_frames` read 118, which was 104 genuine `Step::Idle` frames
+  plus 14 quiet separator grabs counted as if they were the same thing — exactly what let the
+  coverage gate ("no frame ... ran without input") pass without the harness ever having watched a
+  literal empty frame in a run where `Step::Idle` happened to draw zero. `quiet_gestures` gets its
+  own gate (`> 0`) rather than being asserted only via the sum, and it *can* fail: forcing the
+  `QuietGesture` arm back to `None` turns `identity.quiet_gestures` to 0 and reddens the new assert
+  on the very next run — checked, then reverted. `MoveWhileHeld`/`Settle` still route through
+  neither variant, now for a documented reason instead of an implicit one (a step with motion every
+  frame is neither "no input" nor a settled press-and-release). All 22 tests in `tests/dst.rs` stay
+  green.

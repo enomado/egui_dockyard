@@ -485,6 +485,20 @@ impl<Tab> LeafNode<Tab> {
         }
         let active = self.active;
         self.history.retain(|id| Some(*id) != active);
+        // The third part of the invariant, restored where the other two are. No caller can
+        // hand this function a repeat today — every push removes the id first — but a repair
+        // that restores two thirds of what it documents is a repair that stops being true the
+        // day a fourth caller appears, and this is also the property that *bounds the
+        // history*: no repeats plus "every entry is a live tab" means it can never hold more
+        // than one entry per tab.
+        let mut kept = Vec::with_capacity(self.history.len());
+        self.history.retain(|id| {
+            let first_time = !kept.contains(id);
+            if first_time {
+                kept.push(*id);
+            }
+            first_time
+        });
     }
 
     /// Returns a new leaf with the tab type mapped and filtered, or `None` if no tab
@@ -669,6 +683,41 @@ mod focus_history_tests {
             leaf.active_index(),
             Some(TabIndex(0)),
             "one step deeper into the history, which a single slot could not reach"
+        );
+    }
+
+    /// The history cannot outgrow the leaf.
+    ///
+    /// It has no configured size and never needed one: an entry names a live tab and appears
+    /// once, so "one entry per tab, minus the active one" is the ceiling — and it is not an
+    /// argument about the code, it is what `validate` checks on every tree the property tests
+    /// and the fuzzer build. This states it directly, under a workload that switches and
+    /// closes far more times than there are tabs.
+    #[test]
+    fn the_history_is_bounded_by_the_tab_count() {
+        let mut leaf = LeafNode::new(('a'..='j').collect::<Vec<_>>());
+        // Two hundred switches around ten tabs: a history that grew per *visit* rather than
+        // per tab would be twenty times the leaf by the end of this.
+        for round in 0..200usize {
+            leaf.set_active_tab(TabIndex(round * 7 % leaf.len()))
+                .unwrap();
+            assert!(
+                leaf.history_ids().count() < leaf.len(),
+                "history {} entries for {} tabs",
+                leaf.history_ids().count(),
+                leaf.len()
+            );
+        }
+
+        // And it shrinks with the leaf rather than keeping names of tabs that are gone.
+        while leaf.len() > 1 {
+            leaf.remove_tab(TabIndex(0));
+            assert!(leaf.history_ids().count() < leaf.len());
+        }
+        assert_eq!(
+            leaf.history_ids().count(),
+            0,
+            "one tab, nowhere to return to"
         );
     }
 

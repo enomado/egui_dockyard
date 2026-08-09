@@ -49,6 +49,12 @@
   `TabViewer::force_close`, or the application editing the `DockState` between frames.
   See [FINDINGS](FINDINGS.md).
 
+- The other end of the same drag: closing the leaf the drop overlay had settled its preference
+  on, while a tab was still being held over it, no longer panics on release. A new read,
+  `drag_hover_node`, hands back the node the preference currently names (stale or not, unlike
+  `dragged_tab`) for anything that wants to watch it from outside a frame. See
+  [FINDINGS](FINDINGS.md).
+
 - `LeafNode::retain_tabs` no longer leaves the active tab addressing a tab it removed, and
   keeps the focus history when the tab it names survives.
 

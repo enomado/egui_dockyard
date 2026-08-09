@@ -202,6 +202,125 @@ pub fn dragged_tab<Tab>(
         .resolve(dock_state)
 }
 
+/// The node the drag's drop indicator currently prefers, or `None` if no drag is in flight.
+///
+/// Reads the same per-frame state the dock keeps in `Context` memory, the same way
+/// [`dragged_tab`] does — but where that resolves an identity, this does not, and the
+/// difference is deliberate.
+///
+/// [`dragged_tab`] addresses its tab by [`TabId`], which outlives a position and has to be
+/// *searched for* to answer "where is it now" — so a stale one and no drag at all look the
+/// same from outside, and merging them is correct. A [`NodePath`] is already the node's
+/// identity (see [`NodeId`](crate::NodeId)'s docs): there is nothing to search for, only
+/// [`DockState::node`](crate::DockState::node) to ask. So this hands back exactly what the
+/// dock's own preference currently holds, stale or not, and leaves the liveness question to
+/// the caller — which is what lets an outside reader (this crate's own frame-sweep harness,
+/// among others) catch the dock holding a preference on a node that is already gone, rather
+/// than have that question quietly answered for it.
+///
+/// In ordinary operation you should never observe a stale value here: the dock clears a dead
+/// preference at the top of every frame, before this could be read against it (see FINDINGS.md,
+/// "The drop overlay's own preference outlived the node it was pointing at" for the fix, and "A
+/// middle click ended egui's drag" for the sibling case on the source side). This read exists
+/// for the case where that self-heal is itself under test.
+///
+/// ```rust
+/// # use egui::{
+/// #     CentralPanel, Context, Event, Id, PointerButton, Pos2, RawInput, Rect, Ui, Vec2,
+/// #     WidgetText,
+/// # };
+/// # use egui_dock::{
+/// #     DockArea, DockLayout, DockState, NodePath, Style, SurfaceIndex, TabIndex, TabViewer,
+/// #     drag_hover_node, tab_widget_id,
+/// # };
+/// #
+/// # struct Viewer;
+/// # impl TabViewer for Viewer {
+/// #     type Tab = String;
+/// #     fn title(&mut self, tab: &mut String) -> WidgetText {
+/// #         tab.as_str().into()
+/// #     }
+/// #     fn ui(&mut self, ui: &mut Ui, tab: &mut String) {
+/// #         ui.label(tab.as_str());
+/// #     }
+/// # }
+/// #
+/// # fn run(
+/// #     ctx: &Context,
+/// #     dock_id: Id,
+/// #     state: &mut DockState<String>,
+/// #     events: Vec<Event>,
+/// #     frame: &mut u32,
+/// # ) {
+/// #     let input = RawInput {
+/// #         screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0))),
+/// #         time: Some(f64::from(*frame) / 60.0),
+/// #         events,
+/// #         ..Default::default()
+/// #     };
+/// #     *frame += 1;
+/// #     let mut output = ctx.run_ui(input, |ctx| {
+/// #         CentralPanel::default().show(ctx, |ui| {
+/// #             DockArea::new(state)
+/// #                 .id(dock_id)
+/// #                 .style(Style::from_egui(ui.style().as_ref()))
+/// #                 .show_inside(ui, &mut Viewer);
+/// #         });
+/// #     });
+/// #     output.textures_delta.clear();
+/// # }
+/// #
+/// # let dock_id = Id::new("drag_hover_node doctest");
+/// # let mut dock_state = DockState::new(vec!["a".to_owned()]);
+/// # let root = dock_state.main_surface().root().unwrap();
+/// # let [left, right] = dock_state
+/// #     .main_surface_mut()
+/// #     .split_right(root, 0.5, vec!["b".to_owned()]);
+/// # let (left, right) = (
+/// #     NodePath::new(SurfaceIndex::main(), left),
+/// #     NodePath::new(SurfaceIndex::main(), right),
+/// # );
+/// # let ctx = Context::default();
+/// # let mut frame = 0u32;
+/// # run(&ctx, dock_id, &mut dock_state, vec![], &mut frame);
+/// #
+/// # let tab = dock_state.leaf(left).unwrap().tab_id_at(TabIndex(0)).unwrap();
+/// # let home = ctx.read_response(tab_widget_id(dock_id, left, tab)).unwrap().rect.center();
+/// # run(&ctx, dock_id, &mut dock_state, vec![Event::PointerMoved(home)], &mut frame);
+/// # run(
+/// #     &ctx,
+/// #     dock_id,
+/// #     &mut dock_state,
+/// #     vec![Event::PointerButton {
+/// #         pos: home,
+/// #         button: PointerButton::Primary,
+/// #         pressed: true,
+/// #         modifiers: Default::default(),
+/// #     }],
+/// #     &mut frame,
+/// # );
+/// # let out = home + Vec2::new(0.0, 200.0);
+/// # for step in 1..=8u8 {
+/// #     let p = home + (out - home) * (f32::from(step) / 8.0);
+/// #     run(&ctx, dock_id, &mut dock_state, vec![Event::PointerMoved(p)], &mut frame);
+/// # }
+///
+/// // Still hovering the source's own body — a reorder is a preference too.
+/// assert_eq!(drag_hover_node(&ctx, dock_id), Some(left));
+///
+/// # let target = DockLayout::load(&ctx, dock_id).viewport(right).unwrap().center();
+/// # for _ in 0..3 {
+/// #     run(&ctx, dock_id, &mut dock_state, vec![Event::PointerMoved(target)], &mut frame);
+/// # }
+/// // The hand carried "a" onto `right`'s body — the overlay settles a preference on it, and
+/// // it names the leaf, not the tab: dropped here, "a" would join "b" rather than replace it.
+/// assert_eq!(drag_hover_node(&ctx, dock_id), Some(right));
+/// ```
+pub fn drag_hover_node(ctx: &Context, dock_area_id: Id) -> Option<NodePath> {
+    let (surface, node) = State::load(ctx, dock_area_id).dnd?.hover.dst.node_address();
+    Some(NodePath::new(surface, node?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::tab_widget_id;

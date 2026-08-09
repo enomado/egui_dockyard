@@ -12,6 +12,75 @@ Ordered newest first.
 
 ---
 
+## The drop overlay's own preference outlived the node it was pointing at
+
+**Status upstream:** not reported.
+
+**Symptom.** Pick a tab up, pull it over a *different* leaf long enough for the drop overlay to
+settle a preference on it, and — without letting go — make that leaf disappear (the application
+closes its only tab, or the model removes it outright). Release the button now and `move_tab`
+panics: `no node 1.0 in this tree`.
+
+This is [track A](docs/PLAN_the_harness_can_hold_a_gesture.md)'s bug on the other end of the same
+drag. That one gave a public read to the drag's *source* (`dragged_tab`) because a `DragSource`
+addresses a tab that can leave the tree mid-drag; the backlog it left behind named the exact
+mirror image — the drop overlay's *destination*, `State::dnd.hover`, addresses a node the same
+way, and nothing was reading it from outside the crate to find out whether it had gone stale.
+
+**Root cause.** Two independent ways for the address to decay, both missed:
+
+1. **The preference lock holds a stale value on purpose.** `is_drag_drop_locked` exists so a
+   hand crossing several leaves on the way to one settles on the leaf it arrived at rather than
+   whichever it last crossed — for as long as `Style::overlay.feel.max_preference_time`, it
+   refuses to overwrite `state.dnd.hover` with anything fresh. That mechanism cannot tell
+   "steady because nothing changed" from "steady because what it named is gone"; both look like
+   "the same value as last frame" to it.
+2. **A close can land the same frame it publishes.** `hover_data` read at the top of a frame is
+   what the pointer's leaf published *last* frame while rendering itself. `TabViewer::force_close`
+   is seen during a pass but its removal is queued and only applied after every leaf has already
+   rendered (`show_inside_with_response`, after `render_nodes`), so the doomed leaf still
+   publishes a hover for the very frame it is about to vanish in — a value that is already dead
+   by the time the *next* frame reads it, lock or no lock.
+
+Either value reaching `show_drag_drop_overlay`/`move_tab` names a node the tree does not have,
+and `move_tab`'s `TabDestination::Node` arm indexes it directly (`self[dst.surface][dst.node]`)
+with no liveness check at all.
+
+**Fix.** Two checks in `show_inside_with_response`, next to the existing ones for the drag's
+source: the freshly-read `hover_data` is filtered the same way `drag_data` already is (dropped if
+its node is gone), and the carried-over `state.dnd.hover` is checked and cleared before it can be
+used, the same way `state.dnd.drag` already is. Both go through one new method,
+`TreeComponent::node_is_gone`, which — unlike the source's `DragSource::resolve` — does not
+search for anything: a `NodeId` already *is* the node's identity (see its own docs), so the
+question is answered by `DockState::node` directly. A public read, `drag_hover_node`, hands the
+same raw (possibly-stale) address to an outside caller for exactly this reason — see its doc
+comment for why it deliberately does *not* resolve the way `dragged_tab` does.
+
+**Evidence.** `tests/a_dead_drop_destination_is_not_a_drop.rs`: two routes to killing the
+destination (the model directly, and `force_close`) plus a negative control (closing something
+*else* must not disturb a live preference). Deleting either half of the fix reproduces the exact
+panic on the two positive scenarios; the negative control stays green throughout, which is what
+rules out a fix broad enough to just cancel every preference near any close.
+
+`tests/dst.rs` gained the destination's half of `drag_complaint` — `drop_complaint`, plus a
+`HoldWatch::destination_died` counter reading `drag_hover_node` before each step — and the sweep
+stays green with that counter non-zero: the hazard is reached organically by the existing
+alphabet and self-heals cleanly. One honest gap, unlike track A's acceptance test: deleting the
+fix does **not** turn the *sweep* red, only the dedicated scenario file. `Sim::move_while_held`
+(and everything built on it — `drag`, `release_at`) deliberately rests for the *entire*
+`max_preference_time` on arrival, so by the time any following step starts, the lock from a
+`MoveWhileHeld` has already run a full cycle and expired — the lock-carryover half of this fix is
+real (proven by the scenario file) but not reachable through this harness's own pacing helpers as
+they stand. Only the same-frame-publish half is what the sweep's `destination_died` count is
+exercising. Turning that into a sweep-level acceptance test — a burst that closes the
+destination *before* the rest completes — is the natural next step and is filed as such.
+
+Found directly against the fork, not by a user: picking up the backlog item track A left ("a
+drop destination is cross-frame state too, and nothing watches it") and reproducing it by hand
+before writing anything.
+
+---
+
 ## A divider with nowhere to go still answered a drag, and the answer was always "dead centre"
 
 **Status upstream:** not reported.

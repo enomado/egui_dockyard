@@ -6,7 +6,10 @@ use egui::{
 use paste::paste;
 
 use super::{
-    DockAreaResponse, drag_and_drop::DragData, events::DockEvent, state::State,
+    DockAreaResponse,
+    drag_and_drop::{DragData, HoverData},
+    events::DockEvent,
+    state::State,
     tab_removal::TabRemoval,
 };
 use crate::NodePath;
@@ -103,6 +106,44 @@ impl<Tab> DockArea<'_, Tab> {
         {
             state.reset_drag();
             ui.ctx().stop_dragging();
+        }
+
+        // The hover's destination decays the same way the drag's source does, and for the same
+        // reason: it addresses a *node*, and a node can leave the tree while this drag is
+        // still open. Two places carry a destination, and both have to be checked, the same
+        // way `drag_data` and `state.dnd.drag` both are above:
+        //
+        // * `hover_data`, just read out of this frame's temp storage, is a full frame stale by
+        //   construction — it was published by whichever leaf was under the pointer *last*
+        //   frame, while rendering itself. A leaf that closes itself this same pass (a force
+        //   close driven by the application) still runs that publish before the close takes
+        //   effect, so the value sitting in memory for this frame to read can already name a
+        //   node that is gone by the time it is read.
+        // * `state.dnd.hover`, held over from a previous frame, decays the way `state.dnd.drag`
+        //   does above — except there is no lock on the drag source, while the destination has
+        //   one (`is_drag_drop_locked`) precisely to hold a preference steady while the pointer
+        //   settles. That mechanism cannot tell "steady because nothing changed" from "steady
+        //   because what it named is gone" — they look identical to it — so the address can
+        //   stay locked in on a dead node for as long as the lock does.
+        //
+        // Either one reaching `show_drag_drop_overlay`/`move_tab` names a node the tree does
+        // not have, which is where it used to panic (see FINDINGS.md, "no node 1.0 in this
+        // tree").
+        let hover_data =
+            hover_data.filter(|hover: &HoverData| !hover.dst.node_is_gone(self.dock_state));
+        if state
+            .dnd
+            .as_ref()
+            .is_some_and(|dnd| dnd.hover.dst.node_is_gone(self.dock_state))
+        {
+            // Dropped rather than merely skipped: `set_drag_and_drop` below only *writes* a
+            // fresh preference when the current one is not locked, so leaving the stale one in
+            // place would keep it alive — and stale — for the rest of the lock window. Clearing
+            // it here lets a live preference (`hover_data`, just filtered above) take over
+            // immediately, this same frame, if there is one; if there is not, this is exactly
+            // the ordinary "nothing hovered yet" state every frame without a preference is
+            // already in.
+            state.dnd = None;
         }
 
         if let (Some(source), Some(hover)) = (drag_data, hover_data) {

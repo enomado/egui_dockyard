@@ -225,11 +225,23 @@ egui drag at the end of a step is a tab's drag.
   hazard is what let a tab drag press a divider and expose the ratio loss — a step that quietly
   stopped being a tab drag reads as a green step. Cheap to add, but it changes what a
   well-tuned step covers, so it wants its own measurement of the coverage before and after.
-* **A drop destination is cross-frame state too, and nothing watches it.** `State::dnd.hover`
-  names a `NodeId`, is frozen while the preference lock holds, and a leaf can be closed under it
-  — the same decay the *source* had, which track A gave a public read and an oracle. A hold makes
-  the window between them wide open. Unreached so far, or reached and survived; nobody knows,
-  which is the point.
+* ~~**A drop destination is cross-frame state too, and nothing watches it.**~~ Done —
+  `drag_hover_node` (the public read), the fix in `show_inside_with_response`
+  (`TreeComponent::node_is_gone`, two checks), `tests/a_dead_drop_destination_is_not_a_drop.rs`,
+  and `drop_complaint`/`HoldWatch::destination_died` in `tests/dst.rs`. See
+  [FINDINGS.md](../FINDINGS.md), "The drop overlay's own preference outlived the node it was
+  pointing at". It reproduced exactly as suspected — reachable, and it panicked
+  (`no node 1.0 in this tree`).
+* **The destination fix's mutation check does not turn the *sweep* red, only the scenario file.**
+  Unlike track A's own acceptance test. `Sim::move_while_held` rests for the *entire*
+  `max_preference_time` on every arrival, so the preference lock has always run a full cycle and
+  expired by the time the next step starts — the lock-carryover half of the destination fix is
+  real (the scenario file proves it) but this harness's own pacing helpers never leave it locked
+  across a step boundary the way `Grab`/`Release` deliberately leave the *drag* open. Needs a
+  step, or a scheduled burst like the one `Grab`→`Release` got in "What B came out as" above, that
+  closes the destination *before* the rest completes rather than after. Until then
+  `HoldWatch::destination_died` is proven non-zero, but by the same-frame-publish half of the fix
+  alone, not the lock half.
 * **`Sim::pause` is not used by the new steps.** Two gestures inside egui's double-click window
   count as one multi-click; the hold steps get away without a pause today because nothing in the
   tab path reacts to a double click. That is a fact about the crate, not about the harness, and it

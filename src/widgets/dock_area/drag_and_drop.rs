@@ -104,6 +104,21 @@ impl TreeComponent {
     pub(super) fn is_surface(&self) -> bool {
         matches!(self, TreeComponent::Surface(_))
     }
+
+    /// Whether the node this addresses has left its tree since this was recorded.
+    ///
+    /// [`Surface`](Self::Surface) addresses no node and can never go stale this way: an empty
+    /// surface is a legitimate, permanent drop target, not a reference that decays. A
+    /// [`Node`](Self::Node) or [`Tab`](Self::Tab) destination does decay, the same way a drag's
+    /// source does — see [`DragSource::resolve`] — except there is nothing to *resolve*: a
+    /// [`NodeId`] already is the node's identity, so the question is answered by
+    /// [`DockState::node`] directly, not by searching for where the node "is now".
+    pub(super) fn node_is_gone<Tab>(&self, dock_state: &DockState<Tab>) -> bool {
+        match self.node_address() {
+            (surface, Some(node)) => dock_state.node(NodePath::new(surface, node)).is_err(),
+            (_, None) => false,
+        }
+    }
 }
 
 fn make_overlay_painter(ui: &Ui) -> Painter {

@@ -55,7 +55,7 @@ use egui::{
 use egui_dock::shape::subtree_shape;
 use egui_dock::{
     DockArea, DockLayout, DockState, Node, NodeId, NodePath, Split, Style, SurfaceIndex, TabIndex,
-    TabPath, TabViewer, Tree, dragged_tab, tab_widget_id,
+    TabPath, TabViewer, Tree, drag_hover_node, dragged_tab, tab_widget_id,
 };
 
 /// Screen the simulated dock starts on. Big enough that a few splits still leave leaves wider
@@ -526,6 +526,12 @@ struct HoldWatch {
     /// scene the gesture started in is the easy half; this is the one where the destination the
     /// hand aimed at was decided after the dock had already been edited.
     landings_after_a_change: usize,
+    /// Steps that closed the node the drop overlay's preference had settled on, while a hold was
+    /// live — the *other* end of the interleaving `source_died` counts. Asked of the tree by the
+    /// [`NodePath`] [`drag_hover_node`] answered with just before the step, not of the dock's own
+    /// reaction to it, for the same reason `source_died` is: a preference that quietly went stale
+    /// and stayed stale would count as coverage of a self-heal that never ran.
+    destination_died: usize,
 }
 
 /// Coverage of the separator gestures, counted while the run happens.
@@ -1647,6 +1653,13 @@ impl Sim {
         dragged_tab(&self.ctx, Id::new(DOCK_ID), &self.state)
     }
 
+    /// The node the drop overlay's preference currently names, if any — exactly as the dock's
+    /// own drag-and-drop state holds it, stale or not; see [`drag_hover_node`]'s docs for why
+    /// this one does not resolve anything the way [`Sim::dragged_tab`] does.
+    fn drop_preference(&self) -> Option<NodePath> {
+        drag_hover_node(&self.ctx, Id::new(DOCK_ID))
+    }
+
     /// Whether the tab the hand picked up has left the tree.
     ///
     /// Asked of the **tree**, by the identity recorded when the hold started, and not of the
@@ -1689,6 +1702,10 @@ impl Sim {
         // counters below are about the interleaving, and a step that *ends* a drag would
         // otherwise be indistinguishable from one that ran alongside it.
         let carried = self.dragged_tab();
+        // Same idea, for the drop overlay's preference rather than the drag's source: read
+        // before the step's frames run, so a step that closes the very node the preference had
+        // settled on is not indistinguishable from one that ran before any preference existed.
+        let hovered = self.hold.is_some().then(|| self.drop_preference()).flatten();
 
         let leaves = self.live_leaves();
         if leaves.is_empty() {
@@ -2251,6 +2268,17 @@ impl Sim {
             if self.hold.is_some() && self.held_tab_is_gone() {
                 self.holds.source_died += 1;
             }
+        }
+        // Same question, asked of the *destination* rather than the source: did the node the
+        // drop preference named just before this step leave the tree during it? Asked of the
+        // tree by that recorded `NodePath`, not by whether the preference itself still names it
+        // — the dock clearing a dead preference on its own is the self-heal this counts the
+        // occasions for, and a counter fed by the dock's own answer would report coverage of a
+        // self-heal that never had anything to heal.
+        if let Some(path) = hovered
+            && self.state.node(path).is_err()
+        {
+            self.holds.destination_died += 1;
         }
 
         if let Some(slot) = outcome_index(self.outcome_since(&before)) {
@@ -2837,6 +2865,14 @@ fn run(steps: &[Step]) -> Run {
                 });
             }
 
+            if let Some(complaint) = drop_complaint(&sim) {
+                break 'scenario Some(Failure {
+                    step_index,
+                    step,
+                    reason: complaint,
+                });
+            }
+
             if let Some(complaint) = boundary_drift_complaint(
                 &before_boundaries,
                 &sim.boundaries(),
@@ -2960,6 +2996,28 @@ fn drag_complaint(sim: &Sim) -> Option<String> {
         format!(
             "the two holders of a drag disagree: egui says {egui_tab:?}, the dock's own \
              `State::dnd` resolves to {dock_tab:?}"
+        )
+    })
+}
+
+/// The drop overlay's preference names a node that exists — the destination's half of the
+/// property [`drag_complaint`] checks for the source.
+///
+/// There is no second holder to compare against here the way there is for the drag's source:
+/// egui does not keep a cross-frame notion of "what the pointer prefers to drop onto", only the
+/// dock's own `State::dnd` does. So what is checked is the one promise the self-heal in
+/// `show_inside_with_response` makes — by the end of every frame, a preference that exists
+/// names a node that exists — read through [`drag_hover_node`], which hands back exactly what
+/// the preference holds without resolving it first (see that function's docs for why, unlike
+/// [`dragged_tab`], it does not). A destination that reached `move_tab` in the state this
+/// catches is the panic `tests/a_dead_drop_destination_is_not_a_drop.rs` reproduces directly
+/// (`no node 1.0 in this tree`).
+fn drop_complaint(sim: &Sim) -> Option<String> {
+    let hover = drag_hover_node(&sim.ctx, Id::new(DOCK_ID))?;
+    sim.state.node(hover).is_err().then(|| {
+        format!(
+            "the drop overlay's preference names {hover:?}, which is no longer a live node — a \
+             release right now would hand `move_tab` a destination the tree does not have"
         )
     })
 }
@@ -3984,6 +4042,7 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         holds.source_died += outcome.holds.source_died;
         holds.ui_closes += outcome.holds.ui_closes;
         holds.landings_after_a_change += outcome.holds.landings_after_a_change;
+        holds.destination_died += outcome.holds.destination_died;
 
         if let Some(failure) = outcome.failure {
             let minimal = quietly(|| shrink(&steps, &|candidate| run(candidate).failure.is_some()));
@@ -4214,6 +4273,12 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
          — every drop resolved against the scene its own gesture started in, which is the scene \
          a single-step drag already covers",
         holds.releases
+    );
+    assert!(
+        holds.destination_died > 0,
+        "the drop overlay's preference never once named a node that then left the tree, across \
+         {SEEDS} seeds. That is the state `drag_hover_node`'s own self-heal exists for, so \
+         `drop_complaint` has been watching a preference that could not go stale"
     );
 }
 

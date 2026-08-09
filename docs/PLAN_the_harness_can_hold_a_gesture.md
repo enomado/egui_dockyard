@@ -1,7 +1,7 @@
 # Plan: the harness can hold a gesture
 
-**Status:** not started. Entry point for whoever picks this up — read this file first, then
-[tests/dst.rs](../tests/dst.rs).
+**Status:** track A done (commit `0ddd6d8`); track B not started. Entry point for whoever picks
+this up — read this file first, then [tests/dst.rs](../tests/dst.rs).
 
 **Why now.** Closing a tab while it is being dragged panicked the dock (see the top section of
 [FINDINGS.md](../FINDINGS.md)), and the DST sweep — which runs real frames and judges every step

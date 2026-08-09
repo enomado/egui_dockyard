@@ -58,7 +58,7 @@ impl State {
     ) {
         if !self.is_drag_drop_locked(ctx, style) {
             self.dnd = Some(DragDropState {
-                hover: drop,
+                hover: Some(drop),
                 drag,
                 pointer: ctx.pointer_hover_pos().unwrap_or(Pos2::ZERO),
                 locked: None,

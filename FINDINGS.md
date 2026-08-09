@@ -12,6 +12,46 @@ Ordered newest first.
 
 ---
 
+## Killing a stale drop preference killed the drag it belonged to
+
+**Status upstream:** not reported.
+
+**Symptom.** Not user-facing — caught building the sweep-level acceptance test the previous
+finding below filed as a gap. Hold a tab over a leaf long enough for the drop overlay to settle
+a preference on it, then close that leaf through the model while the hold is still open. For one
+frame, `Context::dragged_id()` still names the dragged tab while the dock's own `dragged_tab`
+answers `None` — the two holders of a drag disagreeing, exactly the shape
+[track A](docs/PLAN_the_harness_can_hold_a_gesture.md) exists to catch.
+
+**Root cause.** The previous finding's fix, reacting to the destination dying, cleared
+`state.dnd = None` — the *whole* `DragDropState`, source included. But only the destination had
+gone stale; the drag's source tab was untouched and still live everywhere else (egui's own drag
+state, the tab itself). Clearing the source along with it silently ended a drag nothing else had
+ended, for exactly one frame — until the next frame's fresh, live hover data (if any) rebuilt
+`state.dnd` from scratch and papered over the gap.
+
+**Fix.** `DragDropState.hover` is now `Option<HoverData>` instead of always-present. A stale
+destination is repaired by clearing (and unlocking) only `.hover` — a new `DragDropState::
+drop_stale_hover` — leaving `.drag` exactly as it was. `State::set_drag_and_drop` already treats
+"nothing to write yet" correctly (it is the same shape as a `dnd` that does not exist), so a live
+preference still takes over the moment one arrives; in the meantime `.hover` is genuinely `None`
+rather than stale-but-inert, which is also what keeps the public `drag_hover_node`'s documented
+promise ("you should never observe a stale value here") literally true again. `resolve_icon_based`
+/ `resolve_traditional` / `update_lock` take the resolved `&HoverData` as a parameter now instead
+of reading `self.hover` internally, since by the time anything calls them `set_drag_and_drop` has
+just written a fresh one this same frame — the one place that invariant is relied on rather than
+re-checked, and it says so.
+
+**Evidence.** Found by, and fixed underneath, the sweep-level acceptance test the previous
+finding asked for (`Step::Settle` + a scheduled `Step::CloseLeaf` in `tests/dst.rs` — see
+[the plan](docs/PLAN_the_harness_can_hold_a_gesture.md)'s backlog). `drag_complaint` caught the
+disagreement the moment the new interleaving was reachable, before the destination-panic mutation
+test was even run. Deleting the fix now reproduces *that* panic too: the sweep goes red on
+`drop_complaint` ("a release right now would hand `move_tab` a destination the tree does not
+have"), where before this session it only reddened `tests/a_dead_drop_destination_is_not_a_drop.rs`.
+
+---
+
 ## The drop overlay's own preference outlived the node it was pointing at
 
 **Status upstream:** not reported.
@@ -65,15 +105,16 @@ rules out a fix broad enough to just cancel every preference near any close.
 `tests/dst.rs` gained the destination's half of `drag_complaint` — `drop_complaint`, plus a
 `HoldWatch::destination_died` counter reading `drag_hover_node` before each step — and the sweep
 stays green with that counter non-zero: the hazard is reached organically by the existing
-alphabet and self-heals cleanly. One honest gap, unlike track A's acceptance test: deleting the
-fix does **not** turn the *sweep* red, only the dedicated scenario file. `Sim::move_while_held`
-(and everything built on it — `drag`, `release_at`) deliberately rests for the *entire*
-`max_preference_time` on arrival, so by the time any following step starts, the lock from a
-`MoveWhileHeld` has already run a full cycle and expired — the lock-carryover half of this fix is
-real (proven by the scenario file) but not reachable through this harness's own pacing helpers as
-they stand. Only the same-frame-publish half is what the sweep's `destination_died` count is
-exercising. Turning that into a sweep-level acceptance test — a burst that closes the
-destination *before* the rest completes — is the natural next step and is filed as such.
+alphabet and self-heals cleanly.
+
+**Update.** The gap this section originally ended on — deleting the fix turned only the dedicated
+scenario file red, not the sweep, because `Sim::move_while_held` deliberately rests for the
+*entire* `max_preference_time` on arrival, so the lock had always finished decaying by the time
+any following step started — is closed. `Step::Settle` (a short arrival that stops well before
+that rest completes) plus a scheduled `Step::CloseLeaf` right after it now reproduce the
+still-locked interleaving inside the sweep itself; deleting the fix turns
+`seeded_scenarios_keep_the_dock_well_formed` red on `drop_complaint`, the same panic this section
+describes. Building that interleaving surfaced a second, independent bug — seeing above.
 
 Found directly against the fork, not by a user: picking up the backlog item track A left ("a
 drop destination is cross-frame state too, and nothing watches it") and reproducing it by hand

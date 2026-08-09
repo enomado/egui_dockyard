@@ -317,7 +317,11 @@ pub fn dragged_tab<Tab>(
 /// assert_eq!(drag_hover_node(&ctx, dock_id), Some(right));
 /// ```
 pub fn drag_hover_node(ctx: &Context, dock_area_id: Id) -> Option<NodePath> {
-    let (surface, node) = State::load(ctx, dock_area_id).dnd?.hover.dst.node_address();
+    let (surface, node) = State::load(ctx, dock_area_id)
+        .dnd?
+        .hover?
+        .dst
+        .node_address();
     Some(NodePath::new(surface, node?))
 }
 

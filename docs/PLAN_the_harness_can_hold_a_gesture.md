@@ -235,16 +235,20 @@ egui drag at the end of a step is a tab's drag.
   [FINDINGS.md](../FINDINGS.md), "The drop overlay's own preference outlived the node it was
   pointing at". It reproduced exactly as suspected — reachable, and it panicked
   (`no node 1.0 in this tree`).
-* **The destination fix's mutation check does not turn the *sweep* red, only the scenario file.**
-  Unlike track A's own acceptance test. `Sim::move_while_held` rests for the *entire*
-  `max_preference_time` on every arrival, so the preference lock has always run a full cycle and
-  expired by the time the next step starts — the lock-carryover half of the destination fix is
-  real (the scenario file proves it) but this harness's own pacing helpers never leave it locked
-  across a step boundary the way `Grab`/`Release` deliberately leave the *drag* open. Needs a
-  step, or a scheduled burst like the one `Grab`→`Release` got in "What B came out as" above, that
-  closes the destination *before* the rest completes rather than after. Until then
-  `HoldWatch::destination_died` is proven non-zero, but by the same-frame-publish half of the fix
-  alone, not the lock half.
+* ~~**The destination fix's mutation check does not turn the *sweep* red, only the scenario
+  file.**~~ Done — `Step::Settle` (`tests/dst.rs`) arrives and gives the overlay just the two
+  frames `settle_onto` proved sufficient to lock a preference, stopping well short of
+  `Sim::move_while_held`'s full-duration rest; the generator schedules a `Step::CloseLeaf` on the
+  very next step while a hold is live (`close_the_destination`, same device as `press_the_cross`).
+  Mutation-checked: deleting the destination-decay fix now turns
+  `seeded_scenarios_keep_the_dock_well_formed` red on `drop_complaint`, not just the scenario file.
+  Building this surfaced a second, independent bug on the way — see
+  [FINDINGS.md](../FINDINGS.md), "Killing a stale drop preference killed the drag it belonged to":
+  the destination fix's `state.dnd = None` was clearing the drag's live *source* along with the
+  stale destination. Fixed by making `DragDropState.hover` an `Option`, so only the stale half
+  clears (`DragDropState::drop_stale_hover`); `resolve_icon_based` / `resolve_traditional` /
+  `update_lock` now take the resolved `&HoverData` as a parameter instead of reading `self.hover`.
+  All tests green, including `tests/a_dead_drop_destination_is_not_a_drop.rs` and every doctest.
 * **`Sim::pause` is not used by the new steps.** Two gestures inside egui's double-click window
   count as one multi-click; the hold steps get away without a pause today because nothing in the
   tab path reacts to a double click. That is a fact about the crate, not about the harness, and it

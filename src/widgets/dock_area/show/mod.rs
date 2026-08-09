@@ -131,19 +131,27 @@ impl<Tab> DockArea<'_, Tab> {
         // tree").
         let hover_data =
             hover_data.filter(|hover: &HoverData| !hover.dst.node_is_gone(self.dock_state));
-        if state
-            .dnd
-            .as_ref()
-            .is_some_and(|dnd| dnd.hover.dst.node_is_gone(self.dock_state))
+        if let Some(dnd) = state.dnd.as_mut()
+            && dnd
+                .hover
+                .as_ref()
+                .is_some_and(|hover| hover.dst.node_is_gone(self.dock_state))
         {
             // Dropped rather than merely skipped: `set_drag_and_drop` below only *writes* a
-            // fresh preference when the current one is not locked, so leaving the stale one in
-            // place would keep it alive — and stale — for the rest of the lock window. Clearing
-            // it here lets a live preference (`hover_data`, just filtered above) take over
-            // immediately, this same frame, if there is one; if there is not, this is exactly
-            // the ordinary "nothing hovered yet" state every frame without a preference is
-            // already in.
-            state.dnd = None;
+            // fresh preference when the current one is `None` or unlocked, so leaving the stale
+            // one in place would keep it alive — and stale — for the rest of the lock window.
+            // Clearing it here lets a live preference (`hover_data`, just filtered above) take
+            // over immediately, this same frame, if there is one; if there is not, this is
+            // exactly the ordinary "nothing hovered yet" state every frame without a preference
+            // is already in.
+            //
+            // Only `.hover`, not the whole `DragDropState`: the drag's *source* never went
+            // stale here, only the destination did, and dropping `dnd` entirely used to end the
+            // drag along with it. A DST sweep run caught the consequence — closing the leaf a
+            // hold had settled its preference on left `ctx.dragged_id()` and the dock's own
+            // `dragged_tab` disagreeing for a frame, because the fix silently ended a drag that
+            // was still live everywhere else.
+            dnd.drop_stale_hover();
         }
 
         if let (Some(source), Some(hover)) = (drag_data, hover_data) {
@@ -317,9 +325,9 @@ impl<Tab> DockArea<'_, Tab> {
     ) -> Option<SurfaceIndex> {
         if let Some(dnd_state) = &state.dnd
             && dnd_state.is_locked(self.style.as_ref().unwrap(), ctx)
+            && let Some(hover) = dnd_state.hover.as_ref()
         {
-            state.window_fade =
-                Some((ctx.input(|i| i.time), dnd_state.hover.dst.surface_address()));
+            state.window_fade = Some((ctx.input(|i| i.time), hover.dst.surface_address()));
         }
 
         state.window_fade.and_then(|(time, surface)| {
@@ -337,10 +345,20 @@ impl<Tab> DockArea<'_, Tab> {
     ) -> Option<TabDestination> {
         let drag_state = state.dnd.as_mut().unwrap();
         let style = self.style.as_ref().unwrap();
+        // This is the one place `.hover` is unwrapped without a liveness check of its own — on
+        // purpose: this function only ever runs right after `State::set_drag_and_drop` wrote a
+        // fresh one this same frame (see the call site, gated on `hover_data` being fresh and
+        // live). Cloned out to a local rather than read through `drag_state` from here on, so
+        // the address itself — not "whatever `.hover` currently holds" — is what every branch
+        // below agrees on, including `update_lock`'s own read of it.
+        let hover = drag_state
+            .hover
+            .clone()
+            .expect("show_drag_drop_overlay is only called with a freshly-set hover");
 
         let deserted_node = {
             let src = drag_state.drag.src;
-            match drag_state.hover.dst.node_address() {
+            match hover.dst.node_address() {
                 (dst_surf, Some(dst_node)) => {
                     src.surface == dst_surf
                         && src.node == dst_node
@@ -351,7 +369,7 @@ impl<Tab> DockArea<'_, Tab> {
         };
 
         // Not all scenarios can house all splits.
-        let restricted_splits = if drag_state.hover.dst.is_surface() || deserted_node {
+        let restricted_splits = if hover.dst.is_surface() || deserted_node {
             AllowedSplits::None
         } else {
             AllowedSplits::All
@@ -375,8 +393,9 @@ impl<Tab> DockArea<'_, Tab> {
         }
 
         let window_bounds = self.window_bounds.unwrap();
-        match (style.overlay.overlay_type, drag_state.is_on_title_bar()) {
+        match (style.overlay.overlay_type, hover.tab.is_some()) {
             (OverlayType::HighlightedAreas, _) | (_, true) => drag_state.resolve_traditional(
+                &hover,
                 ui,
                 style,
                 allowed_splits,
@@ -384,6 +403,7 @@ impl<Tab> DockArea<'_, Tab> {
                 window_bounds,
             ),
             (OverlayType::Widgets, false) => drag_state.resolve_icon_based(
+                &hover,
                 ui,
                 style,
                 allowed_splits,

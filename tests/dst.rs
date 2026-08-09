@@ -134,6 +134,15 @@ enum Step {
     /// Move the pointer onto a leaf without letting go. The step that gives a hold somewhere to
     /// be — a [`Step::Release`] lets go over whatever the pointer is on.
     MoveWhileHeld { to: usize },
+    /// Move the pointer onto a leaf and give the overlay just enough frames to lock a drop
+    /// preference on it — deliberately *not* [`Step::MoveWhileHeld`]'s full-duration rest.
+    ///
+    /// That rest exists to let the lock finish decaying before the step ends, which is exactly
+    /// why nothing after it can ever catch a destination dying *while the lock is still live* —
+    /// by the time the step returns, the window has already closed. This one leaves it open for
+    /// whatever the generator schedules right after (see `scenario`'s `close_the_destination`),
+    /// the way `settle_onto` does in `tests/a_dead_drop_destination_is_not_a_drop.rs`.
+    Settle { to: usize },
     /// Let go, aiming at what the drop should mean over the leaf the pointer is already on.
     ///
     /// A release with no live hold is a *skipped* step, like every other step that finds
@@ -212,7 +221,10 @@ impl Step {
     fn is_part_of_the_hold(self) -> bool {
         matches!(
             self,
-            Step::Grab { .. } | Step::MoveWhileHeld { .. } | Step::Release { .. }
+            Step::Grab { .. }
+                | Step::MoveWhileHeld { .. }
+                | Step::Settle { .. }
+                | Step::Release { .. }
         )
     }
 }
@@ -1650,6 +1662,24 @@ impl Sim {
         }
     }
 
+    /// Moves a held pointer from `from` to `to` and gives the overlay exactly the frames it
+    /// needs to lock a drop preference on `to` — one for the leaf under the pointer to publish
+    /// that it is hovered, one for the dock to pick that up and lock — then stops, well short of
+    /// [`Sim::move_while_held`]'s full-duration rest.
+    ///
+    /// That rest is deliberately long enough to guarantee the lock has *already* expired by the
+    /// time it returns (see its own doc comment); this is the one step in this harness that
+    /// leaves the lock alive on return, so whatever the generator schedules right after can
+    /// still catch it mid-decay. Same recipe as `settle_onto` in
+    /// `tests/a_dead_drop_destination_is_not_a_drop.rs`, which is what proved two frames enough.
+    fn settle_while_held(&mut self, from: Pos2, to: Pos2) {
+        for step in 1..=4u8 {
+            let t = f32::from(step) / 4.0;
+            self.run_frame(vec![Event::PointerMoved(from + (to - from) * t)]);
+        }
+        self.run_frame(vec![Event::PointerMoved(to)]);
+    }
+
     /// Carries a held pointer to `to` and lets go there.
     ///
     /// The second half of [`Sim::drag`], word for word — the same travel, the same rest for the
@@ -1728,7 +1758,11 @@ impl Sim {
         // Same idea, for the drop overlay's preference rather than the drag's source: read
         // before the step's frames run, so a step that closes the very node the preference had
         // settled on is not indistinguishable from one that ran before any preference existed.
-        let hovered = self.hold.is_some().then(|| self.drop_preference()).flatten();
+        let hovered = self
+            .hold
+            .is_some()
+            .then(|| self.drop_preference())
+            .flatten();
 
         let leaves = self.live_leaves();
         if leaves.is_empty() {
@@ -1876,6 +1910,24 @@ impl Sim {
                 // it feeds `IdentityWatch::idle_frames`, whose gate is about frames that ran with
                 // no input at all, and a step that moves the pointer would leave that number
                 // reading healthy without a single quiet frame behind it.
+                commits = CommitRule::Exactly(0);
+                Vec::new()
+            }
+
+            Step::Settle { to } => {
+                let Some(at) = self.hold.as_ref().map(|hold| hold.at) else {
+                    return None;
+                };
+                let target = leaves[to % leaves.len()];
+                let Some(rect) = self.layout().get(target).map(|geometry| geometry.rect) else {
+                    self.refused[refused_index(Refused::NoGeometry)] += 1;
+                    return None;
+                };
+                let onto = rect.center();
+                self.settle_while_held(at, onto);
+                self.hold.as_mut().unwrap().at = onto;
+                // Same reasoning as `Step::MoveWhileHeld`: carrying a tab is not a change to the
+                // dock, so nothing is exempt from the identity check either.
                 commits = CommitRule::Exactly(0);
                 Vec::new()
             }
@@ -2513,6 +2565,15 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
     // shapes only `Deepen::BothBands` can produce came out at one press each — a gate reading 1
     // is one reshuffled seed away from a red suite that means nothing.
     let mut press_the_cross = false;
+    // Which leaf, if any, the very next step must close through the model.
+    //
+    // Same device again, for the same reason: `Step::Settle` leaves the drop-preference lock
+    // alive on return precisely so something can still catch it locked, and the only way to
+    // land on it before it decays on its own is to close the leaf on the step right after —
+    // waiting for an independent `CloseLeaf` draw would find the lock already expired, which is
+    // the exact gap this exists to close (see the plan's backlog and FINDINGS.md, "The drop
+    // overlay's own preference outlived the node it was pointing at").
+    let mut close_the_destination: Option<usize> = None;
 
     while steps.len() < len {
         if until_release == Some(0) {
@@ -2525,6 +2586,10 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
             steps.push(Step::ToggleCrossSplit {
                 cross: rng.below(4),
             });
+            continue;
+        }
+        if let Some(to) = close_the_destination.take() {
+            steps.push(Step::CloseLeaf { leaf: to });
             continue;
         }
         if let Some(countdown) = until_release.as_mut() {
@@ -2542,7 +2607,7 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
             steps.push(previous);
             continue;
         }
-        let step = match rng.below(27) {
+        let step = match rng.below(28) {
             0..=4 => Step::Drag {
                 from: rng.below(8),
                 to: rng.below(8),
@@ -2613,11 +2678,16 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
                 tab: rng.below(4),
             },
             23 => Step::MoveWhileHeld { to: rng.below(8) },
+            // The short settle, scheduled straight into a `CloseLeaf` below while a hold is
+            // live — see `close_the_destination`. Drawn on its own too (same as `Grab`'s single
+            // draw covering both the burst and the odd standalone one): a settle outside a hold
+            // is a skipped step, and that has to stay legal for the same shrinker reason.
+            24 => Step::Settle { to: rng.below(8) },
             // A release drawn on its own, *outside* a burst. Nearly always a skipped step — the
             // hand is usually open — and that is what it is for: a release with no hold has to
             // be legal and inert, or the shrinker cannot drop a `Grab` from a failing trace
             // without the harness itself falling over.
-            24 => Step::Release { aim: aim(&mut rng) },
+            25 => Step::Release { aim: aim(&mut rng) },
             // Closing a tab through the UI. Two draws rather than one because it is the step the
             // reported bug needed *and* the only close in this vocabulary that goes through the
             // frame layer at all.
@@ -2633,6 +2703,13 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
         // press that lands there is a press that never happened.
         if matches!(step, Step::BuildCross { .. }) && until_release.is_none() {
             press_the_cross = true;
+        }
+        // Outside a hold there is no lock to catch mid-decay — `Step::Settle` just moves the
+        // pointer — so only schedule the close when a hold is actually live.
+        if let Step::Settle { to } = step
+            && until_release.is_some()
+        {
+            close_the_destination = Some(to);
         }
         steps.push(step);
     }

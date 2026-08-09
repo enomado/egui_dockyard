@@ -55,6 +55,11 @@
   `dragged_tab`) for anything that wants to watch it from outside a frame. See
   [FINDINGS](FINDINGS.md).
 
+- That same fix used to end the whole drag — not just clear the stale destination — for one
+  frame whenever only the destination had died, which the previous point's own fix for the
+  *source* half would then have to notice as "a drag that suddenly isn't one" a frame later.
+  The drop preference is now cleared independently of the drag itself. See [FINDINGS](FINDINGS.md).
+
 - `LeafNode::retain_tabs` no longer leaves the active tab addressing a tab it removed, and
   keeps the focus history when the tab it names survives.
 

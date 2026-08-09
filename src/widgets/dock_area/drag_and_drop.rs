@@ -212,7 +212,17 @@ enum LockState {
 
 #[derive(Debug, Clone)]
 pub(super) struct DragDropState {
-    pub hover: HoverData,
+    /// The node the overlay currently prefers as a drop target, or `None` if nothing live is
+    /// under the hand right now.
+    ///
+    /// Distinct from `dnd` being absent entirely (see [`State::set_drag_and_drop`]): a drag can
+    /// be open with genuinely nowhere to drop — mid-flight over a gap, or right after the node
+    /// it had settled on left the tree (see [`Self::drop_stale_hover`]) — and that is a fact
+    /// about the *destination*, not about whether a drag exists at all. `.drag` below is what
+    /// answers that second question.
+    ///
+    /// [`State::set_drag_and_drop`]: super::state::State::set_drag_and_drop
+    pub hover: Option<HoverData>,
     pub drag: DragData,
     pub pointer: Pos2,
     /// Is some when the pointer is over rect, f64 holds the time when the lock was last active.
@@ -220,25 +230,36 @@ pub(super) struct DragDropState {
 }
 
 impl DragDropState {
-    // Determines if the hover data implies we're hovering over a tab or the tab title bar.
-    pub(super) fn is_on_title_bar(&self) -> bool {
-        self.hover.tab.is_some()
+    /// Drops a stale destination without touching `.drag`.
+    ///
+    /// Called when `.hover` has been found to address a node that is already gone. Earlier this
+    /// cleared the whole `DragDropState` — but the drag's *source* had not gone stale, only the
+    /// destination had, and a DST sweep caught the consequence: `ctx.dragged_id()` and the
+    /// dock's own `dragged_tab` disagreeing for a frame, because clearing `dnd` entirely ended a
+    /// drag that was still live everywhere else. This clears (and unlocks) only the half that
+    /// actually decayed; `State::set_drag_and_drop` treats `hover: None` as nothing to hold onto
+    /// and writes a fresh one the moment a live one arrives, same as it always has for a `dnd`
+    /// that does not exist yet.
+    pub(super) fn drop_stale_hover(&mut self) {
+        self.hover = None;
+        self.locked = None;
     }
 
     pub(super) fn resolve_icon_based(
         &mut self,
+        hover: &HoverData,
         ui: &Ui,
         style: &Style,
         allowed_splits: AllowedSplits,
         windows_allowed: bool,
         window_bounds: Rect,
     ) -> Option<TabDestination> {
-        assert!(!self.is_on_title_bar());
+        assert!(hover.tab.is_none());
 
-        draw_highlight_rect(self.hover.rect, ui, style);
+        draw_highlight_rect(hover.rect, ui, style);
         let mut hovering_buttons = false;
         let total_button_spacing = style.overlay.button_spacing * 2.0;
-        let (rect, pointer) = (self.hover.rect, self.pointer);
+        let (rect, pointer) = (hover.rect, self.pointer);
         let rect = rect.shrink(style.overlay.button_spacing);
         let shortest_side = ((rect.width() - total_button_spacing) / 3.0)
             .min((rect.height() - total_button_spacing) / 3.0)
@@ -252,7 +273,7 @@ impl DragDropState {
         let rect = Rect::from_center_size(center, Vec2::splat(shortest_side));
 
         if button_ui(rect, ui, &mut hovering_buttons, pointer, style, None) {
-            match self.hover.dst {
+            match hover.dst {
                 TreeComponent::Node(path) => {
                     destination = Some(TabDestination::Node(path, TabInsert::Append))
                 }
@@ -283,20 +304,20 @@ impl DragDropState {
                         pointer,
                         style,
                         Some(split),
-                    ) && let TreeComponent::Node(path) = self.hover.dst
+                    ) && let TreeComponent::Node(path) = hover.dst
                     {
                         destination = Some(TabDestination::Node(path, TabInsert::Split(split)))
                     }
                 }
             }
         }
-        let hovering_rect = self.hover.rect.contains(pointer);
+        let hovering_rect = hover.rect.contains(pointer);
         let target_lock_state = match (hovering_rect, hovering_buttons) {
             (false, false) => LockState::Unlocked,
             (_, true) => LockState::HardLock,
             (true, _) => LockState::SoftLock,
         };
-        self.update_lock(target_lock_state, style, ui.ctx());
+        self.update_lock(hover, target_lock_state, style, ui.ctx());
         if let Some(TabDestination::Window(rect)) = destination {
             let rect = self.window_preview_rect(rect.into());
             let rect_bounded = constrain_rect_to_area(ui, rect, window_bounds);
@@ -307,6 +328,7 @@ impl DragDropState {
 
     pub(super) fn resolve_traditional(
         &mut self,
+        hover: &HoverData,
         ui: &Ui,
         style: &Style,
         allowed_splits: AllowedSplits,
@@ -314,25 +336,25 @@ impl DragDropState {
         window_bounds: Rect,
     ) -> Option<TabDestination> {
         // If windows are not allowed, any hover over a window is immediately disallowed.
-        if !windows_allowed && self.hover.dst.surface_address() != SurfaceIndex::main() {
+        if !windows_allowed && hover.dst.surface_address() != SurfaceIndex::main() {
             return None;
         }
-        draw_highlight_rect(self.hover.rect, ui, style);
+        draw_highlight_rect(hover.rect, ui, style);
 
         // Deals with hovers over tab bar and tab titles.
-        if let Some(rect) = self.hover.tab {
+        if let Some(rect) = hover.tab {
             draw_drop_rect(rect, ui, style);
             let target_lock_state = if rect.contains(self.pointer) {
                 LockState::SoftLock
             } else {
                 LockState::Unlocked
             };
-            self.update_lock(target_lock_state, style, ui.ctx());
-            return Some(self.hover.dst.as_tab_destination());
+            self.update_lock(hover, target_lock_state, style, ui.ctx());
+            return Some(hover.dst.as_tab_destination());
         }
 
         // Main cases, splits, window creations, etc.
-        let (hover_rect, pointer) = (self.hover.rect, self.pointer);
+        let (hover_rect, pointer) = (hover.rect, self.pointer);
         let center = hover_rect.center();
 
         let (tab_insertion, overlay_rect) = {
@@ -401,13 +423,13 @@ impl DragDropState {
         let default_value = windows_allowed.then(|| {
             TabDestination::Window(Rect::from_min_size(pointer, self.drag.rect.size()).into())
         });
-        let final_result = tab_insertion.map_or(default_value, |tab| match self.hover.dst {
+        let final_result = tab_insertion.map_or(default_value, |tab| match hover.dst {
             TreeComponent::Surface(surface) => Some(TabDestination::EmptySurface(surface)),
             TreeComponent::Node(path) => Some(TabDestination::Node(path, tab)),
             _ => None,
         });
 
-        self.update_lock(LockState::SoftLock, style, ui.ctx());
+        self.update_lock(hover, LockState::SoftLock, style, ui.ctx());
 
         // Draw the overlay
         match final_result {
@@ -425,13 +447,19 @@ impl DragDropState {
         final_result
     }
 
-    fn update_lock(&mut self, target_state: LockState, style: &Style, ctx: &Context) {
+    fn update_lock(
+        &mut self,
+        hover: &HoverData,
+        target_state: LockState,
+        style: &Style,
+        ctx: &Context,
+    ) {
         match self.locked.as_mut() {
             Some(lock_time) => {
                 if target_state == LockState::HardLock {
                     *lock_time = ctx.input(|i| i.time);
                 }
-                let window_hold = if !self.hover.dst.surface_address().is_main() {
+                let window_hold = if !hover.dst.surface_address().is_main() {
                     ctx.request_repaint();
                     self.is_locked(style, ctx)
                 } else {

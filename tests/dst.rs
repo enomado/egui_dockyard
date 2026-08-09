@@ -700,8 +700,17 @@ impl Sim {
     /// harness loudly rather than quietly turning every drag into a press on empty space — but
     /// a checked copy is still a copy, and only this harness had thought to check it. The dock
     /// now states the scheme once, in [`tab_widget_id`], for exactly this kind of caller.
+    ///
+    /// The address is keyed by the tab's *identity*, so a position has to be turned into one
+    /// first; steps here speak in positions because that is what the bar shows.
     fn tab_id(&self, leaf: NodePath, tab: usize) -> Id {
-        tab_widget_id(Id::new(DOCK_ID), leaf, TabIndex(tab))
+        let tab = self
+            .state
+            .leaf(leaf)
+            .unwrap()
+            .tab_id_at(TabIndex(tab))
+            .expect("the caller asked about a tab this leaf has");
+        tab_widget_id(Id::new(DOCK_ID), leaf, tab)
     }
 
     /// Where a tab was drawn during the last frame.

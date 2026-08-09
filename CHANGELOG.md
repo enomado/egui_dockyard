@@ -4,6 +4,11 @@
 
 ### Changed
 
+- **`tab_widget_id` takes a `TabId` instead of a `TabIndex`.** The id a tab is drawn under
+  is what egui hangs focus, hover and drags off, and one built from a position is inherited
+  by the next tab to occupy that slot. Callers addressing a tab from outside a frame resolve
+  the position first: `dock_state.leaf(path)?.tab_id_at(TabIndex(i))`.
+
 - **Nodes and tabs are now addressed by identity, not by position.** `Tree` stores its
   nodes in a generational arena: `NodeId` replaces `NodeIndex` (and its `root()` /
   `left()` / `right()` arithmetic — ask the tree instead: `Tree::root`,

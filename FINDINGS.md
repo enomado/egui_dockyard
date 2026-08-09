@@ -37,22 +37,30 @@ how:
 * the closed tab was not the last → the address quietly names its neighbour;
 * the closed tab was the leaf's only one → the leaf goes too, and even the `NodeId` is dangling.
 
-There is a second address, egui's: a tab is drawn under an id built from its position
-(`tab_widget_id`), and egui remembers *that id* as the thing being dragged. So the neighbour
-that slides into the vacated slot inherits the id — and with it a live drag nobody started on
-it. The two routes differ in exactly this: a middle **release** ends egui's drag by itself
-(any release does), while a programmatic close leaves it running.
+There is a second address, egui's, and it was positional in the same way: a tab is drawn under
+an id built from `tab_widget_id(dock, node, TabIndex)`, and egui remembers *that id* as the thing
+being dragged. The neighbour that slides into the vacated slot inherits the id — and with it a
+live drag nobody started on it. The two routes differ in exactly this: a middle **release** ends
+egui's drag by itself (any release does), while a programmatic close leaves it running, so it is
+the second route that shows the inheritance.
 
-**Fix.** The drag carries an **identity**. `DragData::src` is a new `DragSource { surface, node,
-tab: TabId }`, and `DragSource::resolve` asks the tree where that tab is *now* — answering
-`None` exactly when it is gone. Every read of the drag source goes through it, so no position
-survives a frame boundary.
+**Fix**, in two layers, because there were two addresses.
 
-`show_inside_with_response` gained the one place that says a drag is over: if the source no
-longer resolves, the dock drops its own drag state **and** calls `Context::stop_dragging`, so
-the neighbour cannot inherit the gesture through the id either. It sits before the drag is used,
-so it covers every route into a removal — including an application rewriting the `DockState`
-between two frames, which no gesture-side patch would have.
+*The drag carries an identity.* `DragData::src` is a new `DragSource { surface, node, tab: TabId
+}`, and `DragSource::resolve` asks the tree where that tab is *now* — answering `None` exactly
+when it is gone. Every read of the drag source goes through it, so no position survives a frame
+boundary. `show_inside_with_response` gained the one place that says a drag is over: if the
+source no longer resolves, the dock drops its own drag state **and** calls
+`Context::stop_dragging`. It sits before the drag is used, so it covers every route into a
+removal — including an application rewriting the `DockState` between two frames, which no
+gesture-side patch would have.
+
+*The widget id carries an identity too.* `tab_widget_id` now takes a `TabId` instead of a
+`TabIndex` (a breaking change for callers that address tabs from outside — resolve a position
+with `LeafNode::tab_id_at`). This retires the whole class rather than the one symptom: an id
+built from a position is reused by the next tab to occupy that slot, and *everything* egui hangs
+off an id goes with it — focus and hover as much as a drag. An id whose tab is gone is now an id
+nobody answers to.
 
 Two `todo!()`s and an `unreachable!()` about "collections of tabs can't be dragged" went with
 it: a drag source is a tab, and now says so in its type.
@@ -61,7 +69,9 @@ it: a drag source is a tab, and now says so in its type.
 position, middle position, only tab of a leaf — and asserts what the dock *holds* afterwards,
 not merely that it survived, because the middle-position scene never panicked in the first
 place. Against the unfixed source: two panic, and the third drops `Tab 3` into the leaf the
-pointer ended over.
+pointer ended over. `ids::tests::a_tab_keeps_its_address_when_a_neighbour_is_closed` states the
+second layer on its own: the tab that moves into a vacated slot answers to the address it always
+had, and not to the closed tab's.
 
 ---
 

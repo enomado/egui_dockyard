@@ -26,10 +26,12 @@
 //! afterwards, not merely that it survived.
 //!
 //! A third address is in play, and it belongs to egui rather than to the dock: a tab is drawn
-//! under an id built from its *position* (`tab_widget_id`), and egui remembers that id as the
-//! thing being dragged. Closing a tab therefore hands its id — and any live drag attached to it —
-//! to whichever tab slides into the vacated slot. Ending the dock's drag without ending egui's
-//! leaves the neighbour dragged by a hand that never grabbed it.
+//! under an id (`tab_widget_id`), and egui remembers that id as the thing being dragged. That id
+//! used to be built from the tab's *position*, so closing a tab handed its id — and any live drag
+//! attached to it — to whichever tab slid into the vacated slot, and the neighbour was dragged by
+//! a hand that never grabbed it. The id is keyed by the tab's identity now, which retires that
+//! route; what remains is that egui still holds a drag on an id no widget answers to, so the
+//! dock ends that too.
 //!
 //! # Two routes, and why both are here
 //!
@@ -41,9 +43,9 @@
 //!   `dragged_id()` is `None` right after the click. What is left over is the dock's `State::dnd`,
 //!   read on the next frame, and that is the panic.
 //! * **`TabViewer::force_close`** — the application closing a tab under the hand, no button
-//!   released, egui's drag still live. Here the id *is* inherited and the gesture goes on: before
-//!   the fix, releasing over the other leaf dropped `Tab 3` — a tab the hand never grabbed —
-//!   into it, with nothing raised anywhere.
+//!   released, egui's drag still live. This is where the inheritance showed: before the fix,
+//!   releasing over the other leaf dropped `Tab 3` — a tab the hand never grabbed — into it, with
+//!   nothing raised anywhere.
 
 use std::collections::HashSet;
 
@@ -158,14 +160,25 @@ impl Sim {
     /// entirely — the bar has leading buttons — so the address comes from the dock itself.
     fn tab_rect(&self, leaf: NodePath, tab: usize) -> Rect {
         self.ctx
-            .read_response(tab_widget_id(Id::new(DOCK_ID), leaf, TabIndex(tab)))
+            .read_response(self.tab_id(leaf, tab))
             .expect("the tab was drawn last frame")
             .rect
     }
 
+    /// The widget address of a tab, from its position in the bar — which is how a hand thinks
+    /// of it, and what the dock keys by an identity underneath.
+    fn tab_id(&self, leaf: NodePath, tab: usize) -> Id {
+        let tab = self
+            .state
+            .leaf(leaf)
+            .unwrap()
+            .tab_id_at(TabIndex(tab))
+            .expect("the caller asked about a tab this leaf has");
+        tab_widget_id(Id::new(DOCK_ID), leaf, tab)
+    }
+
     fn is_dragging(&self, leaf: NodePath, tab: usize) -> bool {
-        self.ctx
-            .is_being_dragged(tab_widget_id(Id::new(DOCK_ID), leaf, TabIndex(tab)))
+        self.ctx.is_being_dragged(self.tab_id(leaf, tab))
     }
 
     fn move_to(&mut self, pos: Pos2) {

@@ -289,7 +289,15 @@ impl<Tab> DockArea<'_, Tab> {
 
         for tab_index in 0..tabs_len {
             let tab_index = TabIndex(tab_index);
-            let id = tab_widget_id(self.id, path, tab_index);
+            // The widget address is the tab's identity, so what egui hangs off it — focus,
+            // hover, a drag in flight — stays with this tab when the bar is edited around it.
+            let tab_id = self
+                .dock_state
+                .leaf(path)
+                .unwrap()
+                .tab_id_at(tab_index)
+                .expect("the loop runs over the positions this leaf has");
+            let id = tab_widget_id(self.id, path, tab_id);
             let is_being_dragged = tabs_ui.ctx().is_being_dragged(id)
                 && tabs_ui.input(|i| i.pointer.is_decidedly_dragging())
                 && self.draggable_tabs;
@@ -350,12 +358,7 @@ impl<Tab> DockArea<'_, Tab> {
                         let src = DragSource {
                             surface: path.surface,
                             node: path.node,
-                            tab: self
-                                .dock_state
-                                .leaf(path)
-                                .unwrap()
-                                .tab_id_at(tab_index)
-                                .expect("this tab was just drawn"),
+                            tab: tab_id,
                         };
                         tabs_ui.memory_mut(|mem| {
                             mem.data.insert_temp(

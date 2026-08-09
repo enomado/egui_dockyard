@@ -7,7 +7,8 @@ use egui::{
 };
 
 use crate::{
-    AllowedSplits, NodeId, NodePath, Split, Style, SurfaceIndex, TabDestination, TabInsert, TabPath,
+    AllowedSplits, DockState, NodeId, NodePath, Split, Style, SurfaceIndex, TabDestination, TabId,
+    TabInsert, TabPath,
 };
 
 #[derive(Debug, Clone)]
@@ -22,10 +23,47 @@ pub(super) struct HoverData {
     pub tab: Option<Rect>,
 }
 
+/// The tab a drag is carrying, addressed by **identity**.
+///
+/// # Why not a [`TabPath`]
+///
+/// A drag outlives the frame it started in, and the leaf it came from can be edited while
+/// it is in flight: the dragged tab itself can be closed (middle-click closes a tab, and the
+/// dragged tab is still a tab in the bar), a neighbour can be closed, or the application can
+/// rewrite the `DockState` between frames. `TabIndex` is a *position*, and every one of those
+/// edits renumbers positions — so a carried `TabPath` either names a different tab than the
+/// hand grabbed, or names nothing at all and panics the next time it is indexed with.
+///
+/// The identity does neither: [`TabId`] is handed out per leaf and never reused, so
+/// [`resolve`](Self::resolve) answers "where is it now", and answers `None` exactly when the
+/// tab is gone — which is the one thing the drag has to notice, since a drag of a tab that no
+/// longer exists is over.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DragSource {
+    pub surface: SurfaceIndex,
+    pub node: NodeId,
+    pub tab: TabId,
+}
+
+impl DragSource {
+    /// Where the dragged tab sits now, or `None` if it has left the tree.
+    pub(super) fn resolve<Tab>(&self, dock_state: &DockState<Tab>) -> Option<TabPath> {
+        let leaf = dock_state
+            .leaf(NodePath::new(self.surface, self.node))
+            .ok()?;
+        let tab = leaf.index_of(self.tab)?;
+        Some(TabPath::new(self.surface, self.node, tab))
+    }
+
+    pub(super) fn node_path(&self) -> NodePath {
+        NodePath::new(self.surface, self.node)
+    }
+}
+
 /// Specifies the location of a tab on the tree, used when moving tabs.
 #[derive(Debug, Clone)]
 pub(super) struct DragData {
-    pub src: TreeComponent,
+    pub src: DragSource,
     pub rect: Rect,
 }
 
@@ -408,7 +446,7 @@ impl DragDropState {
     }
 
     fn window_preview_rect(&self, rect: Rect) -> Rect {
-        if self.drag.src.surface_address() == SurfaceIndex::main() {
+        if self.drag.src.surface == SurfaceIndex::main() {
             Rect::from_min_size(rect.min, rect.size() * 0.8)
         } else {
             rect

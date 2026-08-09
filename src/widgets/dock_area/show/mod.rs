@@ -6,7 +6,7 @@ use egui::{
 use paste::paste;
 
 use super::{
-    DockAreaResponse, drag_and_drop::TreeComponent, events::DockEvent, state::State,
+    DockAreaResponse, drag_and_drop::DragData, events::DockEvent, state::State,
     tab_removal::TabRemoval,
 };
 use crate::NodePath;
@@ -63,6 +63,27 @@ impl<Tab> DockArea<'_, Tab> {
             )
         });
 
+        // A drag carries a tab, and that tab can leave the tree while the hand is still
+        // holding it: middle-click closes a tab, and the dragged tab is still a tab in the
+        // bar — but the application may equally rewrite the `DockState` between two frames.
+        // Whatever the route, a drag of a tab that no longer exists is over, and this is the
+        // one place that says so.
+        //
+        // Both halves have to go. The dock's own drag state is dropped here; egui's is
+        // stopped too, because the id a tab is drawn under names a *position* in the bar, so
+        // the neighbour that slides into the closed tab's slot inherits the id — and, with
+        // it, a drag nobody started on it.
+        let source_is_gone = |data: &DragData| data.src.resolve(self.dock_state).is_none();
+        let drag_data = drag_data.filter(|data| !source_is_gone(data));
+        if state
+            .dnd
+            .as_ref()
+            .is_some_and(|dnd| source_is_gone(&dnd.drag))
+        {
+            state.reset_drag();
+            ui.ctx().stop_dragging();
+        }
+
         if let (Some(source), Some(hover)) = (drag_data, hover_data) {
             let style = self.style.as_ref().unwrap();
             state.set_drag_and_drop(source, hover, ui.ctx(), style);
@@ -70,14 +91,19 @@ impl<Tab> DockArea<'_, Tab> {
             if ui.input(|i| i.pointer.primary_released())
                 && let Some(destination) = tab_dst
             {
-                let source = {
-                    match state.dnd.as_ref().unwrap().drag.src {
-                        TreeComponent::Tab(src) => src,
-                        _ => todo!(
-                            "collections of tabs, like nodes and surfaces can't be docked (yet)"
-                        ),
-                    }
-                };
+                // Resolved against the tree as it stands, not as it stood when the drag
+                // started: the leaf may have been edited in between, and the drop has to
+                // move the tab the hand grabbed rather than whatever now sits at its old
+                // index. `None` cannot happen — a source that stopped resolving ended the
+                // drag above — so it is an assertion, not a branch.
+                let source = state
+                    .dnd
+                    .as_ref()
+                    .unwrap()
+                    .drag
+                    .src
+                    .resolve(self.dock_state)
+                    .expect("a drag whose tab is gone was already cancelled");
                 // A drop that resolves to the tab's current slot changes nothing; only a
                 // move that reports a real mutation counts as a finalised event (same rule
                 // as the focus push at the end of this pass).
@@ -242,14 +268,12 @@ impl<Tab> DockArea<'_, Tab> {
         let style = self.style.as_ref().unwrap();
 
         let deserted_node = {
-            match (
-                drag_state.drag.src.node_address(),
-                drag_state.hover.dst.node_address(),
-            ) {
-                ((src_surf, Some(src_node)), (dst_surf, Some(dst_node))) => {
-                    src_surf == dst_surf
-                        && src_node == dst_node
-                        && self.dock_state[src_surf][src_node].tabs_count() == 1
+            let src = drag_state.drag.src;
+            match drag_state.hover.dst.node_address() {
+                (dst_surf, Some(dst_node)) => {
+                    src.surface == dst_surf
+                        && src.node == dst_node
+                        && self.dock_state[src.node_path()].tabs_count() == 1
                 }
                 _ => false,
             }
@@ -263,14 +287,16 @@ impl<Tab> DockArea<'_, Tab> {
         };
         let allowed_splits = self.allowed_splits & restricted_splits;
 
-        let allowed_in_window = match drag_state.drag.src {
-            TreeComponent::Tab(path) => {
-                let Node::Leaf(leaf) = &mut self.dock_state[path.node_path()] else {
-                    unreachable!("tab drags can only come from leaf nodes")
-                };
-                tab_viewer.allowed_in_windows(&mut leaf[path.tab])
-            }
-            _ => todo!("collections of tabs, like nodes or surfaces, can't be dragged! (yet)"),
+        let allowed_in_window = {
+            let path = drag_state
+                .drag
+                .src
+                .resolve(self.dock_state)
+                .expect("a drag whose tab is gone was already cancelled");
+            let Node::Leaf(leaf) = &mut self.dock_state[path.node_path()] else {
+                unreachable!("tab drags can only come from leaf nodes")
+            };
+            tab_viewer.allowed_in_windows(&mut leaf[path.tab])
         };
 
         if let Some(pointer) = state.last_hover_pos {

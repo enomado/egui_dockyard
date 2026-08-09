@@ -13,9 +13,9 @@ use crate::dock_area::ids::tab_widget_id;
 use crate::dock_area::tab_removal::{ForcedRemoval, TabRemoval};
 use crate::tab_viewer::OnCloseResponse;
 use crate::{
-    DockArea, Node, Style, SurfaceIndex, TabAddAlign, TabIndex, TabStyle, TabViewer,
+    DockArea, Style, SurfaceIndex, TabAddAlign, TabIndex, TabStyle, TabViewer,
     dock_area::{
-        drag_and_drop::{DragData, DragDropState, HoverData, TreeComponent},
+        drag_and_drop::{DragData, DragDropState, DragSource, HoverData, TreeComponent},
         state::State,
     },
     utils::{clip_to, fade_visuals, rect_set_size_centered, rect_stroke_box},
@@ -345,11 +345,23 @@ impl<Tab> DockArea<'_, Tab> {
                             .ctx()
                             .transform_layer_shapes(layer_id, TSTransform::new(delta, 1.0));
 
+                        // Identity, not position: this outlives the frame, and the leaf can be
+                        // edited while the drag is in flight. See `DragSource`.
+                        let src = DragSource {
+                            surface: path.surface,
+                            node: path.node,
+                            tab: self
+                                .dock_state
+                                .leaf(path)
+                                .unwrap()
+                                .tab_id_at(tab_index)
+                                .expect("this tab was just drawn"),
+                        };
                         tabs_ui.memory_mut(|mem| {
                             mem.data.insert_temp(
                                 self.id.with("drag_data"),
                                 Some(DragData {
-                                    src: TreeComponent::Tab((path, tab_index).into()),
+                                    src,
                                     rect: self.layout.rect(path).unwrap(),
                                 }),
                             );
@@ -1330,18 +1342,15 @@ impl<Tab> DockArea<'_, Tab> {
                 Some(DragDropState {
                     drag: DragData { src, .. },
                     ..
-                }) => match *src {
-                    TreeComponent::Tab(src_path) => {
-                        if let Node::Leaf(leaf) =
-                            &mut self.dock_state[src_path.surface][src_path.node]
-                        {
-                            tab_viewer.allowed_in_windows(&mut leaf[src_path.tab])
-                                || path.surface == SurfaceIndex::main()
-                        } else {
-                            true
-                        }
+                }) => match src.resolve(self.dock_state) {
+                    Some(src_path) => {
+                        let leaf = self.dock_state.leaf_mut(src_path.node_path()).unwrap();
+                        tab_viewer.allowed_in_windows(&mut leaf[src_path.tab])
+                            || path.surface == SurfaceIndex::main()
                     }
-                    _ => unreachable!("collections of nodes can't be dragged (yet)"),
+                    // The dragged tab left the tree during its own drag. The pass that noticed
+                    // it has already ended the drag; nothing here has an opinion left to have.
+                    None => true,
                 },
                 _ => true,
             };

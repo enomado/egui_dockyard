@@ -21,6 +21,13 @@
 
 ### Fixed
 
+- Closing a tab while it is being dragged no longer panics, and no longer hands the drag to
+  the tab next to it. A drag now carries the tab's *identity* rather than its position in the
+  bar, and a drag whose tab has left the tree ends — the dock's own drag state and egui's
+  both. This covers every route out of the tree: a middle click on the dragged tab,
+  `TabViewer::force_close`, or the application editing the `DockState` between frames.
+  See [FINDINGS](FINDINGS.md).
+
 - `LeafNode::retain_tabs` no longer leaves the active tab addressing a tab it removed, and
   keeps the focus history when the tab it names survives.
 

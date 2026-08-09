@@ -12,6 +12,59 @@ Ordered newest first.
 
 ---
 
+## A drag remembered *where* its tab was, so closing that tab panicked — or dragged its neighbour
+
+**Status upstream:** reported (the panic half).
+
+**Symptom.** Press the left button on a tab, pull it out of the tab row and bring it back —
+still holding — then middle-click to close it. The dock panicked on the next frame with
+`index out of bounds: the len is 1 but the index is 1` (`show/leaf.rs`), or, when the tab was
+the only one in its leaf, with `no node 1.0 in this tree` (`tree/mod.rs`).
+
+The same bug has a silent form. Let the *application* close the dragged tab instead —
+`TabViewer::force_close` while the gesture is in flight — and nothing is raised at all: the
+gesture carries on, and releasing it drops the closed tab's **neighbour** somewhere the hand
+never grabbed anything from.
+
+**Root cause.** The drag is the one piece of dock state that outlives the frame that created it,
+and it was addressed by *position*: `TreeComponent::Tab(TabPath)` — a `TabIndex` — stored in
+`State::dnd` and read again one or more frames later. Every removal in a leaf renumbers
+positions, so the stored address decays the moment the leaf is edited, and the scene decides
+how:
+
+* the closed tab was the last position → the address names nothing, and the next index with it
+  panics;
+* the closed tab was not the last → the address quietly names its neighbour;
+* the closed tab was the leaf's only one → the leaf goes too, and even the `NodeId` is dangling.
+
+There is a second address, egui's: a tab is drawn under an id built from its position
+(`tab_widget_id`), and egui remembers *that id* as the thing being dragged. So the neighbour
+that slides into the vacated slot inherits the id — and with it a live drag nobody started on
+it. The two routes differ in exactly this: a middle **release** ends egui's drag by itself
+(any release does), while a programmatic close leaves it running.
+
+**Fix.** The drag carries an **identity**. `DragData::src` is a new `DragSource { surface, node,
+tab: TabId }`, and `DragSource::resolve` asks the tree where that tab is *now* — answering
+`None` exactly when it is gone. Every read of the drag source goes through it, so no position
+survives a frame boundary.
+
+`show_inside_with_response` gained the one place that says a drag is over: if the source no
+longer resolves, the dock drops its own drag state **and** calls `Context::stop_dragging`, so
+the neighbour cannot inherit the gesture through the id either. It sits before the drag is used,
+so it covers every route into a removal — including an application rewriting the `DockState`
+between two frames, which no gesture-side patch would have.
+
+Two `todo!()`s and an `unreachable!()` about "collections of tabs can't be dragged" went with
+it: a drag source is a tab, and now says so in its type.
+
+**Evidence.** `tests/a_closed_tab_ends_its_drag.rs` plays all three scenes headless — last
+position, middle position, only tab of a leaf — and asserts what the dock *holds* afterwards,
+not merely that it survived, because the middle-position scene never panicked in the first
+place. Against the unfixed source: two panic, and the third drops `Tab 3` into the leaf the
+pointer ended over.
+
+---
+
 ## An empty dock had two shapes, and the one an application starts in did not look empty
 
 **Status upstream:** not reported.

@@ -54,8 +54,8 @@ use egui::{
 };
 use egui_dock::shape::subtree_shape;
 use egui_dock::{
-    DockArea, DockLayout, DockState, Node, NodeId, NodePath, Split, Style, SurfaceIndex, TabIndex,
-    TabPath, TabViewer, Tree, drag_hover_node, dragged_tab, tab_widget_id,
+    DockArea, DockLayout, DockState, Node, NodeId, NodePath, Split, Style, SurfaceIndex, TabId,
+    TabIndex, TabPath, TabViewer, Tree, drag_hover_node, dragged_tab, tab_widget_id,
 };
 
 /// Screen the simulated dock starts on. Big enough that a few splits still leave leaves wider
@@ -1583,15 +1583,27 @@ impl Sim {
         self.run_frame(vec![]);
     }
 
-    /// Presses the primary button at `at`, pulls the pointer out and brings it back, and leaves
-    /// the button **down**.
+    /// Presses the primary button at `at`, pulls the pointer out and brings it back, and asks
+    /// whether the drag egui started is the tab named by `(leaf, id)`.
     ///
     /// The travel is what makes it a drag rather than a click — egui only calls a press a drag
     /// once the pointer has moved past a threshold — and the return is what leaves the tab under
-    /// the hand, so that a middle click during the hold can reach the very tab being carried.
-    /// The far point is clamped to the screen: a pointer off-screen has no hover position at
-    /// all, and this harness would be measuring a drag the dock cannot see.
-    fn press_and_hold(&mut self, at: Pos2) {
+    /// the hand on success, so that a step carrying the hold on (`MoveWhileHeld`, a middle click
+    /// during a hold) can reach the very tab being pressed. The far point is clamped to the
+    /// screen: a pointer off-screen has no hover position at all, and this harness would be
+    /// measuring a drag the dock cannot see.
+    ///
+    /// On `true` the button is left down at `at` — the caller's to carry on. On `false` the
+    /// gesture has already been undone: released at `at`, so the net travel is zero and nothing
+    /// moved, one quiet frame run, button up. Both [`Step::Grab`] and [`Step::Drag`] need this:
+    /// a tab drawn in a floating window can sit under the window's own move handle while the
+    /// window is still settling, and then the press drags the *window* — a real egui drag on a
+    /// widget this vocabulary has no word for, left in flight if nobody checked. Found by the
+    /// sweep on `Step::Grab`'s first run: `drag_complaint` reported "egui is dragging widget
+    /// `window SurfaceIndex(1)`.with(\"move\")", which is exactly true and says nothing about
+    /// the dock. It is also what lets `drag_complaint` keep its strong form: with every grab
+    /// checked, an egui drag at the end of a step is always a tab's drag.
+    fn grab_tab_at(&mut self, at: Pos2, leaf: NodePath, id: TabId) -> bool {
         self.run_frame(vec![Event::PointerMoved(at)]);
         self.run_frame(vec![Event::PointerButton {
             pos: at,
@@ -1608,6 +1620,17 @@ impl Sim {
             let t = f32::from(step) / 4.0;
             self.run_frame(vec![Event::PointerMoved(at + (out - at) * t)]);
         }
+        if self.ctx.dragged_id() != Some(tab_widget_id(Id::new(DOCK_ID), leaf, id)) {
+            self.run_frame(vec![Event::PointerButton {
+                pos: at,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            }]);
+            self.run_frame(vec![]);
+            return false;
+        }
+        true
     }
 
     /// Moves a held pointer from `from` to `to` and rests there, button still down.
@@ -1746,6 +1769,12 @@ impl Sim {
                 let source = leaves[from % leaves.len()];
                 let target = leaves[to % leaves.len()];
                 let grab = self.tab_rect(source, 0)?;
+                let id = self
+                    .state
+                    .leaf(source)
+                    .unwrap()
+                    .tab_id_at(TabIndex(0))
+                    .expect("the caller asked about a tab this leaf has");
                 // A point that would mean something other than what the step says is not fired:
                 // the step is skipped, and the refusal is counted so that a scenario which stopped
                 // being aimable stops being green too.
@@ -1759,7 +1788,14 @@ impl Sim {
                         return None;
                     }
                 };
-                self.drag(grab.center(), drop);
+                // Same hazard `Step::Grab` checks for: a tab under a floating window's own move
+                // handle can have the press drag the *window* instead. `grab_tab_at` undoes and
+                // reports it like any other aim that turned out to mean something else.
+                if !self.grab_tab_at(grab.center(), source, id) {
+                    self.refused[refused_index(Refused::Elsewhere)] += 1;
+                    return None;
+                }
+                self.release_at(grab.center(), drop);
                 // The source may have been emptied and removed, which collapses its parent
                 // split and lifts its sibling one level — the sibling keeps its id (that is
                 // what the arena is for), so it is not listed here.
@@ -1793,29 +1829,10 @@ impl Sim {
                     .tab_id_at(TabIndex(index))
                     .expect("the caller asked about a tab this leaf has");
                 let home = self.tab_rect(target, index)?.center();
-                self.press_and_hold(home);
-
-                // Did the hand actually pick *that tab* up? A tab in a floating window can be
-                // under the window's own move handle while the window is still settling, and
-                // then this press is dragging the window — a real egui drag, on a widget this
-                // vocabulary has no word for, left in flight across the step boundary. Found
-                // by the sweep on its first run: `drag_complaint` reported "egui is dragging
-                // widget `window SurfaceIndex(1)`.with(\"move\")", which is exactly true and
-                // says nothing about the dock.
-                //
-                // So the gesture is undone rather than recorded: the pointer is back where it
-                // pressed, so the release below moves whatever it did grab by nothing at all,
-                // and the step is refused like any other aim that turned out to mean something
-                // else. It is also what keeps `drag_complaint` able to say what it says — with
-                // holds only ever on tabs, an egui drag at the end of a step is a tab's drag.
-                if self.ctx.dragged_id() != Some(tab_widget_id(Id::new(DOCK_ID), target, id)) {
-                    self.run_frame(vec![Event::PointerButton {
-                        pos: home,
-                        button: PointerButton::Primary,
-                        pressed: false,
-                        modifiers: Modifiers::NONE,
-                    }]);
-                    self.run_frame(vec![]);
+                // `grab_tab_at` is the check: did the hand actually pick *that tab* up, or did
+                // a floating window still settling steal the press for its own move handle? On
+                // `false` it has already undone the gesture and left nothing to record.
+                if !self.grab_tab_at(home, target, id) {
                     self.refused[refused_index(Refused::Elsewhere)] += 1;
                     return None;
                 }

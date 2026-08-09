@@ -221,10 +221,13 @@ egui drag at the end of a step is a tab's drag.
 
 ## Backlog, found while doing this
 
-* **`Step::Drag` does not check what it grabbed.** `Grab` does now (see above), and the same
-  hazard is what let a tab drag press a divider and expose the ratio loss — a step that quietly
-  stopped being a tab drag reads as a green step. Cheap to add, but it changes what a
-  well-tuned step covers, so it wants its own measurement of the coverage before and after.
+* ~~**`Step::Drag` does not check what it grabbed.**~~ Done — the check that `Step::Grab` did is
+  now the shared `Sim::grab_tab_at` (folded in place of `press_and_hold`), and `Step::Drag` calls
+  it before `Sim::release_at` carries the gesture on. Measured, as asked: 96-seed sweep,
+  `refused[Elsewhere]` 24 → 53 — 29 steps across the sweep were silently dragging something other
+  than the named tab (almost certainly the floating-window move-handle hazard `Grab`'s comment
+  already named) and are now refused instead of corrupting the outcome counts. All 22 tests in
+  `tests/dst.rs` stay green, including the seed-replay and coverage gates.
 * ~~**A drop destination is cross-frame state too, and nothing watches it.**~~ Done —
   `drag_hover_node` (the public read), the fix in `show_inside_with_response`
   (`TreeComponent::node_is_gone`, two checks), `tests/a_dead_drop_destination_is_not_a_drop.rs`,

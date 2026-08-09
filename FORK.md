@@ -131,6 +131,12 @@ in [fuzz/README.md](fuzz/README.md).
 Loose ends noticed while working, each with why it is worth touching. Not a plan — a list of
 things a later session should not have to rediscover.
 
+One entry has outgrown this list and lives in a file of its own:
+[docs/PLAN_the_harness_can_hold_a_gesture.md](docs/PLAN_the_harness_can_hold_a_gesture.md) — the
+DST sweep cannot express "a gesture is still in flight", which is why closing a dragged tab
+panicked in a user's hands rather than in the harness. Two tracks: an oracle that judges the drag
+after every step, and an alphabet that can hold a gesture across steps.
+
 The eight entries that stood here are answered, in the four commits that follow the
 collapsed-window work; what they were is in `git log`, and the bugs among them are written up in
 [FINDINGS.md](FINDINGS.md). One was answered by turning out to be **wrong**, which is worth saying

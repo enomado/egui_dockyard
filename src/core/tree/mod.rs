@@ -716,8 +716,20 @@ impl<Tab> Tree<Tab> {
     ///
     /// Returns the removed tab if it exists, or `None` otherwise.
     pub fn remove_tab(&mut self, (node, tab_index): (NodeId, TabIndex)) -> Option<Tab> {
+        self.remove_tab_choosing((node, tab_index), None)
+    }
+
+    /// Removes a tab, with `successor` naming who takes the focus.
+    ///
+    /// See [`LeafNode::remove_tab_choosing`] for what `successor` means and when it is used.
+    #[track_caller]
+    pub fn remove_tab_choosing(
+        &mut self,
+        (node, tab_index): (NodeId, TabIndex),
+        successor: Option<TabId>,
+    ) -> Option<Tab> {
         let leaf = self.leaf_mut(node).ok()?;
-        let tab = leaf.remove_tab(tab_index);
+        let tab = leaf.remove_tab_choosing(tab_index, successor);
         if leaf.is_empty() {
             self.remove_leaf(node);
         }

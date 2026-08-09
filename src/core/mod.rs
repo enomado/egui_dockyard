@@ -32,7 +32,7 @@ pub mod testkit;
 
 pub use surface::{SurfaceMut, SurfaceRef};
 pub use surface_index::{SurfaceIndex, WindowIndex};
-use tree::node::LeafNode;
+use tree::node::{LeafNode, TabId};
 pub use window_state::WindowState;
 
 use crate::core::geom::{Rect, Size};
@@ -500,7 +500,15 @@ impl<Tab> DockState<Tab> {
     /// Removes a tab at the specified `path`.
     /// This method will yield the removed tab, or `None` if it doesn't exist.
     pub fn remove_tab(&mut self, path: TabPath) -> Option<Tab> {
-        let removed_tab = self[path.surface].remove_tab((path.node, path.tab));
+        self.remove_tab_choosing(path, None)
+    }
+
+    /// Removes a tab at the specified `path`, with `successor` naming who takes the focus.
+    ///
+    /// See [`LeafNode::remove_tab_choosing`] for what `successor` means and when it is used.
+    #[track_caller]
+    pub fn remove_tab_choosing(&mut self, path: TabPath, successor: Option<TabId>) -> Option<Tab> {
+        let removed_tab = self[path.surface].remove_tab_choosing((path.node, path.tab), successor);
         self.close_window_if_emptied(path.surface);
         removed_tab
     }

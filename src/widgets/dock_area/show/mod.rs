@@ -143,14 +143,23 @@ impl<Tab> DockArea<'_, Tab> {
         for removal in self.to_remove.drain(..).rev() {
             match removal {
                 TabRemoval::Tab(path, ForcedRemoval(is_forced)) => {
+                    // Who takes the focus is the application's call when it wants it; asked
+                    // only for the tab that has it, since closing any other moves nothing.
+                    // The leaf is handed over as it stands now — the removal is next.
+                    let successor = {
+                        let leaf = self.dock_state.leaf(path.node_path()).unwrap();
+                        leaf.is_active(path.tab)
+                            .then(|| tab_viewer.successor_on_close(leaf, path.tab))
+                            .flatten()
+                    };
                     if is_forced {
-                        self.dock_state.remove_tab(path);
+                        self.dock_state.remove_tab_choosing(path, successor);
                         self.events.push(DockEvent::LayoutCommitted);
                     } else {
                         let leaf = &mut self.dock_state.leaf_mut(path.node_path()).unwrap();
                         match tab_viewer.on_close(&mut leaf[path.tab]) {
                             OnCloseResponse::Close => {
-                                self.dock_state.remove_tab(path);
+                                self.dock_state.remove_tab_choosing(path, successor);
                                 self.events.push(DockEvent::LayoutCommitted);
                             }
                             OnCloseResponse::Focus => {

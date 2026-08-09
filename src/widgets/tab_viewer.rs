@@ -1,6 +1,6 @@
 use egui::{Id, Ui, WidgetText};
 
-use crate::{NodePath, TabStyle};
+use crate::{LeafNode, NodePath, TabId, TabIndex, TabStyle};
 
 /// Defines how a tab should behave and be rendered inside a [`Tree`](crate::Tree).
 pub trait TabViewer {
@@ -41,6 +41,32 @@ pub trait TabViewer {
     /// By default, `true` is always returned.
     fn is_closeable(&self, _tab: &Self::Tab) -> bool {
         true
+    }
+
+    /// Which tab should take the focus when the **active** tab at `_closing` is closed.
+    ///
+    /// Return `None` — the default — to let the dock decide, which means its focus history:
+    /// the tab you came from, then the one before that, and the left neighbour only once that
+    /// runs out. Override this when the application knows better than a history can: a tab
+    /// that owns the one being closed, a pinned tab that should always be landed on, an order
+    /// that is the application's own rather than the order of visits.
+    ///
+    /// Called only when the closed tab is the active one; closing a tab nobody is looking at
+    /// does not move the focus. `_leaf` is the leaf as it stands **before** the removal, so
+    /// [`LeafNode::history_ids`] is available to consult (or to ignore) and `_leaf[_closing]`
+    /// is the tab on its way out.
+    ///
+    /// # Panics
+    ///
+    /// The returned identity has to be a tab of `_leaf` other than the one being closed. A
+    /// successor that will not be there when the removal is done is not an answer, and the
+    /// dock says so rather than quietly falling back.
+    fn successor_on_close(
+        &mut self,
+        _leaf: &LeafNode<Self::Tab>,
+        _closing: TabIndex,
+    ) -> Option<TabId> {
+        None
     }
 
     /// Returns `true` if the user of your app should be able to close a given `_tab`.

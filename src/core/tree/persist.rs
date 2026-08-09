@@ -50,7 +50,13 @@ enum NodeOut<'a, Tab> {
     Leaf {
         tabs: Vec<&'a Tab>,
         active: TabIndex,
-        prev_active: Option<TabIndex>,
+        /// The focus history, oldest first. A **new name for a new type**: what used to be
+        /// written here was `prev_active: Option<TabIndex>`, one slot, and a field whose type
+        /// changes cannot keep its name — `serde(default)` covers a field being *added*, not a
+        /// field that now parses differently. Files written before this carry `prev_active`
+        /// and are still read (see `NodeIn`); files written now carry only `history`, so an
+        /// older build reading one loses the history rather than misreading it.
+        history: Vec<TabIndex>,
         scroll: f32,
         collapsed: bool,
     },
@@ -75,7 +81,13 @@ fn node_out<Tab>(tree: &Tree<Tab>, id: NodeId) -> NodeOut<'_, Tab> {
             // An empty leaf has no active tab at all; the old format could not say that,
             // so it gets the position it always had there.
             active: leaf.active_index().unwrap_or(TabIndex(0)),
-            prev_active: leaf.prev_active_index(),
+            history: leaf
+                .history_ids()
+                .filter_map(|id| leaf.index_of(id))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect(),
             scroll: leaf.scroll,
             collapsed: leaf.collapsed,
         },
@@ -162,14 +174,32 @@ fn none<T>() -> Option<T> {
     None
 }
 
+/// The focus history a stored leaf describes, whichever way it says it.
+///
+/// A file written by this build carries `history`; one written before the history became a
+/// stack carries `prev_active`, which is the same thing one entry deep. Both are read, and
+/// `history` wins when a file somehow carries both — it is the field this build writes, so it
+/// is the one that was up to date.
+fn stored_history(history: Vec<TabIndex>, prev_active: Option<TabIndex>) -> Vec<TabIndex> {
+    if history.is_empty() {
+        prev_active.into_iter().collect()
+    } else {
+        history
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(bound(deserialize = "Tab: Deserialize<'de>"))]
 enum NodeIn<Tab> {
     Leaf {
         tabs: Vec<Tab>,
         active: TabIndex,
+        /// Written by builds before the history became a stack. Read as a one-entry history
+        /// when `history` is absent, which is what it always meant.
         #[serde(default = "none")]
         prev_active: Option<TabIndex>,
+        #[serde(default)]
+        history: Vec<TabIndex>,
         #[serde(default)]
         scroll: f32,
         #[serde(default)]
@@ -278,13 +308,20 @@ impl<Tab> Tree<Tab> {
                 tabs,
                 active,
                 prev_active,
+                history,
                 scroll,
                 collapsed,
             } => {
                 if tabs.is_empty() {
                     return None;
                 }
-                Some(self.build_leaf(tabs, active, prev_active, scroll, collapsed))
+                Some(self.build_leaf(
+                    tabs,
+                    active,
+                    stored_history(history, prev_active),
+                    scroll,
+                    collapsed,
+                ))
             }
             NodeIn::Vertical { fraction, children } | NodeIn::Horizontal { fraction, children } => {
                 let [left, right] = children;
@@ -306,11 +343,11 @@ impl<Tab> Tree<Tab> {
         &mut self,
         tabs: Vec<Tab>,
         active: TabIndex,
-        prev_active: Option<TabIndex>,
+        history: Vec<TabIndex>,
         scroll: f32,
         collapsed: bool,
     ) -> NodeId {
-        let leaf = LeafNode::from_persisted(tabs, active, prev_active, scroll, collapsed);
+        let leaf = LeafNode::from_persisted(tabs, active, history, scroll, collapsed);
         self.adopt(Node::Leaf(leaf))
     }
 
@@ -346,7 +383,13 @@ impl<Tab> Tree<Tab> {
                 if tabs.is_empty() {
                     return None;
                 }
-                self.build_leaf(tabs, active, prev_active, scroll, collapsed)
+                self.build_leaf(
+                    tabs,
+                    active,
+                    stored_history(Vec::new(), prev_active),
+                    scroll,
+                    collapsed,
+                )
             }
             LegacyNode::Vertical(split) | LegacyNode::Horizontal(split) => {
                 let vertical = vertical_split;
@@ -639,6 +682,89 @@ mod tests {
             .filter_map(|id| back[id].get_split().map(|split| split.fraction))
             .collect();
         assert_eq!(fractions, vec![0.25, 0.75]);
+    }
+
+    /// The focus history is state, so it has to survive a save. It is written as positions
+    /// and rebuilt as identities, which is the translation this asserts.
+    #[test]
+    fn round_trip_preserves_the_focus_history() {
+        let mut tree = Tree::new(vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        let root = tree.root().unwrap();
+        tree.set_active_tab(root, TabIndex(1)).unwrap(); // history [a]
+        tree.set_active_tab(root, TabIndex(2)).unwrap(); // history [a, b]
+
+        let json = serde_json::to_string(&tree).unwrap();
+        let back: Tree<String> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.validate(), Ok(()));
+
+        let leaf = back.leaf(back.root().unwrap()).unwrap();
+        assert_eq!(leaf.active_index(), Some(TabIndex(2)));
+        assert_eq!(
+            leaf.history_ids()
+                .filter_map(|id| leaf.index_of(id))
+                .collect::<Vec<_>>(),
+            vec![TabIndex(1), TabIndex(0)],
+            "the whole stack, most recent first"
+        );
+    }
+
+    /// A file written before the history became a stack says `prev_active`, one slot deep.
+    /// It is still read — as the one-entry history it always meant.
+    #[test]
+    fn reads_a_stored_prev_active_as_a_one_entry_history() {
+        let stored = r#"{
+            "root": { "Leaf": {
+                "tabs": ["a", "b", "c"],
+                "active": 2,
+                "prev_active": 0,
+                "scroll": 0.0,
+                "collapsed": false
+            } },
+            "focused": null
+        }"#;
+        let tree: Tree<String> = serde_json::from_str(stored).unwrap();
+        assert_eq!(tree.validate(), Ok(()));
+
+        let leaf = tree.leaf(tree.root().unwrap()).unwrap();
+        assert_eq!(leaf.active_index(), Some(TabIndex(2)));
+        assert_eq!(
+            leaf.history_ids()
+                .filter_map(|id| leaf.index_of(id))
+                .collect::<Vec<_>>(),
+            vec![TabIndex(0)]
+        );
+    }
+
+    /// A stored history is the one input to the leaf nobody here is responsible for, so it is
+    /// repaired rather than trusted: positions that are not there, the active tab, and
+    /// repeats all drop out.
+    #[test]
+    fn a_stored_history_is_repaired_rather_than_trusted() {
+        let stored = r#"{
+            "root": { "Leaf": {
+                "tabs": ["a", "b", "c"],
+                "active": 2,
+                "history": [0, 9, 2, 0, 1],
+                "scroll": 0.0,
+                "collapsed": false
+            } },
+            "focused": null
+        }"#;
+        let tree: Tree<String> = serde_json::from_str(stored).unwrap();
+        assert_eq!(
+            tree.validate(),
+            Ok(()),
+            "a repaired leaf has to satisfy the invariants it was loaded into"
+        );
+
+        let leaf = tree.leaf(tree.root().unwrap()).unwrap();
+        assert_eq!(
+            leaf.history_ids()
+                .filter_map(|id| leaf.index_of(id))
+                .collect::<Vec<_>>(),
+            vec![TabIndex(1), TabIndex(0)],
+            "9 is not a position, 2 is the active tab, and the second 0 is a repeat"
+        );
     }
 
     /// The gate that matters for users: layouts written before the arena still load.

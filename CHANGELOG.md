@@ -4,6 +4,22 @@
 
 ### Changed
 
+- **A leaf's focus history is a stack, and the application can overrule it.** Closing the
+  active tab walks back through the tabs that were open before it — the tab you came from,
+  then the one before that — instead of consulting a single remembered slot that survived
+  only one close. `TabViewer::successor_on_close` lets an application name the successor
+  itself; returning `None` (the default) keeps the history. `LeafNode::history_ids` reads the
+  stack, `remove_tab_choosing` (also on `Tree` and `DockState`) removes with a successor, and
+  `prev_active_id` / `prev_active_index` still answer with the top of the history.
+
+  On disk a leaf now writes `history: Vec<TabIndex>` instead of `prev_active: Option<TabIndex>`
+  — a new name for a new type. Files written by earlier versions are read unchanged (their
+  `prev_active` becomes a one-entry history); an older build reading a new file loses the
+  history rather than misreading it.
+
+  `TreeViolation::PrevActiveInvalid` is now `TreeViolation::FocusHistoryInvalid`, which names
+  the offending entry and what is wrong with it (`HistoryProblem`).
+
 - **`tab_widget_id` takes a `TabId` instead of a `TabIndex`.** The id a tab is drawn under
   is what egui hangs focus, hover and drags off, and one built from a position is inherited
   by the next tab to occupy that slot. Callers addressing a tab from outside a frame resolve
@@ -13,7 +29,7 @@
   nodes in a generational arena: `NodeId` replaces `NodeIndex` (and its `root()` /
   `left()` / `right()` arithmetic — ask the tree instead: `Tree::root`,
   `Tree::children`, `Tree::parent`, `Tree::breadth_first`), and `Node::Empty` is gone.
-  Inside a leaf, `TabId` identifies a tab and `active` / `prev_active` hold identities;
+  Inside a leaf, `TabId` identifies a tab and `active` / the focus history hold identities;
   `TabIndex` remains for positions, which is what the persisted format and the tab bar
   actually mean. `LeafNode`'s fields are behind accessors so those invariants have one
   place to live.

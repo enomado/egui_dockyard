@@ -32,6 +32,21 @@ use std::collections::HashSet;
 use crate::core::SurfaceIndex;
 use crate::core::tree::{Node, NodeId, TabIndex, Tree};
 
+/// What is wrong with one entry of a leaf's focus history.
+///
+/// Carried by [`TreeViolation::FocusHistoryInvalid`], because "the history is broken" is three
+/// different faults with three different causes, and a report that does not say which one sends
+/// the reader back to the data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoryProblem {
+    /// The entry names a tab this leaf does not hold.
+    NotInTheLeaf,
+    /// The entry names the tab that is active, which is not somewhere to return *to*.
+    IsActive,
+    /// The entry appears earlier in the history as well.
+    Repeated,
+}
+
 /// A single way in which a [`Tree`] fails to be well-formed.
 ///
 /// Reported by [`Tree::validate`]. Each variant carries enough context to point at the offending
@@ -107,15 +122,19 @@ pub enum TreeViolation {
         tabs: usize,
     },
 
-    /// `prev_active` names a tab that is not in the leaf, or the active one.
+    /// An entry of the focus history names a tab that is not in the leaf, or the active one,
+    /// or repeats an entry already in it.
     ///
-    /// Both cases break the documented invariant: falling back to it after removing the
-    /// active tab would then either do nothing or return to the tab just removed.
-    PrevActiveInvalid {
+    /// All three break the documented invariant, and each makes the fallback after removing
+    /// the active tab do something other than what the history says: land on a tab that is
+    /// gone, stay where it is, or hand out the same answer twice.
+    FocusHistoryInvalid {
         /// The leaf node.
         node: NodeId,
-        /// Where the remembered tab sits, if it is present at all.
-        prev_active: Option<TabIndex>,
+        /// Where the offending entry sits, if it is present at all.
+        entry: Option<TabIndex>,
+        /// What is wrong with it.
+        problem: HistoryProblem,
         /// Where the active tab sits, for context.
         active: Option<TabIndex>,
     },
@@ -305,12 +324,24 @@ impl<Tab> Tree<Tab> {
                         });
                     }
 
-                    if let Some(prev_active) = leaf.prev_active_id() {
-                        let index = leaf.index_of(prev_active);
-                        if index.is_none() || index == leaf.active_index() {
-                            violations.push(TreeViolation::PrevActiveInvalid {
+                    let mut seen = Vec::new();
+                    for entry in leaf.history_ids() {
+                        let index = leaf.index_of(entry);
+                        let problem = if index.is_none() {
+                            Some(HistoryProblem::NotInTheLeaf)
+                        } else if index == leaf.active_index() {
+                            Some(HistoryProblem::IsActive)
+                        } else if seen.contains(&entry) {
+                            Some(HistoryProblem::Repeated)
+                        } else {
+                            None
+                        };
+                        seen.push(entry);
+                        if let Some(problem) = problem {
+                            violations.push(TreeViolation::FocusHistoryInvalid {
                                 node: id,
-                                prev_active: index,
+                                entry: index,
+                                problem,
                                 active: leaf.active_index(),
                             });
                         }
@@ -377,7 +408,7 @@ impl<Tab> crate::core::DockState<Tab> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DockViolation, TreeViolation};
+    use super::{DockViolation, HistoryProblem, TreeViolation};
     use crate::core::tree::{Node, NodePath, Split, TabIndex, Tree};
     use crate::core::{DockState, SurfaceIndex};
 
@@ -563,19 +594,43 @@ mod tests {
     }
 
     #[test]
-    fn oracle_bites_on_prev_active_equal_to_active() {
+    fn oracle_bites_on_a_history_entry_that_is_the_active_tab() {
         let mut tree = Tree::new(vec![1, 2]);
         let root = tree.root().unwrap();
         tree.leaf_mut(root).unwrap().corrupt_prev_active_to_active();
 
         let violations = tree.validate().unwrap_err();
         assert!(
-            violations.contains(&TreeViolation::PrevActiveInvalid {
+            violations.contains(&TreeViolation::FocusHistoryInvalid {
                 node: root,
-                prev_active: Some(TabIndex(0)),
+                entry: Some(TabIndex(0)),
+                problem: HistoryProblem::IsActive,
                 active: Some(TabIndex(0)),
             }),
-            "expected a prev_active report, got {violations:?}"
+            "expected a focus-history report, got {violations:?}"
+        );
+    }
+
+    /// The other shape of a broken history, and the one only a stack can have: an entry that
+    /// is already in it. A duplicate makes the fallback hand out the same tab twice, so the
+    /// second close after it lands on a tab that is gone.
+    #[test]
+    fn oracle_bites_on_a_repeated_history_entry() {
+        let mut tree = Tree::new(vec![1, 2, 3]);
+        let root = tree.root().unwrap();
+        let leaf = tree.leaf_mut(root).unwrap();
+        leaf.activate_tab_remembering(TabIndex(1));
+        leaf.corrupt_history_with_a_duplicate();
+
+        let violations = tree.validate().unwrap_err();
+        assert!(
+            violations.contains(&TreeViolation::FocusHistoryInvalid {
+                node: root,
+                entry: Some(TabIndex(0)),
+                problem: HistoryProblem::Repeated,
+                active: Some(TabIndex(1)),
+            }),
+            "expected a repeated-entry report, got {violations:?}"
         );
     }
 

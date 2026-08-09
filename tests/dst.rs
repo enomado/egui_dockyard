@@ -578,8 +578,10 @@ struct LeafIdentity {
     /// whose identity was kept while its content moved.
     tabs: Vec<(egui_dock::TabId, String)>,
     active: Option<egui_dock::TabId>,
-    /// The focus history — the field that used to be quietly rewritten by a cancelled drag.
-    prev_active: Option<egui_dock::TabId>,
+    /// The focus history, most recent first — the state that used to be quietly rewritten by a
+    /// cancelled drag. The *whole* stack, not just its top: a step that disturbs an entry two
+    /// deep disturbs where a later close lands, and a snapshot of the top alone cannot see it.
+    history: Vec<egui_dock::TabId>,
 }
 
 /// Names for the coverage report, in the order of [`outcome_index`].
@@ -1300,7 +1302,7 @@ impl Sim {
                     LeafIdentity {
                         tabs,
                         active: leaf.active_id(),
-                        prev_active: leaf.prev_active_id(),
+                        history: leaf.history_ids().collect(),
                     },
                 )
             })

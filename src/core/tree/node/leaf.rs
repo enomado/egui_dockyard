@@ -34,7 +34,8 @@ struct TabEntry<Tab> {
 /// # Invariants (upheld by every method here, checked by [`Tree::validate`](crate::Tree::validate))
 ///
 /// * `active` is `Some` exactly when the leaf has tabs, and names a tab that is present.
-/// * `prev_active`, when `Some`, names a present tab that is not `active`.
+/// * every entry of `history` names a present tab, no entry repeats, and none of them is
+///   `active`.
 #[derive(Clone, Debug)]
 pub struct LeafNode<Tab> {
     /// All the tabs in this node, in display order.
@@ -48,8 +49,9 @@ pub struct LeafNode<Tab> {
     /// leaf (see [`Tree::new`](crate::core::tree::Tree::new)).
     active: Option<TabId>,
 
-    /// The tab that was active immediately *before* [`active`](Self::active_id), or `None`
-    /// if there is no such history (fresh leaf, or the previously active tab is gone).
+    /// Where the focus has been in this leaf, oldest first, **excluding** the tab that is
+    /// active now: the last entry is the tab we came from, the one before it the tab before
+    /// that, and so on.
     ///
     /// # Why this exists
     ///
@@ -57,13 +59,21 @@ pub struct LeafNode<Tab> {
     /// pick a new active tab. The naive choice — the left neighbour — is surprising: open
     /// a non-last tab, append a new one (which auto-focuses), then move that new tab
     /// elsewhere, and the leaf jumps to the neighbour instead of returning to the tab you
-    /// were actually looking at. `prev_active` records "where we came from" so removal of
-    /// the active tab falls back to it instead.
+    /// were actually looking at. The history records "where we came from" so removal of the
+    /// active tab falls back to it instead.
     ///
-    /// Both fields hold identities, so insertions and removals elsewhere in the leaf do
-    /// not touch them — before the arena refactor these were positions, and every mutating
-    /// method had to shift them by hand.
-    prev_active: Option<TabId>,
+    /// # Why a stack and not one slot
+    ///
+    /// One slot only survives one removal. Close two tabs in a row and the second close has
+    /// nothing left to consult, so it falls back to the positional rule — precisely in the
+    /// situation where the user has been moving around and *has* a history worth following.
+    /// The stack has no size to choose: entries do not repeat and every one names a live tab,
+    /// so it is bounded by the tab count on its own.
+    ///
+    /// It holds identities, so insertions and removals elsewhere in the leaf do not touch it
+    /// — before the arena refactor this was a position, and every mutating method had to
+    /// shift it by hand.
+    history: Vec<TabId>,
 
     /// Scroll amount of the tab bar.
     pub scroll: f32,
@@ -88,7 +98,7 @@ impl<Tab> LeafNode<Tab> {
             next_tab_id: tabs.len() as u32,
             tabs,
             active,
-            prev_active: None,
+            history: Vec::new(),
             scroll: 0.0,
             collapsed: false,
         }
@@ -96,9 +106,9 @@ impl<Tab> LeafNode<Tab> {
 
     /// Rebuilds a leaf from a persisted (positional) description.
     ///
-    /// `active` and `prev_active` are positions in `tabs`; anything out of range is
-    /// dropped rather than trusted, because a stored layout is the one input to this type
-    /// that no code path of ours is responsible for.
+    /// `active` and `history` are positions in `tabs`; anything out of range — or repeated,
+    /// or naming the active tab — is dropped rather than trusted, because a stored layout is
+    /// the one input to this type that no code path of ours is responsible for.
     ///
     /// Reading a stored layout is the only caller, so without `serde` this is dead code —
     /// and said so, as a warning, on every build of the default feature set.
@@ -106,7 +116,7 @@ impl<Tab> LeafNode<Tab> {
     pub(crate) fn from_persisted(
         tabs: Vec<Tab>,
         active: TabIndex,
-        prev_active: Option<TabIndex>,
+        history: Vec<TabIndex>,
         scroll: f32,
         collapsed: bool,
     ) -> Self {
@@ -114,9 +124,16 @@ impl<Tab> LeafNode<Tab> {
         leaf.scroll = scroll;
         leaf.collapsed = collapsed;
         leaf.active = leaf.tab_id_at(active).or(leaf.active);
-        leaf.prev_active = prev_active
-            .and_then(|index| leaf.tab_id_at(index))
-            .filter(|id| Some(*id) != leaf.active);
+        leaf.history = history
+            .into_iter()
+            .filter_map(|index| leaf.tab_id_at(index))
+            .filter(|id| Some(*id) != leaf.active)
+            .fold(Vec::new(), |mut kept, id| {
+                if !kept.contains(&id) {
+                    kept.push(id);
+                }
+                kept
+            });
         leaf
     }
 
@@ -206,16 +223,27 @@ impl<Tab> LeafNode<Tab> {
         self.active.and_then(|id| self.index_of(id))
     }
 
-    /// Identity of the previously active tab, if any is remembered.
+    /// Identity of the previously active tab — the top of the focus history — if any is
+    /// remembered.
     #[inline]
     pub fn prev_active_id(&self) -> Option<TabId> {
-        self.prev_active
+        self.history.last().copied()
     }
 
     /// Position of the previously active tab, if that history still exists.
     #[inline]
     pub fn prev_active_index(&self) -> Option<TabIndex> {
-        self.prev_active.and_then(|id| self.index_of(id))
+        self.prev_active_id().and_then(|id| self.index_of(id))
+    }
+
+    /// The whole focus history, most recent first: where removing the active tab falls back
+    /// to, in the order it will be consulted.
+    ///
+    /// Public because it is what an application needs to make its own decision in
+    /// [`TabViewer::successor_on_close`](crate::TabViewer::successor_on_close).
+    #[inline]
+    pub fn history_ids(&self) -> impl Iterator<Item = TabId> {
+        self.history.iter().rev().copied()
     }
 
     /// Test-only: drops every tab without touching `active`, leaving it naming a tab that
@@ -228,10 +256,20 @@ impl<Tab> LeafNode<Tab> {
         self.tabs.clear();
     }
 
-    /// Test-only: points the history at the active tab, which the invariant forbids.
+    /// Test-only: puts the active tab into the history, which the invariant forbids.
     #[cfg(test)]
     pub(crate) fn corrupt_prev_active_to_active(&mut self) {
-        self.prev_active = self.active;
+        if let Some(active) = self.active {
+            self.history.push(active);
+        }
+    }
+
+    /// Test-only: repeats the top of the history, which the invariant forbids.
+    #[cfg(test)]
+    pub(crate) fn corrupt_history_with_a_duplicate(&mut self) {
+        if let Some(last) = self.history.last().copied() {
+            self.history.push(last);
+        }
     }
 
     /// Whether the tab at `index` is the active one.
@@ -288,8 +326,20 @@ impl<Tab> LeafNode<Tab> {
     #[inline]
     fn activate(&mut self, id: TabId) {
         if self.active != Some(id) {
-            self.prev_active = self.active;
+            self.remember_outgoing();
+            // The newly active tab must not also sit in the history: an entry is a tab to
+            // *return* to, and you cannot return to where you are.
+            self.history.retain(|entry| *entry != id);
             self.active = Some(id);
+        }
+    }
+
+    /// Pushes whatever is active now onto the history, keeping it duplicate-free.
+    #[inline]
+    fn remember_outgoing(&mut self) {
+        if let Some(outgoing) = self.active {
+            self.history.retain(|entry| *entry != outgoing);
+            self.history.push(outgoing);
         }
     }
 
@@ -299,7 +349,7 @@ impl<Tab> LeafNode<Tab> {
         let id = self.alloc_id();
         // Whatever was active becomes the tab to return to if this one is removed again.
         // No index arithmetic: appending cannot move any existing tab.
-        self.prev_active = self.active;
+        self.remember_outgoing();
         self.tabs.push(TabEntry { id, tab });
         self.active = Some(id);
     }
@@ -314,7 +364,7 @@ impl<Tab> LeafNode<Tab> {
     pub fn insert_tab(&mut self, tab_index: impl Into<TabIndex>, tab: Tab) {
         let tab_index = tab_index.into();
         let id = self.alloc_id();
-        self.prev_active = self.active;
+        self.remember_outgoing();
         self.tabs.insert(tab_index.0, TabEntry { id, tab });
         self.active = Some(id);
     }
@@ -352,27 +402,58 @@ impl<Tab> LeafNode<Tab> {
 
     /// Removes the tab at `tab_index`, returning it, or `None` if there is no such tab.
     ///
-    /// If the removed tab was the active one, focus falls back to the previously active
-    /// tab, or — when there is no such history — to the left neighbour.
+    /// If the removed tab was the active one, focus walks back through the history — the tab
+    /// you came from, then the one before that — and falls back to the left neighbour only
+    /// when there is no history left.
     #[inline]
     pub fn remove_tab(&mut self, tab_index: impl Into<TabIndex>) -> Option<Tab> {
+        self.remove_tab_choosing(tab_index, None)
+    }
+
+    /// Removes the tab at `tab_index`, with `successor` naming who takes the focus.
+    ///
+    /// `successor` is only consulted when the removal takes the **active** tab — closing a
+    /// tab you are not looking at does not move the focus, and the value is ignored. `None`
+    /// means "decide as [`remove_tab`](Self::remove_tab) does", which is the history.
+    ///
+    /// # Panics
+    ///
+    /// If `successor` names the tab being removed, or a tab that is not in this leaf. It is
+    /// an answer to "who should take over", so a tab that will not be there cannot be one.
+    #[track_caller]
+    pub fn remove_tab_choosing(
+        &mut self,
+        tab_index: impl Into<TabIndex>,
+        successor: Option<TabId>,
+    ) -> Option<Tab> {
         let index = tab_index.into();
         if index.0 >= self.tabs.len() {
             return None;
         }
         let removed = self.tabs.remove(index.0);
+        // Whatever else happens, a removed tab is not somewhere to return to.
+        self.history.retain(|entry| *entry != removed.id);
 
         if self.active == Some(removed.id) {
-            // The history slot is consumed: the tab we came from becomes active, so there
-            // is no longer a meaningful "before that" to keep.
-            self.active = match self.prev_active.take() {
-                Some(prev) => Some(prev),
-                // Classic left-neighbour rule. This one *is* positional on purpose: "the
-                // tab next to the one that just went away" is a statement about order.
-                None => self.tab_id_at(TabIndex(index.0.saturating_sub(1))),
+            self.active = match successor {
+                Some(id) => {
+                    assert!(
+                        self.index_of(id).is_some(),
+                        "the successor of a closed tab has to be a tab of the same leaf, \
+                         and {id:?} is not in it"
+                    );
+                    // It is where the focus *is* now, so it is no longer where it came from.
+                    self.history.retain(|entry| *entry != id);
+                    Some(id)
+                }
+                // The top of the history is consumed: the tab we came from becomes active,
+                // so it stops being somewhere to return to.
+                None => self.history.pop().or_else(|| {
+                    // Classic left-neighbour rule. This one *is* positional on purpose: "the
+                    // tab next to the one that just went away" is a statement about order.
+                    self.tab_id_at(TabIndex(index.0.saturating_sub(1)))
+                }),
             };
-        } else if self.prev_active == Some(removed.id) {
-            self.prev_active = None;
         }
 
         Some(removed.tab)
@@ -391,20 +472,19 @@ impl<Tab> LeafNode<Tab> {
     }
 
     /// Restores the focus invariants after a bulk edit that may have dropped arbitrary
-    /// tabs: `active` must name a present tab (or be `None` for an empty leaf), and
-    /// `prev_active` must name a present tab other than `active`.
+    /// tabs: `active` must name a present tab (or be `None` for an empty leaf), and the
+    /// history must hold present tabs only, each once, none of them `active`.
     fn repair_focus(&mut self) {
-        let contains = |tabs: &Vec<TabEntry<Tab>>, id: TabId| tabs.iter().any(|e| e.id == id);
-        self.prev_active = self.prev_active.filter(|id| contains(&self.tabs, *id));
-        if !self.active.is_some_and(|id| contains(&self.tabs, id)) {
+        let present: Vec<TabId> = self.tabs.iter().map(|entry| entry.id).collect();
+        self.history.retain(|id| present.contains(id));
+        if !self.active.is_some_and(|id| present.contains(&id)) {
             self.active = self
-                .prev_active
-                .take()
+                .history
+                .pop()
                 .or_else(|| self.tabs.first().map(|entry| entry.id));
         }
-        if self.prev_active == self.active {
-            self.prev_active = None;
-        }
+        let active = self.active;
+        self.history.retain(|id| Some(*id) != active);
     }
 
     /// Returns a new leaf with the tab type mapped and filtered, or `None` if no tab
@@ -427,7 +507,7 @@ impl<Tab> LeafNode<Tab> {
             // Identities are preserved by the mapping, so focus carries over verbatim and
             // is repaired only where the filter actually dropped the tab it named.
             active: self.active,
-            prev_active: self.prev_active,
+            history: self.history.clone(),
             scroll: self.scroll,
             collapsed: self.collapsed,
         };
@@ -453,7 +533,7 @@ impl<Tab> ops::IndexMut<TabIndex> for LeafNode<Tab> {
 }
 
 #[cfg(test)]
-mod prev_active_tests {
+mod focus_history_tests {
     use super::LeafNode;
     use crate::core::tree::{TabIndex, Tree};
 
@@ -489,11 +569,9 @@ mod prev_active_tests {
         assert_eq!(tabs_of(&leaf), ['A', 'B', 'C', 'D']);
         // BEFORE the fix this was D (index 3); now it is C (index 2).
         assert_eq!(leaf.active_index(), Some(TabIndex(2)));
-        assert_eq!(
-            leaf.prev_active_index(),
-            None,
-            "history slot consumed on fallback"
-        );
+        // The top of the history is consumed by the fallback, and what was under it stays:
+        // A was active before C, so a further close of C returns there.
+        assert_eq!(leaf.prev_active_index(), Some(TabIndex(0)));
     }
 
     #[test]
@@ -561,16 +639,98 @@ mod prev_active_tests {
         assert_eq!(leaf.prev_active_index(), Some(TabIndex(0)));
     }
 
+    /// The history is a stack, so it survives more than one close. With a single slot the
+    /// second close below had nothing left to consult and fell back to the positional rule —
+    /// in the one situation where the user has actually been moving around.
+    ///
+    /// Every close here is arranged so the two rules **disagree**: the tab last left is not
+    /// the left neighbour of the one being closed. A scene where they coincide passes under
+    /// either rule and says nothing (the first draft of this test was one).
     #[test]
-    fn prev_active_tracks_only_one_level() {
+    fn the_history_survives_more_than_one_close() {
+        let mut leaf = LeafNode::new(vec!['A', 'B', 'C', 'D', 'E']);
+        leaf.set_active_tab(TabIndex(2)).unwrap(); // A -> C, history [A]
+        leaf.set_active_tab(TabIndex(4)).unwrap(); // C -> E, history [A, C]
+        assert_eq!(
+            leaf.history_ids()
+                .filter_map(|id| leaf.index_of(id))
+                .collect::<Vec<_>>(),
+            vec![TabIndex(2), TabIndex(0)],
+            "most recent first"
+        );
+
+        leaf.remove_tab(TabIndex(4)); // close E -> C, where D is the neighbour
+        assert_eq!(tabs_of(&leaf), ['A', 'B', 'C', 'D']);
+        assert_eq!(leaf.active_index(), Some(TabIndex(2)));
+
+        leaf.remove_tab(TabIndex(2)); // close C -> A, where B is the neighbour
+        assert_eq!(tabs_of(&leaf), ['A', 'B', 'D']);
+        assert_eq!(
+            leaf.active_index(),
+            Some(TabIndex(0)),
+            "one step deeper into the history, which a single slot could not reach"
+        );
+    }
+
+    /// Visiting a tab again moves it to the top rather than adding a second entry: the
+    /// history answers "where do I go back to", and an answer cannot be two places.
+    #[test]
+    fn revisiting_a_tab_moves_it_up_instead_of_repeating_it() {
         let mut leaf = LeafNode::new(vec!['A', 'B', 'C']);
-        leaf.set_active_tab(TabIndex(1)).unwrap(); // active B, prev A(0)
-        assert_eq!(leaf.prev_active_index(), Some(TabIndex(0)));
-        leaf.set_active_tab(TabIndex(2)).unwrap(); // active C, prev B(1)
-        assert_eq!(leaf.prev_active_index(), Some(TabIndex(1)));
-        // Removing active C returns to B, not A.
-        leaf.remove_tab(TabIndex(2));
-        assert_eq!(leaf.active_index(), Some(TabIndex(1)));
+        leaf.set_active_tab(TabIndex(1)).unwrap(); // history [A]
+        leaf.set_active_tab(TabIndex(0)).unwrap(); // history [B]
+        leaf.set_active_tab(TabIndex(2)).unwrap(); // history [B, A]
+        assert_eq!(
+            leaf.history_ids()
+                .filter_map(|id| leaf.index_of(id))
+                .collect::<Vec<_>>(),
+            vec![TabIndex(0), TabIndex(1)]
+        );
+
+        leaf.remove_tab(TabIndex(2)); // close C -> A, the tab most recently left
+        assert_eq!(leaf.active_index(), Some(TabIndex(0)));
+    }
+
+    /// The successor hook overrides the history, and only for the active tab.
+    #[test]
+    fn a_named_successor_wins_over_the_history() {
+        let mut leaf = LeafNode::new(vec!['A', 'B', 'C']);
+        leaf.set_active_tab(TabIndex(2)).unwrap(); // active C, history [A]
+        let b = leaf.tab_id_at(TabIndex(1)).unwrap();
+
+        leaf.remove_tab_choosing(TabIndex(2), Some(b));
+        assert_eq!(
+            leaf.active_index(),
+            Some(TabIndex(1)),
+            "B, not the history's A"
+        );
+        assert_eq!(
+            leaf.prev_active_index(),
+            Some(TabIndex(0)),
+            "A stays in the history: focus went elsewhere, it was not visited"
+        );
+    }
+
+    #[test]
+    fn a_named_successor_is_ignored_when_the_closed_tab_was_not_active() {
+        let mut leaf = LeafNode::new(vec!['A', 'B', 'C']);
+        leaf.set_active_tab(TabIndex(2)).unwrap(); // active C
+        let a = leaf.tab_id_at(TabIndex(0)).unwrap();
+
+        // Closing B, which nobody is looking at, must not move the focus anywhere.
+        leaf.remove_tab_choosing(TabIndex(1), Some(a));
+        assert_eq!(tabs_of(&leaf), ['A', 'C']);
+        assert_eq!(leaf.active_index(), Some(TabIndex(1)), "still C");
+    }
+
+    #[test]
+    #[should_panic(expected = "has to be a tab of the same leaf")]
+    fn a_successor_that_is_being_closed_is_refused() {
+        let mut leaf = LeafNode::new(vec!['A', 'B']);
+        let b = leaf.tab_id_at(TabIndex(1)).unwrap();
+        leaf.set_active_tab(TabIndex(1)).unwrap();
+        // Naming the tab on its way out: it will not be there to take the focus.
+        leaf.remove_tab_choosing(TabIndex(1), Some(b));
     }
 
     #[test]

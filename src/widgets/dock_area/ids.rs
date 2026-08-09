@@ -30,9 +30,10 @@
 //! edits of its leaf, and an id whose tab is gone is an id nobody answers to — which is what
 //! stale egui state should be.
 
-use egui::Id;
+use egui::{Context, Id};
 
-use crate::{NodePath, TabId};
+use super::state::State;
+use crate::{DockState, NodePath, TabId, TabPath};
 
 /// Id of the widget one tab is drawn as, in the dock area with id `dock_area_id`.
 ///
@@ -60,6 +61,145 @@ pub fn tab_widget_id(dock_area_id: Id, path: NodePath, tab: TabId) -> Id {
         .with((path.surface, "surface"))
         .with((path.node, "node"))
         .with((tab, "tab"))
+}
+
+/// The tab a drag is currently carrying, or `None` if no drag is in flight.
+///
+/// Reads the same per-frame state the dock keeps in `Context` memory; `dock_area_id` is the
+/// `DockArea`'s id.
+///
+/// The dock addresses a drag's source by identity ([`TabId`]), not by position, and this
+/// resolves that identity against `dock_state` as it stands *now* — so a drag whose tab left
+/// the tree (closed by the user, force-closed by the application) answers `None`, exactly as
+/// "no drag" does. That merge is deliberate: a caller cannot tell a stale drag from no drag,
+/// which is also the one distinction the dock itself is not allowed to act differently on.
+///
+/// ```rust
+/// # use egui::{
+/// #     CentralPanel, Context, Event, Id, PointerButton, Pos2, RawInput, Rect, Ui, Vec2,
+/// #     WidgetText,
+/// # };
+/// # use egui_dock::{
+/// #     DockArea, DockState, NodePath, Style, SurfaceIndex, TabIndex, TabPath, TabViewer,
+/// #     dragged_tab, tab_widget_id,
+/// # };
+/// #
+/// # struct Viewer;
+/// # impl TabViewer for Viewer {
+/// #     type Tab = String;
+/// #     fn title(&mut self, tab: &mut String) -> WidgetText {
+/// #         tab.as_str().into()
+/// #     }
+/// #     fn ui(&mut self, ui: &mut Ui, tab: &mut String) {
+/// #         ui.label(tab.as_str());
+/// #     }
+/// # }
+/// #
+/// # fn run(
+/// #     ctx: &Context,
+/// #     dock_id: Id,
+/// #     state: &mut DockState<String>,
+/// #     events: Vec<Event>,
+/// #     frame: &mut u32,
+/// # ) {
+/// #     let input = RawInput {
+/// #         screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0))),
+/// #         time: Some(f64::from(*frame) / 60.0),
+/// #         events,
+/// #         ..Default::default()
+/// #     };
+/// #     *frame += 1;
+/// #     let mut output = ctx.run_ui(input, |ctx| {
+/// #         CentralPanel::default().show(ctx, |ui| {
+/// #             DockArea::new(state)
+/// #                 .id(dock_id)
+/// #                 .style(Style::from_egui(ui.style().as_ref()))
+/// #                 .show_close_buttons(true)
+/// #                 .show_inside(ui, &mut Viewer);
+/// #         });
+/// #     });
+/// #     output.textures_delta.clear();
+/// # }
+/// #
+/// # let dock_id = Id::new("doctest dock");
+/// # let mut dock_state = DockState::new(vec!["a".to_owned(), "b".to_owned()]);
+/// # let ctx = Context::default();
+/// # let mut frame = 0u32;
+/// # run(&ctx, dock_id, &mut dock_state, vec![], &mut frame);
+/// # let leaf = NodePath::new(SurfaceIndex::main(), dock_state.main_surface().root().unwrap());
+/// # let tab = dock_state.leaf(leaf).unwrap().tab_id_at(TabIndex(0)).unwrap();
+/// # let rect = ctx.read_response(tab_widget_id(dock_id, leaf, tab)).unwrap().rect;
+/// # // The centre of a short label sits on its close button, which answers a click before
+/// # // the title does — aim at the title instead, same as `dst.rs` does.
+/// # let home = Pos2::new(rect.left() + 4.0, rect.center().y);
+/// # run(&ctx, dock_id, &mut dock_state, vec![Event::PointerMoved(home)], &mut frame);
+/// # run(
+/// #     &ctx,
+/// #     dock_id,
+/// #     &mut dock_state,
+/// #     vec![Event::PointerButton {
+/// #         pos: home,
+/// #         button: PointerButton::Primary,
+/// #         pressed: true,
+/// #         modifiers: Default::default(),
+/// #     }],
+/// #     &mut frame,
+/// # );
+/// # let out = home + Vec2::new(0.0, 200.0);
+/// # for step in 1..=8u8 {
+/// #     let p = home + (out - home) * (f32::from(step) / 8.0);
+/// #     run(&ctx, dock_id, &mut dock_state, vec![Event::PointerMoved(p)], &mut frame);
+/// # }
+/// # for step in (0..8u8).rev() {
+/// #     let p = home + (out - home) * (f32::from(step) / 8.0);
+/// #     run(&ctx, dock_id, &mut dock_state, vec![Event::PointerMoved(p)], &mut frame);
+/// # }
+///
+/// // The hand is holding "a", pulled out of the bar and back, button still down.
+/// assert_eq!(
+///     dragged_tab(&ctx, dock_id, &dock_state),
+///     Some(TabPath::from((leaf, TabIndex(0))))
+/// );
+///
+/// # run(
+/// #     &ctx,
+/// #     dock_id,
+/// #     &mut dock_state,
+/// #     vec![Event::PointerButton {
+/// #         pos: home,
+/// #         button: PointerButton::Middle,
+/// #         pressed: true,
+/// #         modifiers: Default::default(),
+/// #     }],
+/// #     &mut frame,
+/// # );
+/// # run(
+/// #     &ctx,
+/// #     dock_id,
+/// #     &mut dock_state,
+/// #     vec![Event::PointerButton {
+/// #         pos: home,
+/// #         button: PointerButton::Middle,
+/// #         pressed: false,
+/// #         modifiers: Default::default(),
+/// #     }],
+/// #     &mut frame,
+/// # );
+/// # run(&ctx, dock_id, &mut dock_state, vec![], &mut frame);
+///
+/// // Middle-click closed it. The hand never let go, but there is nothing left to drag.
+/// assert!(dragged_tab(&ctx, dock_id, &dock_state).is_none());
+/// ```
+pub fn dragged_tab<Tab>(
+    ctx: &Context,
+    dock_area_id: Id,
+    dock_state: &DockState<Tab>,
+) -> Option<TabPath> {
+    State::load(ctx, dock_area_id)
+        .dnd?
+        .drag
+        .src
+        .resolve(dock_state)
 }
 
 #[cfg(test)]

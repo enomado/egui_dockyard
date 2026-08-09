@@ -39,7 +39,7 @@ use egui::{
 use egui_dock::shape::subtree_shape;
 use egui_dock::{
     DockArea, DockLayout, DockState, Node, NodeId, NodePath, Split, Style, SurfaceIndex, TabIndex,
-    TabViewer, Tree, tab_widget_id,
+    TabPath, TabViewer, Tree, dragged_tab, tab_widget_id,
 };
 
 /// Screen the simulated dock starts on. Big enough that a few splits still leave leaves wider
@@ -2278,6 +2278,14 @@ fn run(steps: &[Step]) -> Run {
                 });
             }
 
+            if let Some(complaint) = drag_complaint(&sim) {
+                break 'scenario Some(Failure {
+                    step_index,
+                    step,
+                    reason: complaint,
+                });
+            }
+
             if let Some(complaint) = boundary_drift_complaint(
                 &before_boundaries,
                 &sim.boundaries(),
@@ -2352,6 +2360,56 @@ fn fraction_complaint(sim: &Sim) -> Option<String> {
                  children no room at all — a panel the user can neither see nor drag back"
             )
         })
+}
+
+/// A drag that exists is about a tab that exists — checked on both of its holders.
+///
+/// egui's ([`Context::dragged_id`]) is addressed by widget id, so it is checked directly
+/// against every live tab's [`tab_widget_id`]: an id that answers to none of them is a drag on
+/// a tab that is gone. The dock's own (`State::dnd`) is addressed by identity and only reachable
+/// through [`dragged_tab`], which already resolves a stale source to `None` — so what is left
+/// to check is that the two holders *agree*: both empty, or both naming the same tab. That is
+/// exactly the shape of the bug this harness could not see (see the module docs): a middle
+/// release ends egui's drag on the spot while the dock's own bookkeeping is left behind, or the
+/// other way around.
+///
+/// Currently unreachable through this file's alphabet alone — every [`Step::Drag`] is a
+/// complete gesture, so the button is always up by the time a step ends and both holders are
+/// always empty here. It is checked instead by mutation against
+/// `tests/a_closed_tab_ends_its_drag.rs`, and stands ready for Track B, which adds the steps
+/// that hold a drag open across a step boundary.
+fn drag_complaint(sim: &Sim) -> Option<String> {
+    let dock_id = Id::new(DOCK_ID);
+
+    let live_tab_for_widget = |id: Id| -> Option<TabPath> {
+        sim.state.iter_leaves().find_map(|(path, leaf)| {
+            (0..leaf.len())
+                .map(TabIndex)
+                .find(|&tab_index| {
+                    leaf.tab_id_at(tab_index)
+                        .is_some_and(|tab| tab_widget_id(dock_id, path, tab) == id)
+                })
+                .map(|tab_index| TabPath::from((path, tab_index)))
+        })
+    };
+
+    let egui_drag = sim.ctx.dragged_id();
+    let egui_tab = egui_drag.map(live_tab_for_widget);
+    if let Some(None) = egui_tab {
+        return Some(format!(
+            "egui is dragging widget {:?}, which is not the widget of any live tab",
+            egui_drag.unwrap()
+        ));
+    }
+    let egui_tab = egui_tab.flatten();
+
+    let dock_tab = dragged_tab(&sim.ctx, dock_id, &sim.state);
+    (egui_tab != dock_tab).then(|| {
+        format!(
+            "the two holders of a drag disagree: egui says {egui_tab:?}, the dock's own \
+             `State::dnd` resolves to {dock_tab:?}"
+        )
+    })
 }
 
 /// The text of a caught panic, for the report.

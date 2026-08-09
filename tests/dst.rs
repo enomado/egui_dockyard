@@ -29,6 +29,22 @@
 //!    and re-inserted at the same index, reads as "nothing happened". Not a hypothesis: this
 //!    property found the model rebuilding a tab from scratch when it was dragged along its own
 //!    bar, which every model-level test had passed over because the tab list read the same.
+//!
+//! # A step is not the whole gesture
+//!
+//! Every step used to be a *finished* gesture — press, move, release, all inside one `Step` —
+//! so between steps the button was always up and "a drag is in flight while something else
+//! happens" was not a rare corner of the state space but an unreachable one, for every seed and
+//! every run length. That assumption was nobody's decision; it fell out of how a step was
+//! convenient to write, and it is why the reported crash (closing a tab while it was being
+//! dragged) had to be found by a user.
+//!
+//! [`Step::Grab`] presses and does not let go. The hold survives the end of the step, and the
+//! steps that follow it run *into* a live drag: a tab closed through the frame layer
+//! ([`Step::CloseTab`]), a leaf closed through the model, a fresh split, a quiet frame — until
+//! [`Step::Release`] lets go. What the dock is carrying while all that happens is judged by
+//! [`drag_complaint`] after every step, and how often the interleaving was actually reached is
+//! counted in [`HoldWatch`] rather than assumed.
 
 use std::fmt::Write as _;
 
@@ -108,6 +124,28 @@ enum Step {
     Drag { from: usize, to: usize, aim: Aim },
     /// Click a tab, which focuses its leaf and makes the tab active.
     ClickTab { leaf: usize, tab: usize },
+    /// Pick a tab up and **keep holding it**: press, pull out of the tab row far enough that
+    /// egui calls it a drag, and come back — the button still down when the step ends.
+    ///
+    /// Out and back rather than out and stopping, because the tab has to be under the hand
+    /// afterwards for a [`Step::CloseTab`] to reach it, which is the gesture the reported bug
+    /// was found with.
+    Grab { leaf: usize, tab: usize },
+    /// Move the pointer onto a leaf without letting go. The step that gives a hold somewhere to
+    /// be — a [`Step::Release`] lets go over whatever the pointer is on.
+    MoveWhileHeld { to: usize },
+    /// Let go, aiming at what the drop should mean over the leaf the pointer is already on.
+    ///
+    /// A release with no live hold is a *skipped* step, like every other step that finds
+    /// nothing to act on. That is what keeps the shrinker honest: it drops steps one at a time,
+    /// and a trace whose `Grab` it dropped has to replay rather than panic in the harness.
+    Release { aim: Aim },
+    /// Close a tab **through the UI**: a middle click on its title.
+    ///
+    /// The route the reported bug needed and the one this harness had no word for — every close
+    /// here went straight to the model. It is worth its place with or without a hold: closing a
+    /// tab through the frame layer was untested either way.
+    CloseTab { leaf: usize, tab: usize },
     /// Split a leaf through the model, to grow a scene the gestures can then work on.
     Split { leaf: usize, split: usize },
     /// Close a leaf through the model.
@@ -142,6 +180,41 @@ enum Step {
     ToggleCrossSplit { cross: usize },
     /// Let a frame pass with no input at all.
     Idle,
+}
+
+impl Step {
+    /// Whether applying this step puts the primary button *down*.
+    ///
+    /// Such a step is refused while a hold is live, and that is a deliberate reading of "every
+    /// other step stays legal during a hold": a press while the button is already pressed is
+    /// not a press — no mouse can deliver one — so a step that sent it would be judging the
+    /// dock on input a hand cannot produce, under the name of a gesture it is not. The steps
+    /// that carry the interleaving worth having (a close through either route, a split, a
+    /// quiet frame) touch no button at all and run untouched.
+    fn needs_the_primary_button(self) -> bool {
+        matches!(
+            self,
+            Step::Drag { .. }
+                | Step::ClickTab { .. }
+                | Step::Grab { .. }
+                | Step::DragSeparator { .. }
+                | Step::GrabSeparator { .. }
+                | Step::CentreSeparator { .. }
+                | Step::ToggleCrossSplit { .. }
+        )
+    }
+
+    /// Whether this step is part of the hold itself rather than something interleaved into it.
+    ///
+    /// The distinction is only for the coverage counters, and it is what stops them from
+    /// reading healthy for free: "a step ran while a drag was live" is satisfied by a `Grab`
+    /// followed by a `Release` and says nothing whatsoever about the interleaving.
+    fn is_part_of_the_hold(self) -> bool {
+        matches!(
+            self,
+            Step::Grab { .. } | Step::MoveWhileHeld { .. } | Step::Release { .. }
+        )
+    }
 }
 
 /// One "+" the dock is offering a toggle on, as [`Sim::cross_toggles`] reads it off the screen.
@@ -319,10 +392,13 @@ enum Refused {
     /// The scene was still moving of its own accord, so nothing measured across the gesture
     /// would be about the gesture.
     Unsettled,
+    /// The hand is already holding the primary button down, and the step wanted to press it —
+    /// see [`Step::needs_the_primary_button`].
+    Held,
 }
 
 /// Width of the refusal counter.
-const REFUSALS: usize = 6;
+const REFUSALS: usize = 7;
 
 fn refused_index(refused: Refused) -> usize {
     match refused {
@@ -332,6 +408,7 @@ fn refused_index(refused: Refused) -> usize {
         Refused::Bar => 3,
         Refused::Elsewhere => 4,
         Refused::Unsettled => 5,
+        Refused::Held => 6,
     }
 }
 
@@ -343,6 +420,7 @@ const REFUSAL_NAMES: [&str; REFUSALS] = [
     "Bar",
     "Elsewhere",
     "Unsettled",
+    "Held",
 ];
 
 /// A dock area running frames without a window.
@@ -380,6 +458,74 @@ struct Sim {
     separator: SeparatorWatch,
     /// How much the cross-split toggle got to do — see [`CrossWatch`].
     cross: CrossWatch,
+    /// The gesture the hand has not finished, if there is one — see [`Hold`].
+    hold: Option<Hold>,
+    /// How much of the interleaving a hold makes possible was actually reached — see
+    /// [`HoldWatch`].
+    holds: HoldWatch,
+}
+
+/// A gesture in flight across step boundaries: the primary button went down in one step and
+/// has not come up.
+///
+/// Whether a hold is live is the harness's own knowledge and nothing else's — it is simply
+/// "no release event has been sent" — and that is exactly the asymmetry [`Step::CloseTab`]
+/// walks into: a *middle* release ends egui's drag on the spot while the primary button is
+/// still down, so "the hand is holding something" and "the dock is carrying a tab" are two
+/// different facts and this is only the first of them. The second is asked of the dock through
+/// [`dragged_tab`], never inferred from here.
+#[derive(Clone, Debug)]
+struct Hold {
+    /// Where the hand is. Every event this harness sends carries a position — egui reads the
+    /// pointer out of the event rather than keeping a cursor of its own — so a step that has to
+    /// put an event somewhere else moves there first, the way a hand would, and leaves the
+    /// hand where it left it.
+    at: Pos2,
+    /// The tab that was picked up, by identity and by the leaf it came out of.
+    ///
+    /// An identity rather than a position, for the same reason the crate's own `DragSource` is
+    /// one: every removal under the hold renumbers the bar, and a position would name the
+    /// neighbour by the time it is read.
+    tab: (NodePath, egui_dock::TabId),
+    /// The whole dock as it stood when the hand closed, so a release can say whether it landed
+    /// into a scene that had moved underneath it — see [`HoldWatch::landings_after_a_change`].
+    scene: String,
+}
+
+/// Coverage of the interleaving, counted while the run happens.
+///
+/// Every one of these can be zero in a green sweep, and a zero means the state the whole track
+/// exists to reach was never reached. They are counted in terms of what the **dock** was
+/// carrying (`dragged_tab`), not of what the harness was holding: a hold whose drag egui never
+/// started, or one whose drag has already been cancelled, is a hold with nothing in flight, and
+/// a counter fed by those would report full coverage of a situation that never happened.
+#[derive(Clone, Copy, Default, Debug)]
+struct HoldWatch {
+    /// Grabs that left the button down.
+    grabs: usize,
+    /// ...of which the dock answered with a drag of that tab afterwards.
+    live: usize,
+    /// Releases that fired.
+    releases: usize,
+    /// Steps that were *not* part of the hold and ran while the dock was carrying a tab. The
+    /// number this whole track is about: without it the alphabet has gained three words and
+    /// reached nothing.
+    steps: usize,
+    /// ...of which closed something — the reported bug's shape.
+    closes: usize,
+    /// Steps that took the carried tab out of the tree from under the drag, whichever route
+    /// (a middle click on it, a leaf closed through the model). This is the state the cancel
+    /// chokepoint in `show_inside_with_response` exists for, and the one the sweep could not
+    /// previously reach at all.
+    source_died: usize,
+    /// Tabs closed through the frame layer — a middle click that actually removed one, hold or
+    /// no hold. Counted apart from the step because a click that lands on nothing is not a
+    /// close, and a route that quietly stopped working would otherwise look exercised.
+    ui_closes: usize,
+    /// Releases that landed a tab after the scene had changed under the hold. A drop into the
+    /// scene the gesture started in is the easy half; this is the one where the destination the
+    /// hand aimed at was decided after the dock had already been edited.
+    landings_after_a_change: usize,
 }
 
 /// Coverage of the separator gestures, counted while the run happens.
@@ -615,6 +761,8 @@ impl Sim {
             commits: 0,
             separator: SeparatorWatch::default(),
             cross: CrossWatch::default(),
+            hold: None,
+            holds: HoldWatch::default(),
         };
         // One frame before anything else: gestures aim with geometry, and geometry does not
         // exist until a pass has run.
@@ -1407,8 +1555,141 @@ impl Sim {
         self.run_frame(vec![]);
     }
 
+    /// A middle click: press and release, in two frames, exactly as a mouse delivers it.
+    ///
+    /// The frame after it is not decoration — removals are applied at the *end* of the pass
+    /// that follows the click, so a caller that looked at the dock without it would be reading
+    /// the state before the close.
+    fn middle_click(&mut self, at: Pos2) {
+        self.run_frame(vec![Event::PointerMoved(at)]);
+        self.run_frame(vec![Event::PointerButton {
+            pos: at,
+            button: PointerButton::Middle,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        }]);
+        self.run_frame(vec![Event::PointerButton {
+            pos: at,
+            button: PointerButton::Middle,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }]);
+        self.run_frame(vec![]);
+    }
+
+    /// Presses the primary button at `at`, pulls the pointer out and brings it back, and leaves
+    /// the button **down**.
+    ///
+    /// The travel is what makes it a drag rather than a click — egui only calls a press a drag
+    /// once the pointer has moved past a threshold — and the return is what leaves the tab under
+    /// the hand, so that a middle click during the hold can reach the very tab being carried.
+    /// The far point is clamped to the screen: a pointer off-screen has no hover position at
+    /// all, and this harness would be measuring a drag the dock cannot see.
+    fn press_and_hold(&mut self, at: Pos2) {
+        self.run_frame(vec![Event::PointerMoved(at)]);
+        self.run_frame(vec![Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        }]);
+        let out = Pos2::new(at.x, (at.y + 200.0).min(self.screen.y - 1.0));
+        for step in 1..=4u8 {
+            let t = f32::from(step) / 4.0;
+            self.run_frame(vec![Event::PointerMoved(at + (out - at) * t)]);
+        }
+        for step in (0..4u8).rev() {
+            let t = f32::from(step) / 4.0;
+            self.run_frame(vec![Event::PointerMoved(at + (out - at) * t)]);
+        }
+    }
+
+    /// Moves a held pointer from `from` to `to` and rests there, button still down.
+    ///
+    /// The rest is the preference lock's, and it is why this is a step of its own rather than
+    /// part of the release: the overlay keeps a preference for the leaf the pointer arrived on
+    /// and refuses later ones until it lapses, so a pointer that merely passed through a leaf
+    /// has not arrived at it. Resting the same number of frames [`Sim::drag`] does means "the
+    /// pointer is over that leaf" is true of the dock and not only of this harness.
+    fn move_while_held(&mut self, from: Pos2, to: Pos2) {
+        for step in 1..=4u8 {
+            let t = f32::from(step) / 4.0;
+            self.run_frame(vec![Event::PointerMoved(from + (to - from) * t)]);
+        }
+        for _ in 0..self.frames_for(self.style.overlay.feel.max_preference_time) {
+            self.run_frame(vec![Event::PointerMoved(to)]);
+        }
+    }
+
+    /// Carries a held pointer to `to` and lets go there.
+    ///
+    /// The second half of [`Sim::drag`], word for word — the same travel, the same rest for the
+    /// preference lock, the same quiet frame afterwards for the removals and detachments that
+    /// are applied at the end of the pass following the drop.
+    fn release_at(&mut self, from: Pos2, to: Pos2) {
+        self.move_while_held(from, to);
+        self.run_frame(vec![Event::PointerButton {
+            pos: to,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }]);
+        self.run_frame(vec![Event::PointerMoved(to)]);
+    }
+
+    /// The tab the **dock** believes it is carrying, if any.
+    ///
+    /// Distinct from [`Sim::hold`] in both directions, which is the whole point: the hand can be
+    /// holding a button with nothing in flight (the carried tab was closed, and the drag went
+    /// with it), and the answer here is resolved against the tree as it stands now rather than
+    /// against the scene the gesture started in.
+    fn dragged_tab(&self) -> Option<TabPath> {
+        dragged_tab(&self.ctx, Id::new(DOCK_ID), &self.state)
+    }
+
+    /// Whether the tab the hand picked up has left the tree.
+    ///
+    /// Asked of the **tree**, by the identity recorded when the hold started, and not of the
+    /// drag: the dock dropping its own drag state is the *reaction* this is the trigger for,
+    /// and a counter that read the reaction would count a dock that quietly forgot a live drag
+    /// as coverage of the cancel it never performed.
+    fn held_tab_is_gone(&self) -> bool {
+        let Some((leaf, id)) = self.hold.as_ref().map(|hold| hold.tab) else {
+            return false;
+        };
+        match self.state.leaf(leaf) {
+            Ok(leaf) => leaf.index_of(id).is_none(),
+            // The leaf itself is gone, and the tab with it.
+            Err(_) => true,
+        }
+    }
+
+    /// Which leaf claims `point`, or why no reading of it names one.
+    ///
+    /// Thinner than [`Sim::aim`] on purpose: a release aims *inside* the leaf the hand is
+    /// already over, so the leaf comes first and the meaning second.
+    fn leaf_under(&self, point: Pos2) -> Result<NodePath, Refused> {
+        match self.interpret(point) {
+            Landing::On(leaf, _) | Landing::Bar(leaf) | Landing::Unreadable(leaf) => Ok(leaf),
+            Landing::Contested => Err(Refused::Contested),
+            Landing::Nowhere => Err(Refused::Elsewhere),
+        }
+    }
+
     /// Applies one step. Returns `None` if the scene had nothing for it to act on.
     fn apply(&mut self, step: Step) -> Option<Effect> {
+        // The one thing the applier needs a mode for. A step that would press a button already
+        // pressed is refused (see [`Step::needs_the_primary_button`]); everything else runs
+        // exactly as it does with the hand open, which is the point of the hold.
+        if self.hold.is_some() && step.needs_the_primary_button() {
+            self.refused[refused_index(Refused::Held)] += 1;
+            return None;
+        }
+        // What the dock was carrying when this step began, read before anything moves: the
+        // counters below are about the interleaving, and a step that *ends* a drag would
+        // otherwise be indistinguishable from one that ran alongside it.
+        let carried = self.dragged_tab();
+
         let leaves = self.live_leaves();
         if leaves.is_empty() {
             // An empty dock can only be rebuilt through the model.
@@ -1475,6 +1756,170 @@ impl Sim {
                     return None;
                 }
                 self.click(self.tab_rect(target, tab % tabs)?.center());
+                vec![target]
+            }
+
+            Step::Grab { leaf, tab } => {
+                let target = leaves[leaf % leaves.len()];
+                let tabs = self.state[target].tabs_count();
+                if tabs == 0 {
+                    return None;
+                }
+                let index = tab % tabs;
+                // Resolved to an identity *before* the frames this step drives, and kept as one
+                // for the rest of the hold: everything that runs under a hold can renumber the
+                // bar, and a position read afterwards would name whoever slid into the slot.
+                let id = self
+                    .state
+                    .leaf(target)
+                    .unwrap()
+                    .tab_id_at(TabIndex(index))
+                    .expect("the caller asked about a tab this leaf has");
+                let home = self.tab_rect(target, index)?.center();
+                self.press_and_hold(home);
+
+                // Did the hand actually pick *that tab* up? A tab in a floating window can be
+                // under the window's own move handle while the window is still settling, and
+                // then this press is dragging the window — a real egui drag, on a widget this
+                // vocabulary has no word for, left in flight across the step boundary. Found
+                // by the sweep on its first run: `drag_complaint` reported "egui is dragging
+                // widget `window SurfaceIndex(1)`.with(\"move\")", which is exactly true and
+                // says nothing about the dock.
+                //
+                // So the gesture is undone rather than recorded: the pointer is back where it
+                // pressed, so the release below moves whatever it did grab by nothing at all,
+                // and the step is refused like any other aim that turned out to mean something
+                // else. It is also what keeps `drag_complaint` able to say what it says — with
+                // holds only ever on tabs, an egui drag at the end of a step is a tab's drag.
+                if self.ctx.dragged_id() != Some(tab_widget_id(Id::new(DOCK_ID), target, id)) {
+                    self.run_frame(vec![Event::PointerButton {
+                        pos: home,
+                        button: PointerButton::Primary,
+                        pressed: false,
+                        modifiers: Modifiers::NONE,
+                    }]);
+                    self.run_frame(vec![]);
+                    self.refused[refused_index(Refused::Elsewhere)] += 1;
+                    return None;
+                }
+
+                self.holds.grabs += 1;
+                self.hold = Some(Hold {
+                    at: home,
+                    tab: (target, id),
+                    scene: self.trace(),
+                });
+                // Whether the *dock* took it up is a separate fact and is asked rather than
+                // assumed: a press that travelled but was never called a drag leaves a hold
+                // with nothing in flight, and every counter fed by such a hold would report
+                // coverage of a state the sweep never entered.
+                if self.dragged_tab().is_some() {
+                    self.holds.live += 1;
+                }
+                vec![target]
+            }
+
+            Step::MoveWhileHeld { to } => {
+                // Nothing in the hand: a move is then an ordinary hover, which is not what this
+                // step means, so it is skipped like any step that finds nothing to act on.
+                let Some(at) = self.hold.as_ref().map(|hold| hold.at) else {
+                    return None;
+                };
+                let target = leaves[to % leaves.len()];
+                let Some(rect) = self.layout().get(target).map(|geometry| geometry.rect) else {
+                    self.refused[refused_index(Refused::NoGeometry)] += 1;
+                    return None;
+                };
+                let onto = rect.center();
+                self.move_while_held(at, onto);
+                self.hold.as_mut().unwrap().at = onto;
+                // Carrying a tab across the dock is not a change to the dock: the drag lives in
+                // egui's memory and in the dock's own `State`, and nothing is moved until the
+                // hand opens. So nothing is exempt — every leaf that is still there must be
+                // identical, and the dock must announce nothing.
+                //
+                // `must_change_nothing` would say it more strongly and is deliberately not used:
+                // it feeds `IdentityWatch::idle_frames`, whose gate is about frames that ran with
+                // no input at all, and a step that moves the pointer would leave that number
+                // reading healthy without a single quiet frame behind it.
+                commits = CommitRule::Exactly(0);
+                Vec::new()
+            }
+
+            Step::Release { aim } => {
+                let Some(hold) = self.hold.clone() else {
+                    return None;
+                };
+                let leaf = match self.leaf_under(hold.at) {
+                    Ok(leaf) => leaf,
+                    Err(refused) => {
+                        // The hand stays closed. A release that cannot be read is not a release
+                        // fired blind; the gesture simply goes on, and a later step may find a
+                        // scene it can be let go into.
+                        self.refused[refused_index(refused)] += 1;
+                        return None;
+                    }
+                };
+                let drop = match self.aim(leaf, aim) {
+                    Ok(point) => {
+                        self.aimed += 1;
+                        point
+                    }
+                    Err(refused) => {
+                        self.refused[refused_index(refused)] += 1;
+                        return None;
+                    }
+                };
+                // Where the carried tab is *now*, not where it was picked up: the leaf can have
+                // been edited by the steps that ran under the hold, and it is the current home
+                // the drop takes it out of. `None` means the drag died under the hold, and then
+                // there is no source at all — only the leaf the hand opened over.
+                let source = self.dragged_tab().map(TabPath::node_path);
+                let moved_under_the_hold = self.trace() != hold.scene;
+                let shape_before = self.layout_trace();
+
+                self.release_at(hold.at, drop);
+                self.hold = None;
+                self.holds.releases += 1;
+                if moved_under_the_hold && self.layout_trace() != shape_before {
+                    self.holds.landings_after_a_change += 1;
+                }
+                source.into_iter().chain([leaf]).collect()
+            }
+
+            Step::CloseTab { leaf, tab } => {
+                let target = leaves[leaf % leaves.len()];
+                let tabs = self.state[target].tabs_count();
+                if tabs == 0 {
+                    return None;
+                }
+                let rect = self.tab_rect(target, tab % tabs)?;
+                // The left edge of the title, not its centre. Found the hard way while writing
+                // the scenario tests: the centre of a short title is its close button, which
+                // answers the click itself, and the tab never sees a middle click at all.
+                let at = Pos2::new(rect.left() + 4.0, rect.center().y);
+                let tabs_before = self.state.iter_all_tabs().count();
+                let focus_before = self.focus_trace();
+
+                self.middle_click(at);
+                // A middle release is not a primary release: the hand is still holding whatever
+                // it was holding, and it is now where the click was.
+                if let Some(hold) = self.hold.as_mut() {
+                    hold.at = at;
+                }
+
+                let closed = self.state.iter_all_tabs().count() < tabs_before;
+                if closed {
+                    self.holds.ui_closes += 1;
+                }
+                // One close, one finalised event. The focus term is only for the click that
+                // closed *nothing* and still moved something: a close that hands the focus on
+                // is one change, not two, and the dock announces it once.
+                commits = CommitRule::Exactly(usize::from(if closed {
+                    true
+                } else {
+                    self.focus_trace() != focus_before
+                }));
                 vec![target]
             }
 
@@ -1789,6 +2234,25 @@ impl Sim {
             }
         };
 
+        // Counted here rather than at the top, so that only steps that were actually *applied*
+        // count: a step that found nothing to act on ran no frames and interleaved with
+        // nothing, however live the drag was when it was drawn.
+        if carried.is_some() {
+            if !step.is_part_of_the_hold() {
+                self.holds.steps += 1;
+                if matches!(step, Step::CloseTab { .. } | Step::CloseLeaf { .. }) {
+                    self.holds.closes += 1;
+                }
+            }
+            // Whether the tab left the tree, asked of the tree — not of the dock's reaction to
+            // it. The two are different questions, and the second is what the oracle judges: a
+            // sweep that counted "the dock stopped carrying it" would report full coverage of a
+            // cancel that never fired, since a dock that simply forgot the drag looks the same.
+            if self.hold.is_some() && self.held_tab_is_gone() {
+                self.holds.source_died += 1;
+            }
+        }
+
         if let Some(slot) = outcome_index(self.outcome_since(&before)) {
             self.effective[slot] += 1;
         }
@@ -1970,9 +2434,58 @@ fn surface_label(index: SurfaceIndex) -> usize {
 /// The scenario a seed stands for. A pure function of the seed: same seed, same steps, on any
 /// machine — that is what makes a failure here a reproducible bug report.
 fn scenario(seed: u64, len: usize) -> Vec<Step> {
+    /// What a drop somewhere should mean, drawn uniformly over the vocabulary.
+    fn aim(rng: &mut Rng) -> Aim {
+        match rng.below(6) {
+            0 => Aim::Append,
+            1 => Aim::Window,
+            2 => Aim::Split(Split::Left),
+            3 => Aim::Split(Split::Right),
+            4 => Aim::Split(Split::Above),
+            _ => Aim::Split(Split::Below),
+        }
+    }
+
     let mut rng = Rng::new(seed);
     let mut steps: Vec<Step> = Vec::with_capacity(len);
+    // How many steps are still to run under the hand before it has to open again.
+    //
+    // A hold is drawn as a *bounded burst* rather than as a grab and a release drawn
+    // independently, and the reason is a measurement: with the two independent, 96 seeds
+    // produced 74 grabs and 22 releases — three holds in four never opened, and a hand that
+    // stays closed for the rest of a scenario turns off every step that presses a button (574
+    // of them refused, and the cross-split and separator coverage went down with them).
+    //
+    // The burst is the same idea as `Step::BuildCross`: a situation the generator has to build
+    // on purpose, because waiting for independent draws to build it costs the rest of the sweep.
+    // Bounded at four, which is what a hand does — pick a tab up, do a thing or two, let go.
+    let mut until_release: Option<usize> = None;
+    // Whether the next step is a press on a cross that has just been built.
+    //
+    // Same device as the burst above and the same reason, measured the same way: a cross has to
+    // be pressed *while it is still there*, and two independent draws are too far apart for
+    // that. Across the sweep, some 430 toggle steps found a cross to press 31 times, and the two
+    // shapes only `Deepen::BothBands` can produce came out at one press each — a gate reading 1
+    // is one reshuffled seed away from a red suite that means nothing.
+    let mut press_the_cross = false;
+
     while steps.len() < len {
+        if until_release == Some(0) {
+            until_release = None;
+            steps.push(Step::Release { aim: aim(&mut rng) });
+            continue;
+        }
+        if press_the_cross {
+            press_the_cross = false;
+            steps.push(Step::ToggleCrossSplit {
+                cross: rng.below(4),
+            });
+            continue;
+        }
+        if let Some(countdown) = until_release.as_mut() {
+            *countdown -= 1;
+        }
+
         // Sometimes do the same thing again. Independent draws almost never reach a *saturated*
         // state — a separator only sits against its clamp after something shoved it there, and the
         // second shove is where "a gesture that changes nothing announces nothing" lives. Measured:
@@ -1984,18 +2497,11 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
             steps.push(previous);
             continue;
         }
-        steps.push(match rng.below(19) {
+        let step = match rng.below(27) {
             0..=4 => Step::Drag {
                 from: rng.below(8),
                 to: rng.below(8),
-                aim: match rng.below(6) {
-                    0 => Aim::Append,
-                    1 => Aim::Window,
-                    2 => Aim::Split(Split::Left),
-                    3 => Aim::Split(Split::Right),
-                    4 => Aim::Split(Split::Above),
-                    _ => Aim::Split(Split::Below),
-                },
+                aim: aim(&mut rng),
             },
             5 => Step::ClickTab {
                 leaf: rng.below(8),
@@ -2032,15 +2538,58 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
             // not a scene the generator can ask for directly — it has to *happen*, out of two
             // opposite-orientation splits landing with collinear dividers — so the press has to
             // be frequent enough to still be in the script when one does.
-            14..=15 => Step::ToggleCrossSplit {
+            //
+            // A third draw, and a second for the scaffolding below, when the hold joined the
+            // vocabulary: a press is refused while the hand is closed (see
+            // `Step::needs_the_primary_button`), so a share of every drawn press now goes
+            // nowhere, and this is the gesture with the least to spare.
+            14..=16 => Step::ToggleCrossSplit {
                 cross: rng.below(4),
             },
-            16 => Step::BuildCross {
+            // `BothBands` is drawn twice as often as the other two, because it is the only
+            // shape that produces the two scenes the gates below are thinnest on: two chains to
+            // take apart at once, and a line carrying a second "+". A uniform draw over the
+            // three left those counters at 4 and 2 across the whole sweep.
+            17..=18 => Step::BuildCross {
                 leaf: rng.below(8),
-                deepen: [Deepen::None, Deepen::OneBand, Deepen::BothBands][rng.below(3)],
+                deepen: [
+                    Deepen::None,
+                    Deepen::OneBand,
+                    Deepen::BothBands,
+                    Deepen::BothBands,
+                ][rng.below(4)],
             },
-            _ => Step::Idle,
-        });
+            19..=20 => Step::Idle,
+            // The hold. A grab arms the burst above, so these two draws are what decides how
+            // much of a scenario runs with a tab in flight; the release that ends it is
+            // scheduled rather than drawn.
+            21..=22 => Step::Grab {
+                leaf: rng.below(8),
+                tab: rng.below(4),
+            },
+            23 => Step::MoveWhileHeld { to: rng.below(8) },
+            // A release drawn on its own, *outside* a burst. Nearly always a skipped step — the
+            // hand is usually open — and that is what it is for: a release with no hold has to
+            // be legal and inert, or the shrinker cannot drop a `Grab` from a failing trace
+            // without the harness itself falling over.
+            24 => Step::Release { aim: aim(&mut rng) },
+            // Closing a tab through the UI. Two draws rather than one because it is the step the
+            // reported bug needed *and* the only close in this vocabulary that goes through the
+            // frame layer at all.
+            _ => Step::CloseTab {
+                leaf: rng.below(8),
+                tab: rng.below(4),
+            },
+        };
+        if matches!(step, Step::Grab { .. }) && until_release.is_none() {
+            until_release = Some(1 + rng.below(4));
+        }
+        // ...but not while the hand is closed: a press is refused under a hold, and a scheduled
+        // press that lands there is a press that never happened.
+        if matches!(step, Step::BuildCross { .. }) && until_release.is_none() {
+            press_the_cross = true;
+        }
+        steps.push(step);
     }
     steps
 }
@@ -2062,6 +2611,8 @@ struct Run {
     separator: SeparatorWatch,
     /// How much the cross-split toggle got to do — see [`CrossWatch`].
     cross: CrossWatch,
+    /// How much of the interleaving a hold makes possible was reached — see [`HoldWatch`].
+    holds: HoldWatch,
     /// The first step that left the dock invalid, if any.
     failure: Option<Failure>,
 }
@@ -2312,6 +2863,7 @@ fn run(steps: &[Step]) -> Run {
         boundary,
         separator: sim.separator,
         cross: sim.cross,
+        holds: sim.holds,
         failure,
     }
 }
@@ -2906,6 +3458,84 @@ fn a_ratio_the_window_grew_too_small_for_comes_back_when_it_grows_again() {
     );
 }
 
+/// A separator with nowhere to go keeps the ratio it cannot honour, however hard it is dragged.
+///
+/// The other door into the loss `a_ratio_the_window_grew_too_small_for_comes_back_when_it_grows_again`
+/// closed, and it stayed open behind it. That fix took the clamp out of the *frame pass*: geometry
+/// decides where a boundary is drawn, and only a gesture writes the tree. But on a node shorter
+/// than `2 * separator.extra` the band is the single point `0.5`, so the gesture's own clamp
+/// answers `0.5` for every delta there is — and a drag that cannot move the boundary one pixel
+/// still overwrote the stored ratio with dead centre. Same loss, same node, one door over: nothing
+/// moves on screen, and what is gone is where the panel goes back to when the window grows.
+///
+/// Found by the frame sweep, on a divider a *tab* drag grabbed by accident — reported as a
+/// fraction going from 0.75 to 0.5 during a step that never named a separator. Pinned here rather
+/// than left to that scene, because that scene was luck: the sweep reached it through one
+/// particular misaimed drag, and the gates a fix is judged by have to be reachable on purpose.
+///
+/// The second half is the positive control, and it is not decoration: a test whose drag had
+/// quietly stopped reaching the separator would satisfy the first half perfectly.
+#[test]
+fn a_drag_on_a_divider_with_no_room_leaves_the_ratio_alone() {
+    let mut sim = Sim::new();
+    let root = sim.state.main_surface().root().unwrap();
+    sim.state.split(
+        NodePath::new(SurfaceIndex::main(), root),
+        Split::Below,
+        0.3,
+        Node::leaf("t1".to_string()),
+    );
+    sim.run_frame(vec![]);
+    let (path, _, _) = sim.separators()[0];
+
+    // Squeeze the window until the split cannot leave the margin on both sides. Without this the
+    // band has room, the drag is an ordinary one, and the test is about nothing.
+    sim.resize(Vec2::new(1280.0, 260.0));
+    let range = sim.layout().get(path).unwrap().rect.height();
+    assert!(
+        range < 2.0 * sim.style.separator.extra,
+        "the scene must leave the split with no room for the margin on both sides, and this one \
+         is {range} px against 2 x {}",
+        sim.style.separator.extra
+    );
+    assert_eq!(
+        sim.fraction_of(path),
+        Some(0.3),
+        "the resize is not a gesture and may not write the ratio — that is the sibling test's \
+         subject, and this one starts where it ends"
+    );
+
+    let (_, at, _) = sim.separators()[0];
+    sim.take_commits();
+    sim.drag(at, at + Vec2::new(0.0, 120.0));
+
+    assert_eq!(
+        sim.fraction_of(path),
+        Some(0.3),
+        "the boundary had nowhere to go — the band is the single point 0.5 here — so the drag \
+         moved nothing, and a gesture that moved nothing may not replace the stored ratio: {}",
+        sim.trace()
+    );
+    assert_eq!(
+        sim.take_commits(),
+        0,
+        "and there is no finalised layout change to announce about it"
+    );
+
+    // The gesture *was* reaching the separator all along: give the node room and the same drag
+    // moves the boundary.
+    sim.resize(SCREEN);
+    let (_, at, before) = sim.separators()[0];
+    sim.drag(at, at + Vec2::new(0.0, 120.0));
+    assert_ne!(
+        sim.fraction_of(path),
+        Some(before),
+        "with room to move, the same drag has to move the boundary — otherwise the half above \
+         passes because nothing was ever grabbed"
+    );
+    assert_eq!(sim.state.validate(), Ok(()));
+}
+
 /// A ratio the geometry cannot honour is *shown* inside the margin, not written into the tree.
 ///
 /// The other half of the fix above, and the reason it is not simply "stop clamping". A fraction
@@ -3317,6 +3947,7 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
     let mut boundary = BoundaryWatch::default();
     let mut separator = SeparatorWatch::default();
     let mut cross = CrossWatch::default();
+    let mut holds = HoldWatch::default();
     let mut aimed = 0usize;
     let mut refused = [0usize; REFUSALS];
 
@@ -3345,6 +3976,14 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         cross.in_a_long_band += outcome.cross.in_a_long_band;
         cross.in_two_long_bands += outcome.cross.in_two_long_bands;
         cross.on_a_crowded_line += outcome.cross.on_a_crowded_line;
+        holds.grabs += outcome.holds.grabs;
+        holds.live += outcome.holds.live;
+        holds.releases += outcome.holds.releases;
+        holds.steps += outcome.holds.steps;
+        holds.closes += outcome.holds.closes;
+        holds.source_died += outcome.holds.source_died;
+        holds.ui_closes += outcome.holds.ui_closes;
+        holds.landings_after_a_change += outcome.holds.landings_after_a_change;
 
         if let Some(failure) = outcome.failure {
             let minimal = quietly(|| shrink(&steps, &|candidate| run(candidate).failure.is_some()));
@@ -3361,12 +4000,22 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         }
     }
 
+    // Every number the run produced, printed before the first gate rather than next to it: a
+    // gate that fires takes the rest of the report down with it, and the numbers that would
+    // have said *why* it fired are exactly the ones that go missing.
     println!(
         "coverage: {:?}",
         OUTCOME_NAMES.iter().zip(coverage).collect::<Vec<_>>()
     );
-
+    println!(
+        "aim: {aimed} fired, refused {:?}",
+        REFUSAL_NAMES.iter().zip(refused).collect::<Vec<_>>()
+    );
     println!("cross watch: {cross:?}");
+    println!("identity watch: {identity:?}");
+    println!("boundary watch: {boundary:?}");
+    println!("separator watch: {separator:?}");
+    println!("hold watch: {holds:?}");
 
     // Asserted before the generic coverage loop below, which would otherwise fire first with
     // "the sweep never produced CrossTransposed" — true, but silent about which of the two very
@@ -3422,11 +4071,6 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         );
     }
 
-    println!(
-        "aim: {aimed} fired, refused {:?}",
-        REFUSAL_NAMES.iter().zip(refused).collect::<Vec<_>>()
-    );
-
     // A drag that cannot be aimed is skipped, and a sweep whose drags are all skipped is green
     // for free — the outcome counters above would still be fed by the scripted `Split` and
     // `CloseLeaf` steps, which go through the model and never aim at anything.
@@ -3457,8 +4101,6 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         REFUSAL_NAMES.iter().zip(refused).collect::<Vec<_>>()
     );
 
-    println!("identity watch: {identity:?}");
-
     // And the same demand of the identity property, which is checked inside `run` and would
     // otherwise be satisfied by never having anything to check.
     assert!(
@@ -3471,8 +4113,6 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         "no leaf was ever a bystander to a step that changed something — the property only \
          ever looked at leaves the step was allowed to change"
     );
-
-    println!("boundary watch: {boundary:?}");
 
     // And of the boundary-drift property, whose two zeros mean different things. No comparisons
     // at all means the sweep never carried a split across a step; comparisons but none under
@@ -3491,8 +4131,6 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
          disagree, which is the only one where the property can fail",
         boundary.checked
     );
-
-    println!("separator watch: {separator:?}");
 
     // The separator gestures, each with its own zero to guard against. A sweep that never grabbed
     // a separator satisfies the commit rule trivially; one that grabbed but never *moved* one
@@ -3531,6 +4169,51 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         separator.centrings > 0,
         "no double-click ever re-centred an off-centre separator — either the sweep never \
          offset one, or the gesture stopped working"
+    );
+
+    // The hold, and the reason the whole vocabulary grew: every one of these was *unreachable*
+    // before, for every seed and every run length, because a step was a finished gesture. A
+    // zero here does not mean a property held — it means the sweep is back where it started,
+    // judging a dock that is never doing two things at once.
+    assert!(
+        holds.live > 0,
+        "{} grabs left the button down and the dock reported a drag after none of them — the \
+         presses travelled far enough for this harness and not for egui, so every \"while a drag \
+         was in flight\" below is about a hand holding nothing",
+        holds.grabs
+    );
+    assert!(
+        holds.steps > 0,
+        "no step ever ran while the dock was carrying a tab. The alphabet has the words for a \
+         gesture that spans steps and the sweep never put anything between them, which is the \
+         state this whole stage exists to reach"
+    );
+    assert!(
+        holds.closes > 0,
+        "none of the {} steps that ran under a live drag closed anything. A close under the \
+         hand is the reported bug's shape — and the only shape in this vocabulary that takes \
+         the dragged tab out of the tree",
+        holds.steps
+    );
+    assert!(
+        holds.source_died > 0,
+        "the tab being dragged never once left the tree while the drag was live, across \
+         {SEEDS} seeds. That is the single state the cancel chokepoint in \
+         `show_inside_with_response` exists for, so `drag_complaint` has been watching a drag \
+         that could not go stale"
+    );
+    assert!(
+        holds.ui_closes > 0,
+        "not one middle click across {SEEDS} seeds closed a tab. Closing through the frame \
+         layer is the route the reported bug came in by, and a step that lands on nothing is \
+         indistinguishable from one that closes something unless this is counted"
+    );
+    assert!(
+        holds.landings_after_a_change > 0,
+        "{} releases landed a tab, and none of them into a dock that had changed under the hold \
+         — every drop resolved against the scene its own gesture started in, which is the scene \
+         a single-step drag already covers",
+        holds.releases
     );
 }
 

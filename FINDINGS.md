@@ -12,6 +12,78 @@ Ordered newest first.
 
 ---
 
+## A divider with nowhere to go still answered a drag, and the answer was always "dead centre"
+
+**Status upstream:** not reported.
+
+**Symptom.** Shrink a window until a split's node is shorter than `2 * separator.extra`, then drag
+that separator. Nothing moves — there is nowhere for it to move — and the ratio the user set is
+gone: growing the window back leaves the boundary dead centre.
+
+The same loss as "a window too small for a ratio borrows it" further down this file, on the same
+nodes, through the other door. That one closed the *frame pass*: the clamp decides where a
+boundary is drawn and never writes the tree. This is the gesture path, where the clamp is
+legitimate — a drag is exactly the thing allowed to write a ratio — and where it stops being a
+clamp: on a node that cannot leave the margin on both sides, `SeparatorBand` is the single point
+`0.5`, so `(effective + delta / range).clamp(min, max)` answers `0.5` for **every** delta. The
+gesture cannot move the boundary one pixel and still overwrites the state.
+
+**Root cause.** `show_separator` wrote the clamped fraction whenever the delta was non-zero. That
+the interval it clamped into might be a *point* — that is, that the gesture had no freedom at all
+— was never asked. The distinction the fix below draws is between a drag that chose `0.5` and a
+drag that was told it.
+
+**Fix.** One more condition on the write: `range > 0.0 && delta != 0.0 && band.min < band.max`.
+A degenerate band is not a gesture's answer, it is geometry's, and geometry does not write the
+tree. A double-click still writes `0.5` there, and should: that one is the user asking for centre.
+
+**Evidence.** `a_drag_on_a_divider_with_no_room_leaves_the_ratio_alone` in `tests/dst.rs` —
+squeeze, drag, and the stored `0.3` has to still be `0.3` with nothing announced; then grow the
+window and the same drag has to move it, which is the positive control that the gesture was
+reaching the separator all along. Removing the condition turns the first half red with
+`left: Some(0.5), right: Some(0.3)`.
+
+Found by the frame sweep, which reported a fraction going from `0.75` to `0.5` during a step that
+never named a separator — a tab drag whose press had landed on a divider by accident. Worth
+saying plainly: the sweep reached this by luck, and the gate above is what makes it reachable on
+purpose.
+
+---
+
+## A middle click ended egui's drag and the dock went on carrying the tab
+
+**Status upstream:** not reported.
+
+**Symptom.** Pick a tab up and, without letting go, middle-click **another** tab to close it. The
+tab in flight is still in the tree, so nothing panics and nothing is misplaced; what is left is a
+dock that believes it is carrying a tab while nothing is being dragged. `dragged_tab` — the read
+an application uses to ask the dock what it is doing — answers with a tab that is going nowhere.
+
+**Root cause.** Two holders, two different rules for ending a drag, and only one of them was
+mirrored. **Any** release ends egui's drag, including the middle button's; the dock ends its own
+on the *primary* release (that is the drop) and on the source failing to resolve (that is the
+cancel added for the section below). A middle click is neither. The dock's `State::dnd` and
+`drag_start` therefore survived it, and survived unnoticed: no `drag_data` is published once egui
+has let go, so no overlay is drawn, no drop resolves, and nothing on screen says anything is
+wrong.
+
+**Fix.** The dock's drag exists while egui's does, stated where the cancel already lives: the
+chokepoint in `show_inside_with_response` now also ends the drag when egui is no longer dragging
+the source tab's widget — guarded on the primary button still being down, because the *ordinary*
+end of a drag looks exactly the same and that frame is the drop.
+
+**Evidence.** `a_middle_click_on_a_neighbour_ends_the_drag_too` in
+`tests/a_closed_tab_ends_its_drag.rs`: the neighbour is closed, the dragged tab is untouched, and
+both holders have to be empty. Its three siblings stay green without the fix — they all take the
+*dragged* tab out of the tree, so they exercise the other half of the chokepoint.
+
+Found by the frame sweep on its first run with a vocabulary that can hold a gesture open across a
+step (`docs/PLAN_the_harness_can_hold_a_gesture.md`, track B), which is precisely what the plan
+said would happen: this state was unreachable for every seed and every run length while a step was
+a whole gesture.
+
+---
+
 ## A drag remembered *where* its tab was, so closing that tab panicked — or dragged its neighbour
 
 **Status upstream:** reported (the panic half).

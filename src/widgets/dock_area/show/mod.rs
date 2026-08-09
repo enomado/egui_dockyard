@@ -73,12 +73,33 @@ impl<Tab> DockArea<'_, Tab> {
         // stopped too, because the id a tab is drawn under names a *position* in the bar, so
         // the neighbour that slides into the closed tab's slot inherits the id — and, with
         // it, a drag nobody started on it.
-        let source_is_gone = |data: &DragData| data.src.resolve(self.dock_state).is_none();
-        let drag_data = drag_data.filter(|data| !source_is_gone(data));
+        //
+        // A drag ends the other way round as well, and that half was missing. **Any** release
+        // ends egui's drag, and only the *primary* one is a drop here — so a middle click,
+        // which is how a tab is closed, leaves the hand closed over a dock that still believes
+        // it is carrying a tab. Nothing followed it visually (no `drag_data` is published once
+        // egui has let go, so no overlay is drawn and no drop can resolve), which is precisely
+        // why it survived: the only witness was `dragged_tab`, answering with a tab that was
+        // going nowhere. The dock's drag exists while egui's does, and that is now stated
+        // rather than assumed.
+        let primary_down = ui.input(|i| i.pointer.primary_down());
+        let drag_is_over = |data: &DragData| {
+            data.src.resolve(self.dock_state).is_none()
+                // Guarded on the button still being down, because the *ordinary* end of a drag
+                // looks exactly like this: egui stops dragging on the frame the primary comes
+                // up, and that frame is the drop — resolved a dozen lines below.
+                || (primary_down
+                    && !ui.ctx().is_being_dragged(crate::tab_widget_id(
+                        self.id,
+                        data.src.node_path(),
+                        data.src.tab,
+                    )))
+        };
+        let drag_data = drag_data.filter(|data| !drag_is_over(data));
         if state
             .dnd
             .as_ref()
-            .is_some_and(|dnd| source_is_gone(&dnd.drag))
+            .is_some_and(|dnd| drag_is_over(&dnd.drag))
         {
             state.reset_drag();
             ui.ctx().stop_dragging();
@@ -744,9 +765,18 @@ impl<Tab> DockArea<'_, Tab> {
                 //
                 // `drag_delta()` is zero on any frame the separator is not being dragged, so a
                 // non-zero delta *is* the gesture; arrow nudges are never zero either.
+                //
+                // `band.min < band.max` is the third condition and it is not cosmetic. On a node
+                // too short to leave the margin on both sides the band is the single point `0.5`,
+                // and then `clamp` answers `0.5` whatever the delta was: the gesture cannot move
+                // the boundary anywhere, and writing its "answer" replaces the stored ratio with
+                // dead centre. That is the same loss the band was separated from the tree to
+                // prevent — nothing moves on screen, and what is gone is where the panel returns
+                // to when the window grows again. Found by the frame sweep, on a divider a tab
+                // drag grabbed by accident: 0.75 became 0.5 during a step that never named it.
                 let is_arrow = arrow_key_offset.is_some();
                 let delta = arrow_key_offset.unwrap_or(response.drag_delta()).dim_point;
-                if range > 0.0 && delta != 0.0 {
+                if range > 0.0 && delta != 0.0 && band.min < band.max {
                     let new_fraction =
                         (band.effective + delta / range).clamp(band.min, band.max);
                     if split.fraction != new_fraction {

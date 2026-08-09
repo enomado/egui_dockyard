@@ -53,8 +53,8 @@ use egui::{
     CentralPanel, Context, Event, Id, PointerButton, Pos2, RawInput, Rect, Ui, Vec2, WidgetText,
 };
 use egui_dock::{
-    DockArea, DockLayout, DockState, NodePath, Style, SurfaceIndex, TabIndex, TabViewer,
-    tab_widget_id,
+    DockArea, DockLayout, DockState, NodePath, Style, SurfaceIndex, TabIndex, TabPath, TabViewer,
+    dragged_tab, tab_widget_id,
 };
 
 const SCREEN: Vec2 = Vec2::new(1000.0, 700.0);
@@ -333,6 +333,81 @@ fn the_neighbour_does_not_inherit_the_drag() {
 
     // Carry the still-pressed hand over to the other leaf and let go. A drag that survived the
     // close would drop `Tab 3` here.
+    let target = sim.layout().viewport(right).unwrap().center();
+    sim.sweep(home, target);
+    sim.button(target, PointerButton::Primary, false);
+    sim.run(vec![]);
+
+    assert_eq!(
+        sim.contents(),
+        settled,
+        "and the release drops nothing on the leaf the pointer ended over"
+    );
+    assert_eq!(sim.state.validate(), Ok(()));
+}
+
+/// The middle click lands on a **different** tab, so the dragged one is still there — and the
+/// drag is over all the same, because egui's is.
+///
+/// The other direction of the same asymmetry, and the half that was missing. Every scene above
+/// takes the dragged tab out of the tree, so the dock notices through its source failing to
+/// resolve. Close a *neighbour* instead and the source resolves perfectly well — while egui has
+/// already dropped the drag, since **any** release ends one and the middle button's is a
+/// release. The hand is still closed over a dock that believes it is carrying a tab.
+///
+/// Nothing followed it visually, which is exactly why it survived: no `drag_data` is published
+/// once egui has let go, so no overlay is drawn and no drop can resolve. The one witness is
+/// [`dragged_tab`], and it answered with a tab that was going nowhere — a lie to every consumer
+/// that asks the dock what it is doing. Found by the frame sweep on its first run with a
+/// vocabulary that could hold a gesture open across a close.
+#[test]
+fn a_middle_click_on_a_neighbour_ends_the_drag_too() {
+    let mut state = DockState::new(vec![
+        "Tab 1".to_owned(),
+        "Tab 2".to_owned(),
+        "Tab 3".to_owned(),
+    ]);
+    let root = state.main_surface().root().unwrap();
+    let [left, right] =
+        state
+            .main_surface_mut()
+            .split_right(root, 0.5, vec!["Elsewhere".to_owned()]);
+    let (left, right) = (
+        NodePath::new(SurfaceIndex::main(), left),
+        NodePath::new(SurfaceIndex::main(), right),
+    );
+    let mut sim = Sim::new(state);
+
+    let home = grab(&mut sim, left, 1);
+    assert_eq!(
+        dragged_tab(&sim.ctx, Id::new(DOCK_ID), &sim.state),
+        Some(TabPath::from((left, TabIndex(1)))),
+        "the scene has to be a live drag the dock knows about, or it is not the gesture under test"
+    );
+
+    // Close the *first* tab, which is not the one in flight. The left edge of the title rather
+    // than its centre: a short title's centre is its close button, which answers the click and
+    // the tab never sees it.
+    let first = sim.tab_rect(left, 0);
+    sim.middle_click(Pos2::new(first.left() + 4.0, first.center().y));
+
+    let settled = vec![
+        (left, vec!["Tab 2".to_owned(), "Tab 3".to_owned()]),
+        (right, vec!["Elsewhere".to_owned()]),
+    ];
+    assert_eq!(sim.contents(), settled, "the neighbour was closed");
+    assert!(
+        sim.ctx.dragged_id().is_none(),
+        "egui ends its drag on any release, and the middle button's is one — measured, not \
+         assumed; the assertions below are about what the dock does with that"
+    );
+    assert!(
+        dragged_tab(&sim.ctx, Id::new(DOCK_ID), &sim.state).is_none(),
+        "the tab it was carrying is still in the tree, so the source resolves — but nothing is \
+         being dragged any more, and a dock that says otherwise is lying to whoever asks"
+    );
+
+    // The hand is still down, and it has nothing in it. Whatever it does now is not a drop.
     let target = sim.layout().viewport(right).unwrap().center();
     sim.sweep(home, target);
     sim.button(target, PointerButton::Primary, false);

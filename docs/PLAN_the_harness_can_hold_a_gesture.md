@@ -1,7 +1,9 @@
 # Plan: the harness can hold a gesture
 
-**Status:** track A done (commit `0ddd6d8`); track B not started. Entry point for whoever picks
-this up — read this file first, then [tests/dst.rs](../tests/dst.rs).
+**Status: done.** Track A in commit `0ddd6d8`, track B below it. What the sweep found on the way
+is in [FINDINGS.md](../FINDINGS.md) (two new sections at the top); what is left over is in
+[Backlog](#backlog-found-while-doing-this) at the bottom of this file. Entry point for whoever
+picks this up — read this file first, then [tests/dst.rs](../tests/dst.rs).
 
 **Why now.** Closing a tab while it is being dragged panicked the dock (see the top section of
 [FINDINGS.md](../FINDINGS.md)), and the DST sweep — which runs real frames and judges every step
@@ -165,3 +167,74 @@ outcome counting, the interpretation of a release after the scene moved) is wher
 
 A first, and it stands alone. B without A is an alphabet that can reach the state and an oracle
 that cannot judge it — green for free, which is worse than not having gone there.
+
+---
+
+## What B came out as
+
+Three places where the built thing differs from the plan above, each because a measurement said
+so. Everything else landed as written.
+
+**Every other step stays legal during a hold — except the ones that press the button.** The plan
+listed "a separator drag, even a second `Grab`" among what may run under a hold. They do not: a
+step that would put the primary button down while it is already down is refused, and counted as
+`Refused::Held`. A press while pressed is not a press — no mouse delivers one — so such a step is
+not the gesture it names, and the dock would be judged on input a hand cannot produce. What the
+plan was actually after is untouched: a close through either route, a split through the model, a
+cross built, a quiet frame, all run under the hand exactly as they do without it.
+
+**The hold is drawn as a bounded burst, not as two independent draws.** A `Grab` schedules its
+`Release` one to four steps later. Measured first, with the two independent: 96 seeds produced 74
+grabs and 22 releases — three holds in four never opened, and a hand that never opens turns off
+half the alphabet for the rest of the run (574 steps refused, and the cross-split and separator
+coverage went down with them). A `Release` drawn on its own stays in the vocabulary at low weight,
+because "a release with no hold is a skipped step" has to keep being true for the shrinker.
+
+**A cross is pressed on the step after it is built,** for the same reason and by the same device.
+Some 430 toggle steps across a sweep found a cross to press 31 times, and the two shapes only
+`Deepen::BothBands` produces came out at *one press each* — a gate reading 1 is one reshuffled
+seed away from meaning nothing. With the press scheduled: 76 offered, 16 with both bands long, 15
+on a crowded line, at 96 seeds and 14 s.
+
+**A `Grab` checks what it actually grabbed.** A tab drawn in a floating window can sit under the
+window's own move handle while the window is still settling, and then the press drags the
+*window* — a real egui drag on a widget this vocabulary has no word for, left in flight across a
+step boundary. The gesture is undone where it started (so it moves nothing) and the step refused.
+This is also what lets `drag_complaint` keep its strong form: with holds only ever on tabs, an
+egui drag at the end of a step is a tab's drag.
+
+## Done, and how it was checked
+
+* the sweep runs 96 seeds with the new steps mixed in, green, ~14 s — *faster* than the 16.7 s it
+  cost before, because the scheduled cross press buys back more than the hold spends;
+* the counters are asserted and healthy, not merely non-zero: 86 grabs, all 86 carrying a drag the
+  dock agreed to; 65 steps interleaved into a live drag, 25 of them closes; 9 that took the
+  dragged tab out of the tree from under it; 96 tabs closed through the frame layer; 15 releases
+  that landed a tab into a dock that had changed under the hold;
+* **the acceptance test**: delete the `source_is_gone` half of the cancel chokepoint and the
+  *sweep* goes red — seed 45, a panic (`no node 0.0 in this tree`), shrunk to two steps:
+  `Grab { leaf: 4, tab: 3 }`, `CloseLeaf { leaf: 1 }`. That is the exact bug a user reported,
+  found by the sweep instead;
+* the half added in this session is mutation-checked the same way (delete it → the sweep goes red
+  on `the two holders of a drag disagree`), and so is the divider fix (delete it → its own
+  scripted gate goes red). An oracle nobody has seen fail is a claim, not a gate.
+
+## Backlog, found while doing this
+
+* **`Step::Drag` does not check what it grabbed.** `Grab` does now (see above), and the same
+  hazard is what let a tab drag press a divider and expose the ratio loss — a step that quietly
+  stopped being a tab drag reads as a green step. Cheap to add, but it changes what a
+  well-tuned step covers, so it wants its own measurement of the coverage before and after.
+* **A drop destination is cross-frame state too, and nothing watches it.** `State::dnd.hover`
+  names a `NodeId`, is frozen while the preference lock holds, and a leaf can be closed under it
+  — the same decay the *source* had, which track A gave a public read and an oracle. A hold makes
+  the window between them wide open. Unreached so far, or reached and survived; nobody knows,
+  which is the point.
+* **`Sim::pause` is not used by the new steps.** Two gestures inside egui's double-click window
+  count as one multi-click; the hold steps get away without a pause today because nothing in the
+  tab path reacts to a double click. That is a fact about the crate, not about the harness, and it
+  is written down nowhere.
+* **`IdentityWatch::idle_frames` counts steps, not frames.** `MoveWhileHeld` deliberately does not
+  feed it (see the arm's comment) — but the name and its gate's message say "a frame that ran with
+  no input", and the field is fed by anything with `must_change_nothing`. Worth splitting before
+  something else quietly satisfies it.

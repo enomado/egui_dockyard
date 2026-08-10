@@ -8,8 +8,11 @@ the shape wanted. Entry point for whoever picks it up: this file, then
 
 ## The ask, in his words
 
-> нам нужен энам — все драггаемые вещи должны запоминаться в это место, потому что оно одно.
-> по построению. панели, окна и тд.
+> нам нужен энам - все драггаемые вещи должны запоминаться в это место, потому что оно одно.
+> по построению. shares, окна и тд. это будет частью большого рефакторинга.
+
+("shares" is read here as *панели* — the same word as in "можно драгать 4 шары" the message
+before. If that reading is wrong, the enum's first family is wrong with it.)
 
 Three claims, and the third is the load-bearing one:
 

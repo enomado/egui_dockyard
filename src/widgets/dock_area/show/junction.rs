@@ -49,7 +49,7 @@
 use std::collections::VecDeque;
 
 use egui::{
-    CursorIcon, Order, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
+    CursorIcon, Id, Order, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
     epaint::CornerRadius, pos2, vec2,
 };
 
@@ -248,29 +248,6 @@ impl Junctions {
         }
         room
     }
-}
-
-/// The three lengths the button at a crossing is built from, in points: the side of the drawn
-/// square, the catch margin around it, and the hold margin around that.
-///
-/// They are [`CrossSplitToggleStyle`]'s, shrunk **uniformly** so that the button at its widest —
-/// drawn square plus both margins — fits in `room` (see [`Crossings::room_at`]). Uniformly, and
-/// not by trimming the margins first, because the ratio between them is the feel: a button that
-/// kept its size while its hold margin was eaten would lose the hysteresis exactly on the
-/// layouts where a hand is least steady.
-fn toggle_metrics(toggle: &CrossSplitToggleStyle, room: f32) -> (f32, f32, f32) {
-    let widest = toggle.widest();
-    // A style of all zeroes asks for no button; `room / 0` would ask for a NaN one.
-    let scale = if widest > 0.0 {
-        (room / widest).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    (
-        toggle.size * scale,
-        toggle.catch_extra * scale,
-        toggle.hold_extra * scale,
-    )
 }
 
 /// The tier a handle's own layer belongs in, given the tier the dock itself is drawn in.
@@ -686,6 +663,63 @@ impl<Tab> DockArea<'_, Tab> {
             return;
         }
         let pixels_per_point = ui.ctx().pixels_per_point();
+        let pass = ui.ctx().cumulative_pass_nr();
+
+        // **A gesture keeps the junction it grabbed, and keeps it against the detector.** The
+        // handles below are read off this frame's geometry, and a junction drag is *moving* that
+        // geometry — so the answer can change under the hand: two dividers the drag brings into
+        // line stop being two tees and become one crossing, which is a different `kind`, a
+        // different key, and so a different widget id. The handle that held the gesture is then
+        // not drawn at all, egui goes on dragging a widget nobody registers, and the resize simply
+        // stops until the hand opens. Reported from the screen ("когда тройник пытается стать
+        // крестовиной там что-то происходит"), and the rule Стас gave for it is the one written
+        // here: what the hand holds is decided once, at `drag_started`, and every frame after that
+        // follows *that* subject.
+        //
+        // So a live junction gesture takes this function over: one handle, named by the id the
+        // gesture was begun under, placed where its own two boundaries cross *now*. The detector
+        // is not consulted, which also means none of the reasons a junction may stop being offered
+        // — a neighbouring divider drawn too close for the button (see `draw_one_handle`'s room
+        // gate), a crossing that has no transposition to give — can take a gesture away
+        // mid-flight. Measured: without this, the room gate alone reddens the sweep at seed 35
+        // with "a live gesture was forgotten, not one whose subject died under it".
+        if let Some(drag) = state.in_flight_at(pass)
+            && let DragSubject::Junction {
+                outer: held,
+                outer_horizontal,
+                divider,
+            } = drag.subject
+        {
+            // Another line's gesture: this line stands its handles down entirely. Same statement
+            // the per-handle `dragged_elsewhere` guard used to make, one level up, where it is
+            // also the answer to "who owns this pass".
+            if held != outer {
+                return;
+            }
+            let widget = drag.widget;
+            if let Grip::Resize(delta) = self.follow_held_junction(
+                ui,
+                widget,
+                held,
+                outer_horizontal,
+                divider,
+                style,
+                toggle,
+                state,
+            ) && self.drag_junction(
+                pixels_per_point,
+                held,
+                outer_horizontal,
+                divider,
+                style.extra,
+                delta,
+            ) {
+                state.mark_drag_moved();
+                self.events.push(DockEvent::SeparatorDragging);
+            }
+            return;
+        }
+
         let Some(junctions) = self.detect_junctions(outer, style.extra, toggle, pixels_per_point)
         else {
             return;
@@ -705,10 +739,9 @@ impl<Tab> DockArea<'_, Tab> {
         }
 
         match acted {
-            // The delta goes to what the *gesture* grabbed, not to the junction that happens to
-            // sit at this index now: `index` is a position in a list rebuilt from this frame's
-            // geometry, which the drag has been moving since it started. See
-            // [`DragSubject::Junction`].
+            // The frame a drag *starts* on: `begin_drag` has just run inside the handle, and the
+            // travel of that first frame is applied through the same path every later frame takes.
+            // From the next frame on the branch at the top of this function owns the gesture.
             Some((_, Grip::Resize(delta))) => {
                 let Some(&DragSubject::Junction {
                     outer,
@@ -736,6 +769,129 @@ impl<Tab> DockArea<'_, Tab> {
             }
             Some((_, Grip::Idle)) | None => {}
         }
+    }
+
+    /// The handle a live gesture is holding, drawn and interacted with **by its subject** rather
+    /// than by anything this frame's detector says.
+    ///
+    /// The id is the one `begin_drag` recorded, so egui goes on talking to the same widget however
+    /// the geometry moves; the place is where the gesture's own two boundaries cross *now*, read
+    /// off the two separator rectangles the dock draws them from — which is the same derivation
+    /// `detect_junctions` uses for a centre, minus the search for which junctions exist.
+    ///
+    /// What it deliberately does not do is decide whether the junction is still *offered*. That
+    /// question belongs to a hand that is about to grab one, and answering it again mid-gesture is
+    /// exactly the bug this exists for: see the note at the top of `draw_junction_handles`.
+    ///
+    /// A held junction always draws a tee's icon, and that is honest rather than a simplification:
+    /// [`DragSubject::Junction`] carries one divider, a crossing is never dragged at all (it senses
+    /// clicks only), so every gesture that can reach this function is a tee's — outer line plus one
+    /// divider ending on it.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_held_junction(
+        &mut self,
+        ui: &mut Ui,
+        widget: Id,
+        outer: NodePath,
+        outer_horizontal: bool,
+        divider: NodePath,
+        style: &SeparatorStyle,
+        toggle: &CrossSplitToggleStyle,
+        state: &mut State,
+    ) -> Grip {
+        let pass = ui.ctx().cumulative_pass_nr();
+        let pixels_per_point = ui.ctx().pixels_per_point();
+
+        // The subject can leave the tree under the hand — a leaf closed mid-gesture takes the
+        // splits above it with it — and this is where that is noticed. Asked of the tree *before*
+        // the geometry, because `separator_rect` indexes the node rather than looking it up and
+        // panics on a path that names nothing (`no node 0.1 in this tree`, which is how the sweep
+        // reported this at seed 1, step 16). Nothing is drawn and nothing is reported; the field's
+        // own liveness filter drops the gesture a pass later, which is the one divergence the
+        // harness checks rather than exempts.
+        if self.dock_state.node(outer).is_err() || self.dock_state.node(divider).is_err() {
+            return Grip::Idle;
+        }
+        let Some(outer_rect) = self.separator_rect(outer, style, pixels_per_point) else {
+            return Grip::Idle;
+        };
+        let Some(divider_rect) = self.separator_rect(divider, style, pixels_per_point) else {
+            return Grip::Idle;
+        };
+        // One coordinate from each line, which is what a junction *is* — and not the intersection
+        // of the two rectangles, which was tried and is empty: a divider ends **on** the line
+        // rather than crossing it, so the two separator rects meet edge to edge and
+        // `Rect::intersect` comes out with no area at all. Measured, because the symptom was
+        // subtle: the early return that followed left the detector's own path to handle every
+        // second frame, and the gesture travelled exactly half as far as the hand did.
+        //
+        // Which axis is which is `outer`'s: the line between its two children runs across
+        // `outer`'s own axis, so for a horizontal split the line is vertical and the junctions
+        // along it are picked out by the divider's *y*. Same convention as `detect_junctions`'
+        // `at_line`.
+        let center = if outer_horizontal {
+            pos2(outer_rect.center().x, divider_rect.center().y)
+        } else {
+            pos2(divider_rect.center().x, outer_rect.center().y)
+        };
+
+        // Which side of the line the stem points to, for the icon alone: the band the divider
+        // belongs to is the one its own line sits on, measured along `outer`'s axis.
+        let side = if outer_horizontal {
+            usize::from(divider_rect.center().x > outer_rect.center().x)
+        } else {
+            usize::from(divider_rect.center().y > outer_rect.center().y)
+        };
+
+        let drawn = Rect::from_center_size(center, Vec2::splat(toggle.size));
+        // The hold margin, unconditionally: a hand that is already dragging is holding the pointer
+        // by definition, so there is nothing to decide between the catch zone and the wider one.
+        let hit_rect = drawn.expand(toggle.catch_extra + toggle.hold_extra);
+        ui.data_mut(|data| data.insert_temp(widget, pass));
+
+        egui::Area::new(widget)
+            .order(handle_layer(ui.layer_id().order))
+            .fixed_pos(hit_rect.min)
+            .default_size(hit_rect.size())
+            .movable(false)
+            .sense(Sense::hover())
+            .constrain(false)
+            .show(ui.ctx(), |ui| {
+                ui.set_min_size(hit_rect.size());
+                let response = ui
+                    .interact(hit_rect, widget, Sense::click_and_drag())
+                    .on_hover_and_drag_cursor(CursorIcon::Move);
+
+                let (fill, icon) = if response.is_pointer_button_down_on() {
+                    (style.color_dragged, style.color_hovered)
+                } else {
+                    (style.color_hovered, style.color_dragged)
+                };
+                ui.painter().rect(
+                    drawn,
+                    CornerRadius::from(toggle.size * 0.25),
+                    fill,
+                    Stroke::NONE,
+                    StrokeKind::Inside,
+                );
+                let stroke = Stroke::new(1.5, icon);
+                for dir in icon_arms(JunctionKind::Tee { side, divider: 0 }, outer_horizontal) {
+                    draw_arrow(ui.painter(), center, dir, toggle.size * 0.28, stroke);
+                }
+
+                if response.drag_stopped() {
+                    if state.end_drag(widget).is_some_and(|drag| drag.moved) {
+                        self.events.push(DockEvent::LayoutCommitted);
+                    }
+                    return Grip::Idle;
+                }
+                if response.dragged() {
+                    state.keep_drag_alive(widget, pass);
+                    return Grip::Resize(response.drag_delta());
+                }
+                Grip::Idle
+            })
+            .inner
     }
 
     /// One handle. Answers what the pointer asked of it this frame; the caller does it, because
@@ -843,10 +999,20 @@ impl<Tab> DockArea<'_, Tab> {
         let handle_id = ui.id().with((key, "junction_handle"));
         let order = handle_layer(ui.layer_id().order);
 
-        // Never wider than the junction has room for — see `toggle_metrics` for how the three
-        // lengths are cut down, and `handle_room` for what "room" answers to.
+        // The button is the size the style says, or it is not there at all. It used to be scaled
+        // down to whatever room the junction had (`toggle_metrics`, gone with this), and a button
+        // that shrinks as its neighbours close in was the wrong answer twice over: the eye reads a
+        // shrinking square as a thing being manipulated rather than offered, and the hand gets a
+        // catch zone whose size depends on a layout it cannot see. So `room` — the distance to the
+        // nearest divider the handle must not cover, see `handle_room` — is a **gate** now, not a
+        // scale: a junction with no space for the whole button offers no handle, and the
+        // separators there are grabbed the ordinary way.
+        let widest = toggle.widest();
         let room = self.handle_room(junctions, index, style, ui.ctx().pixels_per_point());
-        let (size, catch_extra, hold_extra) = toggle_metrics(toggle, room);
+        if widest <= 0.0 || room < widest {
+            return Grip::Idle;
+        }
+        let (size, catch_extra, hold_extra) = (toggle.size, toggle.catch_extra, toggle.hold_extra);
         let drawn_idle = Rect::from_center_size(center, Vec2::splat(size));
         let catch_rect = drawn_idle.expand(catch_extra);
 
@@ -1169,9 +1335,10 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::dock_area::state::DragInFlight;
     use crate::geom::{Point, Size};
     use crate::layout::DockLayout;
-    use crate::{DockState, Node, NodeId, Split, Style, SurfaceIndex, TabViewer};
+    use crate::{DockState, Node, NodeId, Split, Style, SurfaceIndex, TabViewer, drag_in_flight};
 
     const SCREEN: Vec2 = Vec2::new(1200.0, 900.0);
     const DOCK_ID: &str = "cross_split_test_dock";
@@ -1967,87 +2134,46 @@ mod tests {
         (ctx, state, outer, center)
     }
 
-    /// The bound the button is sized by, stated on the function that applies it: however
-    /// generous the style, the widest form of the button fits in the room the crossing has.
+    /// The room a junction has is a **gate**, not a scale: a crossing with space for the whole
+    /// button gets one, a crossing without gets none, and nothing in between gets a small one.
     ///
-    /// Both halves matter. Only the cap and a style could be silently ignored; only the
-    /// pass-through and the cap could be a clamp to nothing.
-    #[test]
-    fn a_toggle_is_never_wider_than_the_room_it_has() {
-        let style = CrossSplitToggleStyle::default();
-        // Spelled out rather than asked of `CrossSplitToggleStyle::widest`, which is what every
-        // other caller now uses: this is the test *of* that arithmetic, and an oracle that reads
-        // the function it is checking agrees with it by construction.
-        let widest = style.size + 2.0 * (style.catch_extra + style.hold_extra);
-        assert_eq!(
-            widest,
-            style.widest(),
-            "the widest form is one number in two places"
-        );
-
-        for room in [0.0, 1.0, 7.5, widest - 0.1, widest, widest + 50.0, 4000.0] {
-            let (size, catch, hold) = toggle_metrics(&style, room);
-            assert!(
-                size + 2.0 * (catch + hold) <= room.max(0.0) + 1e-3,
-                "with {room}px of room the button is still {}px wide",
-                size + 2.0 * (catch + hold)
-            );
-            assert!(
-                size >= 0.0 && catch >= 0.0 && hold >= 0.0,
-                "a negative length came out of a {room}px crossing"
-            );
-        }
-
-        let (size, catch, hold) = toggle_metrics(&style, widest);
-        assert!(
-            (size - style.size).abs() < 1e-3
-                && (catch - style.catch_extra).abs() < 1e-3
-                && (hold - style.hold_extra).abs() < 1e-3,
-            "given exactly the room it asks for, the button must be the style's own size"
-        );
-
-        // Uniform: a squeezed button keeps the proportions, so the hysteresis is not the first
-        // thing to disappear.
-        let (size, catch, hold) = toggle_metrics(&style, widest * 0.5);
-        assert!(
-            (size / catch - style.size / style.catch_extra).abs() < 1e-3
-                && (hold / catch - style.hold_extra / style.catch_extra).abs() < 1e-3,
-            "the squeeze changed the button's proportions: {size}/{catch}/{hold}"
-        );
-    }
-
-    /// And the bound is actually wired to the layout: the same press, at the same distance from
-    /// the crossing, reaches the button on a roomy cross and misses it on a squeezed one.
+    /// Replaces two tests written against the old behaviour — one on `toggle_metrics`'s arithmetic
+    /// (a function that no longer exists) and one asserting that a squeezed cross still answered a
+    /// press at its exact centre. That second half is the assertion that flipped: a squeezed cross
+    /// has no handle at all now, and a press there is a press on the separators, which is what
+    /// every point of the layout that has no handle does.
     ///
-    /// Without the second half this would be a test of `toggle_metrics` again; without the
-    /// first it would pass on a button that had stopped working everywhere.
+    /// Both halves are here for the same reason they were before: without the roomy scene a gate
+    /// that refuses everything passes, and without the squeezed one a gate that refuses nothing
+    /// does.
     #[test]
-    fn a_squeezed_cross_gets_a_smaller_button() {
+    fn a_cross_without_room_for_the_whole_button_has_no_handle() {
         let id = Id::new(DOCK_ID);
         let style = band_style();
         let toggle = &style.cross_split_toggle;
-        // Inside the catch zone of a button at full size, and well outside a shrunken one.
-        let off = Vec2::new(0.0, toggle.size * 0.5 + toggle.catch_extra - 1.0);
 
         let (ctx, mut state, outer, center) = cross_scene(&style, id);
         assert!(
-            click_flips(&ctx, &mut state, &style, id, outer, center + off),
+            click_flips(&ctx, &mut state, &style, id, outer, center),
             "the roomy half of this test stopped working, so the squeezed half proves nothing"
         );
-
-        // A fresh scene per press: a flip is a real edit, and what the next press is about is
-        // its distance from the crossing, not the grouping it starts from.
-        let (ctx, mut state, outer, center) = squeezed_cross_scene(&style, id);
+        // And it is the *whole* button there: a press as far out as the catch zone reaches still
+        // lands, which is what says the size was not quietly trimmed on a roomy layout either.
+        let off = Vec2::new(0.0, toggle.size * 0.5 + toggle.catch_extra - 1.0);
+        let (ctx, mut state, outer, center) = cross_scene(&style, id);
         assert!(
-            click_flips(&ctx, &mut state, &style, id, outer, center),
-            "the squeezed cross has no pressable button left at all, which is not the point"
+            click_flips(&ctx, &mut state, &style, id, outer, center + off),
+            "the button on a roomy cross is narrower than the style asks for: a press {}px out \
+             missed it",
+            off.y
         );
 
+        // ~20px of room against a button that wants `widest()`. Nothing to press, at the centre or
+        // anywhere else.
         let (ctx, mut state, outer, center) = squeezed_cross_scene(&style, id);
         assert!(
-            !click_flips(&ctx, &mut state, &style, id, outer, center + off),
-            "a button on a cross with ~20px of room still answered {}px away",
-            off.y
+            !click_flips(&ctx, &mut state, &style, id, outer, center),
+            "a cross with less room than the button needs still offered one at its centre"
         );
     }
 
@@ -2127,9 +2253,16 @@ mod tests {
     /// instead.
     ///
     /// The scene puts one 10 px from the crossing, which the default bound would have called
-    /// "450 px of room". Both halves are asserted, because either alone passes for the wrong
-    /// reason: that the divider drags says nothing if the button has simply stopped existing,
-    /// and that the button works says nothing about what it covers.
+    /// "450 px of room".
+    ///
+    /// What the second half asserts changed with the sizing rule. `room` used to *scale* the
+    /// button, so the scene could ask for both at once: the hidden divider free and a (smaller)
+    /// button still at the crossing. `room` is a **gate** now — 10 px is less than the button's
+    /// widest form, so this crossing offers no handle at all, which is the same answer by a
+    /// blunter route. The control that keeps the first half honest therefore moves to a second
+    /// scene: the *same* press geometry on a cross with no divider hidden near it, where the
+    /// button does exist and does answer. Without that, "the press did not toggle" is satisfied by
+    /// a crate whose button stopped working everywhere.
     #[test]
     fn a_divider_inside_a_part_is_not_swallowed_by_the_button() {
         /// Far enough from the crossing to be a different place, close enough that a button at
@@ -2188,10 +2321,19 @@ mod tests {
              the button is sitting on a divider it cannot see"
         );
 
-        // And the button is still a button, at the crossing itself.
+        // And the gate did it: with 10 px of room there is no handle at the crossing either.
+        assert!(
+            !click_flips(&ctx, &mut state, &style, id, outer, center),
+            "a crossing with {GAP}px of room still offered a button — the room gate is not wired"
+        );
+
+        // The control: the same press, on a cross whose parts carry no divider close by, does
+        // reach a button. This is what says the two assertions above are about *this* layout and
+        // not about a button that has stopped existing.
+        let (ctx, mut state, outer, center) = cross_scene(&style, id);
         assert!(
             click_flips(&ctx, &mut state, &style, id, outer, center),
-            "the crossing lost its button altogether, so the assertion above passes for free"
+            "the roomy control lost its button, so the assertions above pass for free"
         );
     }
 
@@ -3218,6 +3360,176 @@ mod tests {
             (after_neighbour - before_neighbour).abs() < 1.0,
             "the junction the drag swept past moved with it: {before_neighbour} to \
              {after_neighbour}"
+        );
+    }
+
+    /// A tee dragged **onto** a neighbouring tee — so that the two are one crossing for a frame —
+    /// keeps its handle and keeps its pace.
+    ///
+    /// This is the reported bug, and the aiming is the whole scene. Halfway through such a sweep the
+    /// grabbed divider lines up with the other band's, and while they are aligned to within
+    /// `align_tolerance` the detector stops seeing two tees and sees **one crossing**: a different
+    /// `kind`, a different key, a different widget id. The handle holding the gesture is then not
+    /// drawn and not registered, egui goes on dragging a widget nobody answers for, and the resize
+    /// stands still until the hand opens — «когда тройник пытается стать крестовиной там что-то
+    /// происходит» (Стас, 2026-08-10).
+    ///
+    /// **The pointer is walked onto the neighbour's own position and held there**, rather than swept
+    /// past it in even steps. Measured, and this is why the older
+    /// `a_drag_keeps_hold_of_the_junction_it_grabbed` never caught the bug: with six even steps of
+    /// 63pt the crossing window — one device pixel wide — falls between frames, and the mutation
+    /// "no gesture takeover, no room gate" leaves that test green. Aimed at the neighbour, the same
+    /// mutation reddens.
+    ///
+    /// Two things are asked every frame: **one** handle is on screen, and the boundary moved as far
+    /// as the hand did. Per frame and not of the total, because a total tolerates a stall that is
+    /// made up for afterwards — and per *frame* is what a stall on screen is.
+    #[test]
+    fn a_tee_dragged_onto_a_neighbour_keeps_its_handle_and_its_pace() {
+        let ctx = Context::default();
+        let id = Id::new(DOCK_ID);
+        let style = band_style();
+        let (mut state, outer_id, _) = build_bands(
+            &ctx,
+            &style,
+            id,
+            true,
+            [&[0.3], &[0.7]],
+            [Leaning::Left, Leaning::Left],
+        );
+        let outer = NodePath::new(SurfaceIndex::main(), outer_id);
+        let [b0, b1] = state.main_surface().children(outer_id).unwrap();
+        let grabbed = |state: &DockState<u32>| divider_positions_of(&ctx, state, id, b0, false)[0];
+        let neighbour =
+            |state: &DockState<u32>| divider_positions_of(&ctx, state, id, b1, false)[0];
+
+        let junctions = junctions_on(&ctx, &mut state, &style, id, outer);
+        assert_eq!(
+            junctions.len(),
+            2,
+            "the scene is meant to be two tees on one line: {junctions:?}"
+        );
+        let at = junctions[0].1;
+        let target = junctions[1].1;
+        let before_neighbour = neighbour(&state);
+
+        // Half way, onto the neighbour, two frames standing exactly on it, then past it. The two
+        // still frames are the crossing: the hand is not moving, so a boundary that moves is as
+        // wrong as one that stalls while it does.
+        let gap = target.y - at.y;
+        let route: Vec<f32> = vec![
+            at.y + gap * 0.5,
+            target.y,
+            target.y,
+            target.y,
+            target.y + gap * 0.5,
+            target.y + gap,
+        ];
+
+        use egui::{Event, Modifiers, PointerButton};
+        let press = |pressed: bool, pos: Pos2| {
+            vec![Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            }]
+        };
+        run_frame(&ctx, &mut state, &style, id, vec![Event::PointerMoved(at)]);
+        run_frame(&ctx, &mut state, &style, id, press(true, at));
+
+        // The widget the gesture is begun under, read on the first travelling frame rather than on
+        // the press: egui calls a press a *drag* only once the pointer has moved, so the field is
+        // empty on the frame the button goes down.
+        let mut held: Option<DragInFlight> = None;
+        let mut aligned_frames = 0u8;
+        let mut was = grabbed(&state);
+        let mut hand = at.y;
+        let mut asked_last = 0.0_f32;
+        for (step, &y) in route.iter().enumerate() {
+            let (_, painted) = run_frame_painting(
+                &ctx,
+                &mut state,
+                &style,
+                id,
+                vec![Event::PointerMoved(Pos2::new(at.x, y))],
+            );
+            assert_eq!(
+                painted.len(),
+                1,
+                "frame {step} of the drag drew {} handles ({painted:?}) — the gesture's own handle \
+                 must be on screen every frame of it, crossing or no crossing",
+                painted.len()
+            );
+
+            let live = drag_in_flight(&ctx, id)
+                .unwrap_or_else(|| panic!("frame {step}: the dock is holding nothing mid-drag"));
+            match held {
+                None => {
+                    assert!(
+                        matches!(live.subject, DragSubject::Junction { .. }),
+                        "the scene has to be a junction gesture: {:?}",
+                        live.subject
+                    );
+                    held = Some(live);
+                }
+                Some(held) => {
+                    assert_eq!(
+                        live.widget, held.widget,
+                        "frame {step}: the gesture changed widgets mid-flight"
+                    );
+                    assert_eq!(
+                        format!("{:?}", live.subject),
+                        format!("{:?}", held.subject),
+                        "frame {step}: the gesture changed its subject mid-flight"
+                    );
+                }
+            }
+
+            let now = grabbed(&state);
+            let travelled = now - was;
+            // Compared against what the hand did on the **previous** frame, and that one frame is
+            // structural rather than a fudge: `drag_junction` writes the split's fraction after this
+            // pass has already laid the surface out, so a boundary read off the geometry map is a
+            // frame behind the pointer for the whole gesture, not only at its start. Measured
+            // (delta 176.5 on the pass the hand moved, the same 177pt appearing in the layout on
+            // the next one) rather than assumed, and it is why the comparison is shifted instead of
+            // being loosened.
+            //
+            // Skipped on the first two frames: the press's own travel arrives with the first
+            // dragged frame, so neither pairs up one-to-one.
+            if step >= 2 {
+                assert!(
+                    (travelled - asked_last).abs() < 1.5,
+                    "frame {step}: the hand moved {asked_last}pt on the frame before and the \
+                     boundary moved {travelled}pt on this one — a stall in the middle of a gesture"
+                );
+            }
+            asked_last = y - hand;
+            if (now - neighbour(&state)).abs() < 2.0 {
+                aligned_frames += 1;
+            }
+            (was, hand) = (now, y);
+        }
+        run_frame(
+            &ctx,
+            &mut state,
+            &style,
+            id,
+            press(false, Pos2::new(at.x, *route.last().unwrap())),
+        );
+
+        // The scene has to *be* about a crossing, and this is the gate that says so: some frame of
+        // it had the two dividers on one line, which is when the detector's answer changes shape.
+        assert!(
+            aligned_frames > 0,
+            "no frame of this drag had the grabbed divider on the neighbour's line, so the scene \
+             never reached the crossing it is named after"
+        );
+        assert!(
+            (neighbour(&state) - before_neighbour).abs() < 1.0,
+            "the junction the drag swept past moved with it: {before_neighbour} to {}",
+            neighbour(&state)
         );
     }
 

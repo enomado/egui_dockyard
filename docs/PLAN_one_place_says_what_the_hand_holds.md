@@ -538,6 +538,51 @@ Smallest blast radius first, and each step is committable on its own:
   bucket nothing would increment. Teaching the harness to press a window's edge — so
   `drag_complaint`'s strong form actually gets exercised against a resize — is still open; it was
   out of scope for wiring the gesture itself, which the new unit test now covers on its own.
+* ~~**A junction gesture could be taken away from the hand by the detector**~~ (Стас, 2026-08-10 —
+  «когда тройник пытается стать крестовиной там что-то происходит», a bug) — **fixed, and it is this
+  plan's own rule reaching one layer further.** The field said what the hand held; the *handles* were
+  still rederived from geometry every frame, and a junction drag moves that geometry. Bring the
+  grabbed divider into line with the other band's and the detector stops seeing two tees and sees one
+  crossing: different `kind`, different key, **different widget id**. The handle holding the gesture
+  is then not drawn and not registered, egui goes on dragging a widget nobody answers for, and the
+  resize stands still until the hand opens.
+  A live junction gesture now takes `draw_junction_handles` over: one handle, named by the id
+  `begin_drag` recorded, placed where the gesture's own two boundaries cross *now*, with the detector
+  not consulted at all (`follow_held_junction`). Three things worth knowing:
+  * **This is not the "two at once" rule, and that rule did not cover it.** `begin_drag` fails loud
+    on a second subject, and nothing here grabbed a second one — the first was *lost*. "At most one"
+    and "the one is not taken away" are two invariants, and only the first was written down.
+  * **A crossing point is where two tees would be, so the subject is what decides.** Stated by Стас
+    as the resolution: what the hand holds is decided at `drag_started`, and a gesture begun on a tee
+    stays a tee's — which is also what `DragSubject::Junction` can express, since it carries one
+    divider and a crossing is never dragged at all (it senses clicks only).
+  * **The centre is one coordinate from each line, not the intersection of the two rectangles.** A
+    divider ends *on* the line rather than crossing it, so the two separator rects meet edge to edge
+    and `Rect::intersect` has no area. That early return left the detector's path handling every
+    second frame and the gesture travelled exactly half as far as the hand did — found by the test,
+    not by reading.
+  Measured, not assumed — `a_tee_dragged_onto_a_neighbour_keeps_its_handle_and_its_pace`, whose
+  aiming *is* the test: the pointer is walked onto the neighbour's own position and held there for
+  two frames, because with even steps the crossing window (one device pixel) falls between frames
+  and the mutation goes green — which is exactly why the older
+  `a_drag_keeps_hold_of_the_junction_it_grabbed` never caught this. Two mutations, both red at
+  "frame 2 of the drag drew 0 handles": takeover removed, and takeover removed with the room gate
+  below also off (so the bug is the reported one and not a regression of that gate). The pace oracle
+  compares the boundary against what the hand did on the *previous* frame — the geometry map is a
+  frame behind the pointer by construction, since `drag_junction` writes the fraction after the pass
+  has laid out — and that shift was measured (176.5pt of delta, the same 177pt in the layout one
+  frame later) rather than tuned.
+* ~~**The junction button shrank to fit its room**~~ (Стас, same session — «плавное уменьшение
+  соседней кнопки тоже не надо делать») — **removed.** `toggle_metrics` scaled the square and both
+  margins by `room / widest`; `room` is a **gate** now — a junction with less room than the whole
+  button needs offers no handle at all, and its separators are grabbed the ordinary way. Two tests
+  written against the old behaviour became one behavioural test
+  (`a_cross_without_room_for_the_whole_button_has_no_handle`), and the "hidden divider" test's second
+  half flipped from "a smaller button still answers" to "there is no button here", with a roomy
+  control added so the first half cannot pass for free. The gate is also what reddened the sweep at
+  seed 35 before the takeover above existed — a gesture whose handle the gate withdrew mid-flight —
+  which is why the two land together.
+
 * **The stand-down guard reads liveness with an off-by-one that is now in two places** —
   `in_flight_at`'s `pass + 1 >= now` and the per-handle grip's `held_on + 1 >= pass` in
   `draw_one_handle`. Same rule, same reason, two copies; if a third arrives it wants a name.

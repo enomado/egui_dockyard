@@ -1,8 +1,10 @@
 # Plan: one drag to resize them all
 
-**Status: done** — commit `a231e4d`, mirrored into the application's vendored copy. Entry point
-for whoever picks this up — read this file, then
-[src/widgets/dock_area/show/junction.rs](../src/widgets/dock_area/show/junction.rs).
+**Status: done** — commit `a231e4d`, mirrored into the application's vendored copy; the sweep
+that judges the gesture landed after it (`09b0909`, see "The sweep, added afterwards"). Entry
+point for whoever picks this up — read this file, then
+[src/widgets/dock_area/show/junction.rs](../src/widgets/dock_area/show/junction.rs) and the
+junction steps in [tests/dst.rs](../tests/dst.rs).
 
 **Where it comes from.** Upstream PR [#155](https://github.com/anhosh/egui_dock/pull/155), "one
 drag to resize them all" — dragging the point where two separators meet, so both move at once.
@@ -74,12 +76,60 @@ approach), plain click does nothing, cross keeps the pinwheel.
   line. The three handles are drawn where the separators meet, and the two tees' stems point at
   their own bands (mirror images of each other).
 
+## The sweep, added afterwards
+
+The backlog's first item — "the sweep has no junction drag in its alphabet" — is closed. Four
+steps: `GrabJunction` presses a handle and does not let go, `MoveJunction` carries it,
+`ClickJunction` presses and lets go without travelling, `ReleaseJunction` opens the hand. What
+the generator draws in between runs *into* a live drag holding two or three persisted numbers
+open. `Sim::junctions` was rewritten first, because it still only knew about crossings — and
+that was not merely lost coverage: `handle_over` is what keeps the separator gestures off a
+handle, and it could not keep them off one it did not know about.
+
+Three things it found, none of them planted:
+
+* **A middle click ends the resize.** Any release ends an egui drag, so closing a tab under the
+  hand ends the junction drag and pays its `LayoutCommitted` in that frame. The dock is right;
+  the harness believed a closed hand meant a live gesture. Same shape as FINDINGS.md's "a middle
+  click ended egui's drag and the dock went on carrying the tab", on the other gesture.
+* **The commit observer was counting the wrong thing** — and the fix for it was the wrong call,
+  which is the more useful half. Switching from frames to events looked sharper and is not what
+  the contract says: `layout_committed()` is a per-frame bool, so two changes in one frame are
+  one undo entry. Reverted, with the events kept beside the count so a failure can name them.
+* **A held handle follows the pointer, whatever moved it.** `CloseTab` delivers its middle click
+  at the tab, so the pointer travels — and a junction drag writes every frame, unlike a tab drag
+  which writes nothing until the hand opens. `BoundaryRule` grew a list, and every step under a
+  hold names the held junction's splits.
+
+Mutation-checked, and the first attempt was the point:
+
+* making a plain click transpose again left the sweep **green** — nothing in it ever clicked a
+  handle, because a hold's release is a step and many frames from its press. That is what
+  `ClickJunction` is for; with it the mutation reddens on seed 39.
+* zeroing `outer`'s delta also left it green: a cross has two dividers, so "more than one
+  boundary moved" holds without the line moving at all. Split into `moved_line_and_divider`.
+* dropping the tightest-delta coordination stays green **here** — see the backlog below.
+
 ## Backlog found while doing this
 
-* **The sweep has no junction drag in its alphabet.** `Step::CrossToggle` presses the handle;
-  nothing drags it. The gesture that moves two or three fractions at once is exactly the shape
-  the sweep is good at judging (`BoundaryRule`, the commit counters, `validate()` after every
-  step) and it is currently unswept — the six unit tests are scenes someone chose.
+* **The cross-pair coordination is gated by one scene, not by the sweep.** A leg that moves one
+  aligned divider and not the other is a named failure in the sweep now, but the scene that
+  produces it — a cross with one divider already at its limit and the other with room — is never
+  reached: dropping the coordination from `drag_junction` leaves the sweep green and reddens
+  only `a_cross_dragged_past_one_dividers_limit_stays_one_line`. The oracle is in place and the
+  generator does not build the state. Written down rather than tuned for.
+* **A junction that loses its handle mid-drag ends without anything ending it.** The handle is
+  keyed by the splits that meet at it, so a close under the hand can leave them all alive and no
+  longer *meeting* — and the handle that is not drawn never sees its release, so no
+  `LayoutCommitted` is emitted for a resize that really happened. Reached 4 times across the
+  sweep and deliberately left `Unjudged`: whether that release owes an event is a question about
+  the crate's contract, and the answer is not obviously "yes" (the close that killed the handle
+  announces itself, so a consumer saving the whole layout still saves the fractions).
+* **`unrenestable` reads 0.** The sweep never squeezes a band thin enough for a crossing to be
+  offered a handle while the transposition is withheld, so the branch that tells the two
+  gestures apart is exercised only by `a_cross_whose_parts_are_thinner_than_the_margin_...`.
+* **`dbg_moved_leaf` asserts nothing.** Left over from diagnosing the settle problem: it runs a
+  scene and prints. A test that cannot fail is a line in the suite's runtime and nothing else.
 * **The handle count grew from crossings to all junctions, and `handle_room` is O(nodes) per
   handle per frame** — it walks the whole surface breadth-first to find the nearest divider. It
   was that before; what changed is how many handles there are. Worth a measure on a real

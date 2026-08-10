@@ -1,7 +1,8 @@
 # Plan: one place says what the hand holds
 
-**Status: steps 1–4 and 6 landed; step 5 (the window) is the only one open, and it is gated on
-open question 1.** Asked for by Стас on 2026-08-10, immediately after
+**Status: every step landed — 1–6, the window included.** What is left is in the backlog at the
+end, and the one gesture still outside the field is named there (a window *resize*, which is not
+a window *move*). Asked for by Стас on 2026-08-10, immediately after
 `JunctionDrag` landed (`f2693f7`) — that struct is one corner of this and is explicitly *not*
 the shape wanted. Entry point for whoever picks it up: this file, then
 [src/widgets/dock_area/state.rs](../src/widgets/dock_area/state.rs), then the hold bookkeeping in
@@ -41,6 +42,9 @@ Five gestures, four places, and one of them is not the dock's at all.
 | A separator | `State::separator_drag_start: Option<(Id, f32)>` | widget id + the ratio it started at |
 | A junction corner | `State::junction_drag: Option<JunctionDrag>` | handle id + the two nodes + liveness |
 | A floating window being moved or resized | **nowhere** — it is `egui::Window`'s own drag | — |
+
+(Written before step 5. The window's *move* is in the field now — it was never as far outside as
+this row says: egui hands the dock the response, the dock was dropping it. The *resize* still is.)
 
 Four `Option`s that are mutually exclusive in fact and in nothing else: nothing in the type says
 two of them cannot be `Some` at once, and what actually enforces it is egui handing one drag to
@@ -134,10 +138,16 @@ own order and comments, not in two types.
 
 ## Open questions to settle before writing code
 
-1. **Can `Window` be filled honestly?** A floating window is moved by `egui::Window`'s own title
-   drag, which the dock never sees (`window_ui::create_window`). Either the dock reads egui's drag
-   state for that window's id, or it takes the title-bar drag over. A variant that is never set is
-   worse than no variant — it makes the enum say something false about what the dock knows.
+1. ~~**Can `Window` be filled honestly?**~~ — **yes, and the premise was half wrong.** There is no
+   title drag to be outside of: `create_window` builds the window with `title_bar(false)`, which
+   egui resolves to drag-from-anywhere over the window's body (`WindowDrag::Anywhere`, window.rs
+   §"Without a title bar, `TitleBar` mode would leave the window unmovable"). That gesture is an
+   ordinary egui widget — the area's `"move"` id — and `Window::show` **hands the dock its
+   `Response`**, which the dock was discarding. So the dock neither takes the drag over nor reads
+   egui's private state: it reads a response it was already being given. See step 5.
+   The honest limit that remains is a window **resize**: egui's resize edges are separate widgets
+   whose responses the dock is not handed, so `DragSubject::Window` means "being moved" and says
+   so. That is the backlog item at the end, not a variant that lies.
 2. **Does `Panels` come with the gesture, or before it?** Dragging a whole leaf does not exist
    today. The variant can land first (as the place for it), but then it is dead until the gesture
    arrives, and this crate does not keep dead branches. Probably: land the enum with the four
@@ -244,7 +254,36 @@ Smallest blast radius first, and each step is committable on its own:
    Measured, not assumed: reading the origin as the *current* pointer (delta always zero, so the
    pull-out never happens) reddens eleven by name, `seeded_scenarios_keep_the_dock_well_formed`
    and both `ids.rs` doctests among them.
-5. **The window**, if question 1 has an honest answer.
+5. ~~**The window**, if question 1 has an honest answer~~ — **done**, and the answer cost one line
+   of plumbing: `Window::show`'s return value was being thrown away, and it is the gesture.
+   `DragSubject::Window { surface }` is written by `follow_window_move` in `window_surface.rs`
+   from that response — `drag_started` / `dragged` / `drag_stopped`, the same four calls every
+   other gesture makes, with egui's own widget id as the name.
+   Four things worth knowing:
+   * **The dock reads the gesture, it does not own it.** Nothing here moves a window; egui has
+     already moved it by the time this runs. That is why the variant is honest without taking the
+     title bar over — the alternative question 1 offered and did not need.
+   * **A window move commits nothing, and `moved` is still kept.** Where a floating window sits is
+     egui's area memory, not the dock's tree, so there is no layout change to diff and no
+     `LayoutCommitted` to send. `moved` is the gesture's own question — "is the layout being
+     edited right now" is asked of every subject alike — and it is asked of the *pointer*
+     (`drag_delta`), like a carried tab's, because the dock keeps none of the geometry it writes.
+   * **The sweep already reached this gesture and nobody knew.** `SubjectWatch::window` came out at
+     **193 frames across 96 seeds** the first time it was counted: a press aimed at a window's leaf
+     body that no inner widget answers to falls through to the window itself, which the harness has
+     been doing all along. It was invisible because `drag_complaint` is asked at step boundaries and
+     these gestures begin and end inside one step. The counter is gated non-zero now.
+   * **`subject_is_gone` for a window is "the surface is gone"** — egui stops handing out the
+     response the moment the dock stops drawing the surface, which is the same divergence a
+     junction has and the same branch handles it.
+   Measured, not assumed — three mutations, each red by name: never `begin_drag` → the directed
+   test by its own `expect` **and** the sweep's new `subjects.window` gate (0 of 96 seeds); never
+   `mark_drag_moved` → `the pointer travelled [60.0 40.0], so the gesture has done something`;
+   never `end_drag` → the release frame still reports a window in hand.
+   That last one is the reason the directed oracle reads `DockAreaResponse::dragging` **inside the
+   frame** rather than `drag_in_flight` after it: a pass later the un-ended gesture is filtered out
+   as a leftover and the mutation goes green — the same "a leftover that is not kept alive is
+   unobservable" step 6 recorded, met from the other side.
 6. ~~**Publish, and delete the harness's private bookkeeping**~~ — **done**, and one half of the
    sentence was wrong. The exemption went; the bookkeeping stayed, and had to.
    `DragSubject`, `DragInFlight` and `DragSource` are public, readable two ways:
@@ -366,10 +405,21 @@ Smallest blast radius first, and each step is committable on its own:
   through `in_flight_at`, which is where the rule lives — but the pairing "filter by the current
   pass" is written twice, and a third reader that forgot the filter would publish a leftover as a
   live gesture. If one arrives, the pairing wants a name of its own.
-* **`window_ui::create_window` is the only gesture left outside the field** — step 5's whole
-  content, and open question 1 is unchanged by step 6: publishing made the *absence* legible
-  (a consumer reading `dragging` sees `None` while a window is being moved) without making it any
-  more honest to add a variant the dock cannot set.
+* ~~**`window_ui::create_window` is the only gesture left outside the field**~~ — the *move* moved
+  in with step 5. What is left outside is the **resize**: egui's resize edges are separate widgets
+  (`do_resize_interaction`, ids mixed off the area's own), and `Window::show` hands the dock no
+  response for them, so a window being resized is a hand the field cannot see. Two ways in, and
+  neither is free: read them by id off the context (`ctx.read_response(area_id.with("right"))`),
+  which hard-codes egui's private naming and would rot silently; or take the resize over the way
+  the dock could have taken the title bar over. Worth doing only with a gate that catches the
+  rot — and note the sweep never reaches it either (it aims at leaf rects, and the edges are on
+  the frame), so a gate would need a directed scene first.
+* **A window that is resized is invisible to the sweep's own agreement check, and that is luck.**
+  `drag_complaint` compares `ctx.dragged_id()` against the dock's `widget` for every gesture; a
+  resize drag would be egui dragging a widget the dock does not name, which is the complaint's
+  strong form firing on something that is not a bug. It stays green today only because the sweep
+  never presses on a window's frame edge. Whoever teaches the harness to resize a window must
+  settle the item above first, or that scene will arrive as a false failure.
 * **The stand-down guard reads liveness with an off-by-one that is now in two places** —
   `in_flight_at`'s `pass + 1 >= now` and the per-handle grip's `held_on + 1 >= pass` in
   `draw_one_handle`. Same rule, same reason, two copies; if a third arrives it wants a name.

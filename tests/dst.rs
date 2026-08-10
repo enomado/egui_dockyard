@@ -658,6 +658,12 @@ struct SubjectWatch {
     separator: usize,
     /// Frames spent moving a junction corner — the line and the divider that ends on it.
     junction: usize,
+    /// Frames spent moving a floating window.
+    ///
+    /// The gesture is egui's own drag-from-anywhere, so this counter answers a question the
+    /// others do not: whether the sweep's vocabulary reaches a window move at all. A press aimed
+    /// at a window's leaf that no inner widget answers to falls through to the window itself.
+    window: usize,
     /// Gestures the dock announced and then let go of while egui was still dragging their
     /// widget — the drag whose subject left the tree, which nothing is left to end.
     ///
@@ -1185,6 +1191,7 @@ impl Sim {
             Some(DragSubject::Tab(_)) => self.subjects.tab += 1,
             Some(DragSubject::Separator { .. }) => self.subjects.separator += 1,
             Some(DragSubject::Junction { .. }) => self.subjects.junction += 1,
+            Some(DragSubject::Window { .. }) => self.subjects.window += 1,
             None => (),
         }
         // What the dock named, kept one step longer than the dock keeps it — see
@@ -1669,6 +1676,10 @@ impl Sim {
                     && point.moves.contains(&outer)
                     && point.moves.contains(&divider)
             }),
+            // A window's gesture belongs to egui, and egui stops handing out the response the
+            // moment the dock stops drawing the surface — which is exactly when the surface is
+            // gone. Asked of the tree, like the rest.
+            DragSubject::Window { surface } => !self.state.is_surface_valid(surface),
         }
     }
 
@@ -5183,6 +5194,7 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         subjects.tab += outcome.subjects.tab;
         subjects.separator += outcome.subjects.separator;
         subjects.junction += outcome.subjects.junction;
+        subjects.window += outcome.subjects.window;
         subjects.abandoned += outcome.subjects.abandoned;
 
         if let Some(failure) = outcome.failure {
@@ -5552,6 +5564,14 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
          {} handles were grabbed. `moved_together` above can be satisfied by a drag that moves \
          two boundaries for any reason; this is the dock naming the gesture",
         junction.offered
+    );
+    assert!(
+        subjects.window > 0,
+        "the dock never once reported holding a floating window, across {SEEDS} seeds. This is \
+         the one gesture in the vocabulary that is not the dock's own widget — egui moves the \
+         window and the dock only reads the response — so a zero here means either the sweep \
+         stopped pressing inside windows, or egui stopped reporting the move where the dock \
+         listens for it, and neither would fail to compile"
     );
     assert!(
         subjects.abandoned > 0,

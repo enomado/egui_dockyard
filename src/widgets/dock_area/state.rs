@@ -11,9 +11,8 @@ use crate::{NodePath, Style, SurfaceIndex};
 /// happened to move. The two families in it (things that move, boundaries that resize) are not
 /// the same kind of thing, but a consumer asking "is the layout being edited" wants both.
 ///
-/// Every gesture the dock owns today is a variant; a floating window is moved by
-/// [`egui::Window`]'s own title drag, which the dock never sees, and so is deliberately absent
-/// rather than present and never set. See `docs/PLAN_one_place_says_what_the_hand_holds.md`.
+/// Every gesture the dock owns today is a variant. See
+/// `docs/PLAN_one_place_says_what_the_hand_holds.md`.
 ///
 /// Read from outside a frame with [`drag_in_flight`](crate::drag_in_flight), or at the end of
 /// one from [`DockAreaResponse::dragging`](crate::dock_area::DockAreaResponse::dragging).
@@ -28,6 +27,28 @@ pub enum DragSubject {
     /// the tab has left the tree). A second shape of the same address would be a second place to
     /// keep that argument, which is the shape this whole field exists to remove.
     Tab(DragSource),
+
+    /// A floating window surface, being moved by the hand.
+    ///
+    /// The whole surface and nothing inside it: a window is dragged as one thing, and which of
+    /// its leaves happens to sit under the pointer is not part of what is being held.
+    ///
+    /// The gesture is not the dock's own widget — it is [`egui::Window`]'s, which since it is
+    /// built with no title bar means egui's drag-from-anywhere over the window's body. The dock
+    /// does not take that over; it *reads* it, off the [`Response`](egui::Response) that
+    /// `Window::show` hands back and that the dock used to drop on the floor. So the id in
+    /// [`DragInFlight::widget`] is egui's own (the area's `"move"` widget) and compares equal to
+    /// [`Context::dragged_id`] exactly like every other gesture here.
+    ///
+    /// **A resize is not this.** egui's resize edges are separate widgets with their own ids, and
+    /// the dock is handed no response for them — so a window being resized is a gesture the field
+    /// still cannot see. That is a stated limit rather than a silent one: this variant says
+    /// "the hand is moving this window", not "the hand is doing something to this window".
+    Window {
+        /// Which floating surface it is. Always [`SurfaceIndex::Window`] — the main surface is
+        /// not a window and cannot be dragged.
+        surface: SurfaceIndex,
+    },
 
     /// One separator: the split whose ratio the drag is writing.
     ///

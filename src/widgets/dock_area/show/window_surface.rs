@@ -8,7 +8,7 @@ use crate::{
     dock_area::{
         events::DockEvent,
         show::{border_clearance, collapsed_strip_height},
-        state::State,
+        state::{DragSubject, State},
         tab_removal::TabRemoval,
     },
     utils::{fade_visuals, rect_set_size_centered},
@@ -161,10 +161,67 @@ impl<Tab> DockArea<'_, Tab> {
             } else {
                 self.render_nodes(ui, tab_viewer, state, surf_index, fade_style);
             }
-        });
+        })
+        // `None` only for a window that is closed; this one has no `open` flag to close it with.
+        .map(|inner| self.follow_window_move(&inner.response, surf_index, state));
 
         if !open {
             self.to_remove.push(TabRemoval::Window(window));
+        }
+    }
+
+    /// Puts a window the hand is moving into the field that says what the hand holds.
+    ///
+    /// The gesture is egui's, not the dock's: a window is built with no title bar, which egui
+    /// resolves to drag-from-anywhere over the window's body, and it is `Window::show`'s own
+    /// returned response — the area's `"move"` widget — that reports it. Nothing here takes the
+    /// drag over or moves anything; egui has already moved the window by the time this runs. What
+    /// it does is *name* the gesture, so that "what is being dragged right now" has one answer
+    /// for a window as it does for a tab or a boundary, and so that the id the dock reports
+    /// compares equal to [`egui::Context::dragged_id`] (see [`DragInFlight::widget`]).
+    ///
+    /// A window move commits nothing: where a floating window sits is egui's area memory, not
+    /// the dock's tree, so there is no layout change for a consumer to diff and no
+    /// [`DockEvent::LayoutCommitted`] to send. `moved` is still recorded, because it is the
+    /// gesture's own question — "has any of it actually moved yet" — and a consumer asking "is
+    /// the layout being edited right now" asks it of every subject alike.
+    ///
+    /// [`DragInFlight::widget`]: crate::DragInFlight::widget
+    fn follow_window_move(&self, response: &Response, surf_index: SurfaceIndex, state: &mut State) {
+        let pass = response.ctx.cumulative_pass_nr();
+
+        if response.drag_started() {
+            state.begin_drag(
+                response.id,
+                DragSubject::Window {
+                    surface: surf_index,
+                },
+                response
+                    .interact_pointer_pos()
+                    .expect("a drag that started was pressed somewhere"),
+                pass,
+            );
+        }
+
+        if response.dragged() {
+            // Alive this frame, so a stale entry can be told from a live one — a window whose
+            // surface is closed under the hand is never drawn again, and so never reports the
+            // release that would end it.
+            state.keep_drag_alive(response.id, pass);
+            // Asked of the pointer and not of any stored geometry, for the same reason a carried
+            // tab's `moved` is: the drag writes into egui's area state, which the dock does not
+            // keep, so "did this gesture do anything" is a question about the hand.
+            if response.drag_delta() != Vec2::ZERO
+                && state
+                    .in_flight()
+                    .is_some_and(|drag| drag.widget == response.id)
+            {
+                state.mark_drag_moved();
+            }
+        }
+
+        if response.drag_stopped() {
+            state.end_drag(response.id);
         }
     }
 

@@ -202,10 +202,12 @@ pub fn dragged_tab<Tab>(
     // enough out of the bar for a drop to be resolvable at all.
     //
     // The conjunction is what this function has always meant, back when both halves lived in
-    // `dnd` together and the second was implied by the first. It stops being written this way
-    // in the step that publishes the subject itself, where "what is in the hand" and "where
-    // would it land" become two separate answers rather than one — see
-    // `docs/PLAN_one_place_says_what_the_hand_holds.md`.
+    // `dnd` together and the second was implied by the first — and it stays the conjunction now
+    // that the two answers exist apart ([`drag_in_flight`] for what is in the hand,
+    // [`drag_hover_node`] for where it would land). Kept, rather than split, because it is the
+    // one that resolves: a caller asking "which tab is being dragged, as a path into the tree I
+    // have" wants both halves and wants them merged with staleness, which is exactly what the
+    // two general readers refuse to do for it.
     state.dnd.as_ref()?;
     state.carried_tab()?.resolve(dock_state)
 }

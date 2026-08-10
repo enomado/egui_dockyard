@@ -360,6 +360,16 @@ Smallest blast radius first, and each step is committable on its own:
   same bug with the paint order fixed.
 * ~~**`DragSubject` is `pub(super)` for now.**~~ — published in step 6, together with
   `DragInFlight` and `DragSource` and the two accessors that hand one out.
+* **Two call sites now ask "is anything in flight *now*" the same way** (found while doing step
+  6): `show/mod.rs` fills the response with `in_flight_at(cumulative_pass_nr())`, and
+  `ids::drag_in_flight` does the same thing between frames. Not a duplicated *rule* — both go
+  through `in_flight_at`, which is where the rule lives — but the pairing "filter by the current
+  pass" is written twice, and a third reader that forgot the filter would publish a leftover as a
+  live gesture. If one arrives, the pairing wants a name of its own.
+* **`window_ui::create_window` is the only gesture left outside the field** — step 5's whole
+  content, and open question 1 is unchanged by step 6: publishing made the *absence* legible
+  (a consumer reading `dragging` sees `None` while a window is being moved) without making it any
+  more honest to add a variant the dock cannot set.
 * **The stand-down guard reads liveness with an off-by-one that is now in two places** —
   `in_flight_at`'s `pass + 1 >= now` and the per-handle grip's `held_on + 1 >= pass` in
   `draw_one_handle`. Same rule, same reason, two copies; if a third arrives it wants a name.

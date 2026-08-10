@@ -52,6 +52,7 @@ use egui::{
     CentralPanel, Context, Event, Id, Modifiers, PointerButton, Pos2, RawInput, Rect, Ui, Vec2,
     WidgetText,
 };
+use egui_dock::dock_area::DockEvent;
 use egui_dock::shape::subtree_shape;
 use egui_dock::{
     DockArea, DockLayout, DockState, Node, NodeId, NodePath, Split, Style, SurfaceIndex, TabId,
@@ -187,6 +188,38 @@ enum Step {
     /// change at all — so unlike every other step, its oracle is a pixel comparison rather
     /// than a claim about the tree.
     ToggleCrossSplit { cross: usize },
+    /// Press a junction handle and **keep holding it**, travelling `by` points: the hand closes
+    /// where two or three separators meet, and every one of them follows.
+    ///
+    /// A hold rather than a finished gesture, for the reason the whole vocabulary grew one: a
+    /// drag that moves two or three persisted numbers at once is exactly the kind that has to
+    /// survive the dock being edited underneath it, and while a step was a whole gesture that
+    /// state was unreachable for every seed. The steps that follow run *into* a live junction
+    /// drag — a leaf closed through the model, a tab closed through the frame layer, a fresh
+    /// split, a quiet frame — until [`Step::ReleaseJunction`] lets go.
+    ///
+    /// `by` spans both sides of egui's drag threshold on purpose. Under it the press is a
+    /// *click*, which a handle must answer with nothing at all — that is the whole reason the
+    /// transposition moved to ctrl+click, and it needs a step that can fall short.
+    GrabJunction { junction: usize, by: [i16; 2] },
+    /// Click a junction handle: press and let go without travelling at all.
+    ///
+    /// A whole gesture rather than a leg of the hold, and it has to be one — a click is a press
+    /// and a release *inside egui's click window*, and the release of a hold arrives a step and
+    /// many frames later. Written after a mutation went unnoticed: making a plain click
+    /// transpose again left the sweep green, because nothing in it ever clicked a handle.
+    ///
+    /// The rule is that it does **nothing at all**. That is why the transposition is a
+    /// ctrl+click: a press meant as a drag that falls short of the threshold arrives as this,
+    /// and a gesture aimed at moving a line must not rewrite the tree when it comes up short.
+    ClickJunction { junction: usize },
+    /// Carry a held junction handle `by` further, moving every separator that meets there.
+    MoveJunction { by: [i16; 2] },
+    /// Let go of a held junction handle.
+    ///
+    /// A release with no junction in hand is a *skipped* step, like every other step that finds
+    /// nothing to act on — the same shrinker contract [`Step::Release`] keeps.
+    ReleaseJunction,
     /// Let a frame pass with no input at all.
     Idle,
 }
@@ -210,6 +243,17 @@ impl Step {
                 | Step::GrabSeparator { .. }
                 | Step::CentreSeparator { .. }
                 | Step::ToggleCrossSplit { .. }
+                | Step::GrabJunction { .. }
+                | Step::ClickJunction { .. }
+        )
+    }
+
+    /// Whether this step is part of a junction drag itself rather than something interleaved
+    /// into it — the same distinction [`Step::is_part_of_the_hold`] draws, for the other hold.
+    fn is_part_of_the_junction_drag(self) -> bool {
+        matches!(
+            self,
+            Step::GrabJunction { .. } | Step::MoveJunction { .. } | Step::ReleaseJunction
         )
     }
 
@@ -519,13 +563,13 @@ struct Sim {
     /// fired blind, and a harness that skips everything is green and useless — so these are
     /// counted next to the successes rather than dropped on the floor.
     refused: [usize; REFUSALS],
-    /// Finalised layout changes reported since the last [`Sim::take_commits`].
+    /// Finalised layout changes reported since the last [`Sim::take_commits`] — see [`Commits`].
     ///
     /// Accumulated rather than read per frame because one gesture spans several frames and only
     /// one of them carries the event — and *counted* rather than flagged, because the separator's
     /// contract is about the number: a drag that lasts six frames must produce exactly one
     /// commit, not one per frame. A boolean cannot tell those apart.
-    commits: usize,
+    commits: Commits,
     /// How much the separator gestures actually got to do — see [`SeparatorWatch`].
     separator: SeparatorWatch,
     /// How much the cross-split toggle got to do — see [`CrossWatch`].
@@ -535,6 +579,116 @@ struct Sim {
     /// How much of the interleaving a hold makes possible was actually reached — see
     /// [`HoldWatch`].
     holds: HoldWatch,
+    /// The junction handle the hand has not let go of, if there is one — see [`JunctionHold`].
+    ///
+    /// A field of its own rather than a second shape of [`Hold`]: the two holds carry different
+    /// things (a tab's identity against a list of splits), are judged by different oracles, and
+    /// cannot both be live — every step that closes the hand is refused while either is.
+    junction_hold: Option<JunctionHold>,
+    /// How much the junction gestures got to do — see [`JunctionWatch`].
+    junction: JunctionWatch,
+}
+
+/// What the dock announced over a stretch of frames, as the oracles read it.
+///
+/// Two numbers, and only the first is judged. `DockAreaResponse::layout_committed()` is a
+/// per-frame **bool** and it is the documented trigger — one undo entry, one save — so the unit
+/// [`CommitRule`] is written in is the frame, and two changes landing together are one entry.
+/// The events are carried alongside purely so a failure can name them: "3 where 2 were
+/// expected" leaves the reader to guess which third one it was.
+#[derive(Clone, Debug, Default)]
+struct Commits {
+    /// Frames that carried at least one finalised event.
+    frames: usize,
+    /// The finalised events themselves, in order, for the report.
+    events: Vec<DockEvent>,
+}
+
+/// A junction drag in flight across step boundaries: the primary button went down on a handle
+/// and has not come up.
+#[derive(Clone, Debug)]
+struct JunctionHold {
+    /// Where the hand is. The handle follows the separators it sits on, so after a drag that
+    /// moved them this is the handle's new home as much as the pointer's.
+    at: Pos2,
+    /// Every split the handle was made of, `outer` first — see [`JunctionPoint::moves`].
+    ///
+    /// Its length is the kind: two for a tee, three for a cross. Nothing here needs to know
+    /// which, and a second field saying so would be a second place for it to be wrong.
+    ///
+    /// Identities, and read *once* at the grab: the gesture moves the very boundaries a fresh
+    /// walk would read, and a step under the hold can take them out of the tree entirely, which
+    /// is the interleaving this exists to reach ([`JunctionWatch::died`]).
+    moves: Vec<NodePath>,
+    /// Whether any frame of this drag has moved one of them yet.
+    ///
+    /// The harness's own copy of the flag the crate keeps in `State::junction_drag`, and what
+    /// decides whether the release must announce a finalised change. Accumulated per step rather
+    /// than compared across the whole hold, because a drag that moves out and back would come
+    /// out net zero while the crate — which asks the question once per frame — saw motion.
+    moved: bool,
+    /// Whether egui called the press a drag at all. A press that did not travel far enough is a
+    /// click, and a click on a handle must do nothing whatsoever.
+    dragging: bool,
+}
+
+/// Coverage of the junction gestures, counted while the run happens.
+///
+/// Same discipline as [`CrossWatch`]: every one of these can be zero in a green sweep, and each
+/// zero names a different thing that never happened.
+#[derive(Clone, Copy, Default, Debug)]
+struct JunctionWatch {
+    /// Grabs that found a handle to press at all.
+    offered: usize,
+    /// ...of which pressed a tee, and of which a cross.
+    ///
+    /// Two numbers because they are not interchangeable: a tee is the shape this harness could
+    /// not see at all until the detection was rewritten, and a sweep that only ever grabbed
+    /// crosses would say nothing about the kind that outnumbers them — every band divider ends
+    /// on the line, and only some of them find a partner across it.
+    tees: usize,
+    crosses: usize,
+    /// Grabs egui called a drag.
+    live: usize,
+    /// ...and grabs whose travel fell short of egui's threshold, so the gesture is a click. A
+    /// zero means the branch the ctrl+click change exists for — a press meant as a drag that
+    /// did not travel far enough — was never once reached.
+    short: usize,
+    /// Drag steps (a grab or a move) that moved at least one boundary.
+    moves: usize,
+    /// ...of which moved more than one at once.
+    ///
+    /// The discriminator, and the only one available from outside the crate: a separator drag
+    /// moves the divider it holds and nothing else, so two boundaries moving under one gesture
+    /// is a junction drag and can be nothing else. A zero means every press landed on something
+    /// other than a handle — the drift [`Sim::junctions`] can otherwise hide behind a clamp,
+    /// since a drag that moves nothing looks the same whatever it was aimed at.
+    moved_together: usize,
+    /// ...of which moved the line the junction sits on *and* a divider that ends on it.
+    ///
+    /// The sharp form of the number above, and the one that survives a mutation: a cross has
+    /// two dividers, so "more than one boundary moved" is satisfied without the line moving at
+    /// all. Measured — zeroing `outer`'s delta in `drag_junction` left `moved_together` green
+    /// and this at nothing.
+    moved_line_and_divider: usize,
+    /// ...and drag steps that moved nothing at all, every separator already against its clamp.
+    clamped: usize,
+    /// Plain clicks on a handle — the gesture that must do nothing whatsoever.
+    clicks: usize,
+    /// Releases that fired.
+    releases: usize,
+    /// Steps that were not part of the junction drag and ran while it was live — the number this
+    /// stage is about, the same way [`HoldWatch::steps`] is for a carried tab.
+    steps: usize,
+    /// ...of which closed something.
+    closes: usize,
+    /// ...of which ended the drag while the hand stayed closed. **Any** release ends an egui
+    /// drag, and the middle click that closes a tab is one — so the gesture is over, and the
+    /// commit it owes is announced by the step that happened to be running.
+    ended_early: usize,
+    /// Releases whose junction was no longer *offered*: the splits the handle was made of had
+    /// stopped meeting (or left the tree), so it was not drawn and never saw its own release.
+    died: usize,
 }
 
 /// A gesture in flight across step boundaries: the primary button went down in one step and
@@ -770,12 +924,18 @@ struct Effect {
 /// every split beneath it, and it was the frame pass reacting to that range — clamping the
 /// stored ratio into a band derived from this frame's geometry — that rewrote layouts nobody
 /// touched.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum BoundaryRule {
     /// The step named no separator: every split must come through exactly as it was.
     None,
-    /// Exactly the split the gesture aimed at, and nothing else.
-    Only(NodePath),
+    /// Exactly the splits the gesture aimed at, and nothing else.
+    ///
+    /// A list rather than the single path it started as, because a junction handle is one
+    /// gesture on two or three separators at once — the line that runs through the junction and
+    /// the divider (or aligned pair) that ends on it. Naming them individually is what keeps the
+    /// rule sharp there: a drag on a junction is a licence to move *those*, and the splits below
+    /// them, whose range it changes, are still bystanders.
+    Only(Vec<NodePath>),
     /// Every split of a cross: a transposition recomputes all three by construction.
     Any,
 }
@@ -870,11 +1030,13 @@ impl Sim {
             effective: [0; OUTCOMES],
             aimed: 0,
             refused: [0; REFUSALS],
-            commits: 0,
+            commits: Commits::default(),
             separator: SeparatorWatch::default(),
             cross: CrossWatch::default(),
             hold: None,
             holds: HoldWatch::default(),
+            junction_hold: None,
+            junction: JunctionWatch::default(),
         };
         // One frame before anything else: gestures aim with geometry, and geometry does not
         // exist until a pass has run.
@@ -908,33 +1070,52 @@ impl Sim {
 
         let state = &mut self.state;
         let style = &self.style;
-        let mut commits = 0usize;
+        let mut commits = Commits::default();
         let mut output = self.ctx.run_ui(input, |ctx| {
             CentralPanel::default().show(ctx, |ui| {
                 let response = DockArea::new(state)
                     .style(style.clone())
                     .show_inside_with_response(ui, &mut Viewer);
                 // One per *frame* that carried a finalised event, which is the unit the contract
-                // is written in: a live separator drag reports `SeparatorDragging` on every frame
-                // it moves and a single `LayoutCommitted` on release.
-                commits += usize::from(response.layout_committed());
+                // is written in: `layout_committed()` is a per-frame bool, and it is the signal
+                // a consumer records one undo entry and one save on. A live separator drag
+                // reports `SeparatorDragging` on every frame it moves and a single
+                // `LayoutCommitted` on release.
+                //
+                // The events are kept beside the count, and only for the report: a failure that
+                // says "3 where 2 were expected" leaves the reader to guess which third one.
+                commits.frames += usize::from(response.layout_committed());
+                commits.events.extend(
+                    response
+                        .events
+                        .iter()
+                        .copied()
+                        .filter(DockEvent::is_committed),
+                );
             });
         });
         // Headless harness: no GPU backend to hand the delta to, so it's discarded on purpose —
         // epaint 0.36 panics on drop otherwise (Dropped TexturesDelta with unapplied deltas).
         output.textures_delta.clear();
-        self.commits += commits;
+        self.commits.frames += commits.frames;
+        self.commits.events.extend(commits.events);
     }
 
     /// How many finalised layout changes the dock reported since this was last called, and resets
     /// the counter.
-    fn take_commits(&mut self) -> usize {
+    /// Every finalised layout change the dock reported since this was last called, in order,
+    /// and resets the list.
+    ///
+    /// The events themselves rather than a count, because the count is what a failure reports
+    /// and the *kinds* are what makes the report readable: "3 where 2 were expected" leaves the
+    /// reader to guess which third one, and the answer is in the list.
+    fn take_commits(&mut self) -> Commits {
         std::mem::take(&mut self.commits)
     }
 
     /// Whether the dock reported any finalised layout change since this was last called.
     fn take_committed(&mut self) -> bool {
-        self.take_commits() > 0
+        self.take_commits().frames > 0
     }
 
     /// Geometry left behind by the last frame.
@@ -1872,6 +2053,104 @@ impl Sim {
         self.run_frame(vec![Event::PointerMoved(to)]);
     }
 
+    /// Carries a held pointer `by` points and leaves it there, in the same four steps every
+    /// other drag in this harness travels in.
+    ///
+    /// The destination is clamped to the screen, the same way [`Sim::grab_tab_at`]'s is and for
+    /// the same reason: a hand cannot leave the screen, and a pointer that has no hover position
+    /// is one the dock cannot see. Clamping costs nothing the gesture needs — the offsets that
+    /// are supposed to run into a separator's limit overshoot them by an order of magnitude.
+    fn carry(&mut self, from: Pos2, by: Vec2) -> Pos2 {
+        let to = Pos2::new(
+            (from.x + by.x).clamp(0.0, self.screen.x - 1.0),
+            (from.y + by.y).clamp(0.0, self.screen.y - 1.0),
+        );
+        for step in 1..=4u8 {
+            let t = f32::from(step) / 4.0;
+            self.run_frame(vec![Event::PointerMoved(from + (to - from) * t)]);
+        }
+        to
+    }
+
+    /// Counts what one leg of a junction drag moved, feeds [`JunctionWatch`], and answers what
+    /// the leg came to: whether anything moved, and whether egui is calling this a drag.
+    ///
+    /// Whether it is a drag is asked of egui *after* the travel, not carried in from the grab,
+    /// and both directions matter: a press that fell short can become a drag on a later leg once
+    /// the pointer has gone far enough, and a drag can end mid-hold — any release ends one, and
+    /// a middle click is a release.
+    ///
+    /// It is also the one thing judged here rather than counted. A press egui never called a
+    /// drag is a *click*, and a click on a junction handle must leave every boundary exactly
+    /// where it was — that is not a detail of this harness but the rule the transposition moved
+    /// to ctrl+click for, so that a press meant as a drag which fell short cannot rewrite
+    /// anything.
+    fn judge_junction_drag(
+        &mut self,
+        moves: &[NodePath],
+        was: &[Option<f32>],
+        forbidden: &mut Option<String>,
+    ) -> (bool, bool) {
+        let dragging = self.ctx.dragged_id().is_some();
+        let now = self.fractions_of(moves);
+        let moved: Vec<bool> = was
+            .iter()
+            .zip(&now)
+            .map(|(before, after)| before != after)
+            .collect();
+        let changed = moved.iter().filter(|it| **it).count();
+        // `moves[0]` is the line the junction sits on and the rest are the dividers that end on
+        // it — the one split of a junction that is *not* one of its dividers, and the one a
+        // separator drag on the same pixel would move on its own.
+        let (line, dividers) = (moved[0], &moved[1..]);
+        if changed > 0 {
+            self.junction.moves += 1;
+            if changed > 1 {
+                self.junction.moved_together += 1;
+            }
+            // The signature, and the reason it is stated as the *pair* rather than as a count:
+            // "two boundaries moved" is satisfied by a cross's two dividers alone, so a drag
+            // that had stopped moving the line entirely still looked like a junction drag.
+            // Measured — zeroing `outer`'s delta in `drag_junction` left the count gate green.
+            if line && dividers.iter().any(|it| *it) {
+                self.junction.moved_line_and_divider += 1;
+            }
+        } else {
+            self.junction.clamped += 1;
+        }
+        // A cross's two dividers are one line on screen and have to stay one: they are cut from
+        // different intervals, so the same delta in points is a different fraction for each and
+        // one can reach its limit while the other has room. The crate moves both by the tightest
+        // of the two admissible deltas, so the pair moves together or not at all — which is a
+        // claim about *these two numbers* and can be checked wherever they are read.
+        if dividers.len() == 2 && dividers[0] != dividers[1] {
+            *forbidden = Some(format!(
+                "a drag on a crossing moved one of its two aligned dividers and not the other \
+                 ({was:?} -> {now:?}). They are one line on screen; moving them by what each can \
+                 take on its own leaves the \"+\" a jog, which is the very thing the magnet \
+                 exists to close"
+            ));
+        }
+        if !dragging && changed > 0 {
+            *forbidden = Some(format!(
+                "a press on a junction handle that egui never called a drag moved {changed} of \
+                 the {} boundaries it sits on ({was:?} -> {now:?}). A press that falls short of \
+                 the drag threshold arrives as a click, and a click on a handle does nothing — \
+                 that is what the transposition moved to ctrl+click to make room for",
+                moves.len()
+            ));
+        }
+        (changed > 0, dragging)
+    }
+
+    /// The stored ratios of the named splits, in the order given, `None` for one that is gone.
+    ///
+    /// Positional rather than a map: a junction names two or three splits and the caller wants
+    /// to count how many of them moved, which is a question about the pairing.
+    fn fractions_of(&self, paths: &[NodePath]) -> Vec<Option<f32>> {
+        paths.iter().map(|path| self.fraction_of(*path)).collect()
+    }
+
     /// The tab the **dock** believes it is carrying, if any.
     ///
     /// Distinct from [`Sim::hold`] in both directions, which is the whole point: the hand can be
@@ -1923,7 +2202,8 @@ impl Sim {
         // The one thing the applier needs a mode for. A step that would press a button already
         // pressed is refused (see [`Step::needs_the_primary_button`]); everything else runs
         // exactly as it does with the hand open, which is the point of the hold.
-        if self.hold.is_some() && step.needs_the_primary_button() {
+        if (self.hold.is_some() || self.junction_hold.is_some()) && step.needs_the_primary_button()
+        {
             self.refused[refused_index(Refused::Held)] += 1;
             return None;
         }
@@ -1939,6 +2219,9 @@ impl Sim {
             .is_some()
             .then(|| self.drop_preference())
             .flatten();
+        // And the same for the junction drag, for the same reason: a step that *ends* one would
+        // otherwise be indistinguishable from one that ran alongside it.
+        let held_a_junction = self.junction_hold.is_some();
 
         let leaves = self.live_leaves();
         if leaves.is_empty() {
@@ -2239,7 +2522,7 @@ impl Sim {
                 // This divider and no other. Holding it changes the *range* of every split
                 // beneath it, which is precisely the pressure the frame pass must not answer by
                 // rewriting their stored ratios.
-                boundaries = BoundaryRule::Only(path);
+                boundaries = BoundaryRule::Only(vec![path]);
 
                 // The rule is read off the model, not predicted from the delta: a drag that ran
                 // into the clamp moved nothing, and a dock that announces a commit for it is
@@ -2325,7 +2608,7 @@ impl Sim {
                 }
                 let focus_before = self.focus_trace();
                 self.double_click(at);
-                boundaries = BoundaryRule::Only(path);
+                boundaries = BoundaryRule::Only(vec![path]);
                 // Two independent changes, counted separately: the centring itself, and the
                 // focus move a click in the gap can also cause (see `Step::GrabSeparator`). A
                 // double-click on an already-centred separator does neither, and then the dock
@@ -2512,6 +2795,196 @@ impl Sim {
                 Vec::new()
             }
 
+            Step::GrabJunction { junction, by } => {
+                // Settle before looking, for the reason `ToggleCrossSplit` does: a handle found
+                // in a moving scene may not be under the pointer by the time it arrives.
+                if !self.settle() {
+                    self.refused[refused_index(Refused::Unsettled)] += 1;
+                    return None;
+                }
+                let handles = self.junctions();
+                if handles.is_empty() {
+                    return None;
+                }
+                let point = handles[junction % handles.len()].clone();
+                if self.window_over(point.at, point.outer.surface) {
+                    self.refused[refused_index(Refused::Contested)] += 1;
+                    return None;
+                }
+                self.junction.offered += 1;
+                match point.kind {
+                    Meeting::Tee => self.junction.tees += 1,
+                    Meeting::Cross => self.junction.crosses += 1,
+                }
+
+                let was = self.fractions_of(&point.moves);
+                let focus_before = self.focus_trace();
+                self.run_frame(vec![Event::PointerMoved(point.at)]);
+                self.run_frame(vec![Event::PointerButton {
+                    pos: point.at,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                }]);
+                let at = self.carry(point.at, Vec2::new(f32::from(by[0]), f32::from(by[1])));
+
+                let (moved, dragging) =
+                    self.judge_junction_drag(&point.moves, &was, &mut forbidden);
+                if dragging {
+                    self.junction.live += 1;
+                } else {
+                    self.junction.short += 1;
+                }
+
+                self.junction_hold = Some(JunctionHold {
+                    at,
+                    moves: point.moves.clone(),
+                    moved,
+                    dragging,
+                });
+                // The splits the handle is made of, and no others. The sharp half: `outer` is
+                // the line every split beneath it is cut from, so holding it changes their
+                // *range* — which is precisely the pressure the frame pass must not answer by
+                // rewriting their stored ratios.
+                boundaries = BoundaryRule::Only(point.moves);
+                // A live drag reports `SeparatorDragging` per frame and nothing final; the one
+                // `LayoutCommitted` comes on release. The focus term is the same allowance
+                // `GrabSeparator` makes — the handle sits in its own foreground layer and should
+                // take the press whole, but that is a claim about layer order rather than a
+                // licence to stop counting.
+                commits = CommitRule::Exactly(usize::from(self.focus_trace() != focus_before));
+                Vec::new()
+            }
+
+            Step::ClickJunction { junction } => {
+                if !self.settle() {
+                    self.refused[refused_index(Refused::Unsettled)] += 1;
+                    return None;
+                }
+                let handles = self.junctions();
+                if handles.is_empty() {
+                    return None;
+                }
+                let point = handles[junction % handles.len()].clone();
+                if self.window_over(point.at, point.outer.surface) {
+                    self.refused[refused_index(Refused::Contested)] += 1;
+                    return None;
+                }
+                self.junction.clicks += 1;
+
+                let shape_before = self.orientation_trace();
+                let focus_before = self.focus_trace();
+                self.click(point.at);
+
+                // The whole rule, and it is about the *tree* rather than about the picture: a
+                // transposition moves no pixel, so an oracle comparing rectangles would let one
+                // through. `boundaries` below says the other half — no ratio may move either —
+                // and between them nothing is left for a click to have done.
+                if self.orientation_trace() != shape_before {
+                    forbidden = Some(format!(
+                        "a plain click on a junction handle regrouped the tree ({shape_before} \
+                         -> {}). The transposition is a ctrl+click so that a press meant as a \
+                         drag, which fell short of egui's threshold and arrived as a click, \
+                         cannot rewrite anything",
+                        self.orientation_trace()
+                    ));
+                }
+                boundaries = BoundaryRule::None;
+                let refocused = usize::from(self.focus_trace() != focus_before);
+                commits = CommitRule::Exactly(refocused);
+                if refocused == 0 {
+                    stillness = Stillness::QuietGesture;
+                }
+                Vec::new()
+            }
+
+            Step::MoveJunction { by } => {
+                // Nothing in the hand: a move is then an ordinary hover, which is not what this
+                // step means, so it is skipped like any step that finds nothing to act on.
+                let Some(hold) = self.junction_hold.clone() else {
+                    return None;
+                };
+                let was = self.fractions_of(&hold.moves);
+                let focus_before = self.focus_trace();
+                let at = self.carry(hold.at, Vec2::new(f32::from(by[0]), f32::from(by[1])));
+                let (moved, dragging) = self.judge_junction_drag(&hold.moves, &was, &mut forbidden);
+
+                let held = self.junction_hold.as_mut().unwrap();
+                held.at = at;
+                held.moved |= moved;
+                held.dragging = dragging;
+                boundaries = BoundaryRule::Only(hold.moves);
+                commits = CommitRule::Exactly(usize::from(self.focus_trace() != focus_before));
+                Vec::new()
+            }
+
+            Step::ReleaseJunction => {
+                let Some(hold) = self.junction_hold.take() else {
+                    return None;
+                };
+                // Read before the release: a handle that is no longer *offered* was not drawn
+                // this frame either, so there is nothing left to see the button come up.
+                //
+                // "Offered", and not "its splits still exist", which is what this asked first
+                // and was wrong about. The crate keys a handle by the splits that meet at it, so
+                // the same three nodes still being in the tree is not the same handle — a close
+                // under the hand can leave them all alive and no longer *meeting*, and a cross
+                // that has become two tees is two handles with two new ids and none of them the
+                // one egui is dragging.
+                let alive = self
+                    .junctions()
+                    .iter()
+                    .any(|junction| junction.moves == hold.moves);
+                // ...and whether egui still has a drag to stop. A middle click under the hand
+                // ended it steps ago (see the tail of `apply`), and the commit went with it.
+                let dragging = hold.dragging && self.ctx.dragged_id().is_some();
+                let focus_before = self.focus_trace();
+                self.run_frame(vec![Event::PointerButton {
+                    pos: hold.at,
+                    button: PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Modifiers::NONE,
+                }]);
+                self.run_frame(vec![Event::PointerMoved(hold.at)]);
+                self.junction.releases += 1;
+
+                // A release moves nothing: the drag is over on the frame the button comes up, so
+                // no delta reaches a separator. Stated as the strongest rule there is rather than
+                // as a licence for the splits the gesture named, because a boundary that moves
+                // here moved after the gesture ended.
+                boundaries = BoundaryRule::None;
+                let refocused = usize::from(self.focus_trace() != focus_before);
+                match (alive, dragging) {
+                    // One completed gesture, one undo entry — and only if it actually moved
+                    // something, which is the same rule a separator drag answers to.
+                    (true, true) => {
+                        commits = CommitRule::Exactly(usize::from(hold.moved) + refocused);
+                        if !hold.moved {
+                            stillness = Stillness::QuietGesture;
+                        }
+                    }
+                    // Nothing left to stop: either the press was never a drag (a click on a
+                    // handle, which does nothing at all) or a middle click ended it under the
+                    // hand and the commit was announced back there. Either way this release is
+                    // the button coming up on an ended gesture.
+                    (_, false) => {
+                        commits = CommitRule::Exactly(refocused);
+                        stillness = Stillness::QuietGesture;
+                    }
+                    // Counted, not judged. The handle stopped being *offered* while the button
+                    // was still down — its splits stopped meeting, or left the tree — so it was
+                    // not drawn and never saw its own release. Whether a drag that moved two
+                    // boundaries and then lost its junction ought to announce itself is a
+                    // question about the crate's contract, not a rule this step is entitled to
+                    // state on its own. See the plan's backlog.
+                    (false, true) => {
+                        self.junction.died += 1;
+                        commits = CommitRule::Unjudged;
+                    }
+                }
+                Vec::new()
+            }
+
             // A frame with no input at all: it is allowed to change nothing whatsoever, which
             // is why nothing is listed as touched.
             Step::Idle => {
@@ -2540,6 +3013,47 @@ impl Sim {
                 self.holds.source_died += 1;
             }
         }
+        // The other hold's interleaving, counted the same way and for the same reason: a
+        // junction drag holds two or three persisted numbers open across step boundaries, and
+        // "a leaf was closed while it was live" is the state that was unreachable while a step
+        // was a whole gesture. Keyed on the hold rather than on what the dock is carrying, since
+        // the dock's own junction drag is not readable from outside the crate — what stands in
+        // for it is `JunctionWatch::moved_together`, which no other gesture can produce.
+        if held_a_junction && !step.is_part_of_the_junction_drag() {
+            self.junction.steps += 1;
+            if matches!(step, Step::CloseTab { .. } | Step::CloseLeaf { .. }) {
+                self.junction.closes += 1;
+            }
+            // A drag can end while the hand is still closed, and **any** release ends one —
+            // including the middle click that closes a tab. The dock is right to treat it as
+            // the end of the gesture: `drag_stopped` fires on the handle that frame, and with
+            // it the single `LayoutCommitted` the drag owes, so the step that merely closed a
+            // tab announces two changes and both of them are real.
+            //
+            // Found by the sweep, on the commit rule rather than on this: `ReleaseJunction`
+            // waited for a commit that had already been paid three steps earlier. Same shape as
+            // the fork's own "a middle click ended egui's drag and the dock went on carrying the
+            // tab" — and the same lesson, that the hand being closed and a gesture being live
+            // are two facts, and only the second is the dock's.
+            if let Some(held) = self.junction_hold.as_mut() {
+                let still_dragging = self.ctx.dragged_id().is_some();
+                if held.dragging && !still_dragging {
+                    self.junction.ended_early += 1;
+                    // `max`, not `+ 1`, and that is the whole reason a commit is counted per
+                    // frame here: the release that ends the drag is the *same event* that
+                    // closed the tab and moved the focus, so all three land in one frame and a
+                    // consumer records one undo entry for them. Adding them up was tried first
+                    // and reported the dock for announcing one change where the harness had
+                    // counted three.
+                    if held.moved
+                        && let CommitRule::Exactly(announced) = commits
+                    {
+                        commits = CommitRule::Exactly(announced.max(1));
+                    }
+                }
+                held.dragging = still_dragging;
+            }
+        }
         // Same question, asked of the *destination* rather than the source: did the node the
         // drop preference named just before this step leave the tree during it? Asked of the
         // tree by that recorded `NodePath`, not by whether the preference itself still names it
@@ -2554,6 +3068,30 @@ impl Sim {
 
         if let Some(slot) = outcome_index(self.outcome_since(&before)) {
             self.effective[slot] += 1;
+        }
+        // A held junction follows the pointer, whatever moved it.
+        //
+        // Found by this very property, on `CloseTab` under a held handle: the middle click is
+        // delivered at the tab's own position, so the pointer *travels* there — and a junction
+        // drag writes its fractions every frame, unlike a tab drag, which writes nothing until
+        // the hand opens. So a step that names no boundary moved two, and the dock was right to
+        // move them: a hand that holds a handle and reaches elsewhere is dragging it.
+        //
+        // The exemption is the *held* junction's two or three splits and nothing more, so every
+        // other boundary in the dock is still judged as strictly as before — including the ones
+        // below `outer`, whose range the drag is changing, which is where the property earns its
+        // place.
+        if let Some(hold) = &self.junction_hold
+            && !step.is_part_of_the_junction_drag()
+        {
+            boundaries = match boundaries {
+                BoundaryRule::Any => BoundaryRule::Any,
+                BoundaryRule::None => BoundaryRule::Only(hold.moves.clone()),
+                BoundaryRule::Only(mut named) => {
+                    named.extend(hold.moves.iter().copied());
+                    BoundaryRule::Only(named)
+                }
+            };
         }
         Some(Effect {
             stillness,
@@ -2732,6 +3270,31 @@ fn surface_label(index: SurfaceIndex) -> usize {
 
 /// The scenario a seed stands for. A pure function of the seed: same seed, same steps, on any
 /// machine — that is what makes a failure here a reproducible bug report.
+/// How far one leg of a junction drag travels, in points.
+///
+/// Four shapes, and each is a different question:
+///
+/// * `[4, 4]` is **under** egui's drag threshold (measured at 6 px in this harness — see
+///   [`Step::DragSeparator`]), so the press arrives as a click. A handle must answer a click
+///   with nothing whatsoever, which is the rule the transposition moved to ctrl+click for;
+/// * the axis-aligned offsets move only one of the two things a junction is made of — the line
+///   that runs through it, or the divider that ends on it — which is where "the pair moves
+///   together or not at all" is *not* exercised, and so where a coordination bug would hide;
+/// * the diagonals move both at once, which is the gesture's whole point;
+/// * the huge ones overshoot every clamp there is, so a leg either finds its limit or shoves
+///   the pointer to the edge of the screen — the state where a drag has to move nothing and
+///   commit nothing.
+const JUNCTION_TRAVEL: [[i16; 2]; 8] = [
+    [4, 4],
+    [16, 0],
+    [0, 16],
+    [-16, -16],
+    [120, -120],
+    [-120, 80],
+    [2000, 2000],
+    [-2000, -2000],
+];
+
 fn scenario(seed: u64, len: usize) -> Vec<Step> {
     /// What a drop somewhere should mean, drawn uniformly over the vocabulary.
     fn aim(rng: &mut Rng) -> Aim {
@@ -2776,11 +3339,34 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
     // the exact gap this exists to close (see the plan's backlog and FINDINGS.md, "The drop
     // overlay's own preference outlived the node it was pointing at").
     let mut close_the_destination: Option<usize> = None;
+    // How many steps are still to run with a junction handle held. The same bounded burst as
+    // `until_release`, and for the same measured reason: a grab and a release drawn
+    // independently leave most holds unclosed, and a hand that never opens turns off every step
+    // that presses a button.
+    //
+    // The offsets a leg of the drag travels are drawn per step rather than fixed, and the small
+    // ones are load-bearing: `[4, 4]` is under egui's drag threshold, so the press arrives as a
+    // *click* — the one gesture a handle has to answer with nothing at all, and the reason the
+    // transposition moved to ctrl+click.
+    let mut until_junction_release: Option<usize> = None;
+    // Which leaf, if any, the step right after a junction grab must close through the model.
+    //
+    // The third use of the same device, and the same reason as the other two: the state worth
+    // reaching is a handle that stops being *offered* while the button is still down — its
+    // splits stop meeting, or leave the tree — and waiting for an independent `CloseLeaf` to
+    // land inside a four-step burst is waiting for a coincidence. Measured before it was
+    // written: 21 junction grabs across the sweep and not one of them lost its handle.
+    let mut close_under_the_junction: Option<usize> = None;
 
     while steps.len() < len {
         if until_release == Some(0) {
             until_release = None;
             steps.push(Step::Release { aim: aim(&mut rng) });
+            continue;
+        }
+        if until_junction_release == Some(0) {
+            until_junction_release = None;
+            steps.push(Step::ReleaseJunction);
             continue;
         }
         if press_the_cross {
@@ -2794,7 +3380,14 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
             steps.push(Step::CloseLeaf { leaf: to });
             continue;
         }
+        if let Some(leaf) = close_under_the_junction.take() {
+            steps.push(Step::CloseLeaf { leaf });
+            continue;
+        }
         if let Some(countdown) = until_release.as_mut() {
+            *countdown -= 1;
+        }
+        if let Some(countdown) = until_junction_release.as_mut() {
             *countdown -= 1;
         }
 
@@ -2809,7 +3402,7 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
             steps.push(previous);
             continue;
         }
-        let step = match rng.below(28) {
+        let step = match rng.below(32) {
             0..=4 => Step::Drag {
                 from: rng.below(8),
                 to: rng.below(8),
@@ -2893,17 +3486,60 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
             // Closing a tab through the UI. Two draws rather than one because it is the step the
             // reported bug needed *and* the only close in this vocabulary that goes through the
             // frame layer at all.
-            _ => Step::CloseTab {
+            26..=27 => Step::CloseTab {
                 leaf: rng.below(8),
                 tab: rng.below(4),
             },
+            // The junction drag. Two draws for the grab — it arms the burst below, so this is
+            // what decides how much of a scenario runs with two or three boundaries held open —
+            // and two for the move, which is the leg that carries it somewhere new.
+            //
+            // A grab needs a handle to be on screen, and unlike a crossing that is not a scene
+            // the generator has to build: *every* band divider ends on the line between its
+            // split's children, so any two splits of opposite orientation put a tee somewhere.
+            // That is why there is no `press_the_junction` scheduling next to `press_the_cross`.
+            28..=29 => Step::GrabJunction {
+                junction: rng.below(6),
+                by: JUNCTION_TRAVEL[rng.below(JUNCTION_TRAVEL.len())],
+            },
+            30 => Step::MoveJunction {
+                by: JUNCTION_TRAVEL[rng.below(JUNCTION_TRAVEL.len())],
+            },
+            // The plain click, drawn on its own rather than folded into the hold: a click is a
+            // press and a release inside egui's click window, and a hold's release is a step
+            // away.
+            _ => Step::ClickJunction {
+                junction: rng.below(6),
+            },
         };
-        if matches!(step, Step::Grab { .. }) && until_release.is_none() {
+        // The two bursts never overlap: whichever hand-closing step lands first arms its own,
+        // and the other's grab would be refused under it anyway (see
+        // `Step::needs_the_primary_button`) — a burst armed on a grab that never happened is a
+        // stretch of scenario spent skipping releases.
+        if matches!(step, Step::Grab { .. })
+            && until_release.is_none()
+            && until_junction_release.is_none()
+        {
             until_release = Some(1 + rng.below(4));
+        }
+        if matches!(step, Step::GrabJunction { .. })
+            && until_release.is_none()
+            && until_junction_release.is_none()
+        {
+            until_junction_release = Some(1 + rng.below(4));
+            // Half of them, not all: a burst that always opens with a close would never leave a
+            // junction drag to run its own legs undisturbed, and "the handle survives the whole
+            // gesture" is the other half of what this has to cover.
+            if rng.below(2) == 0 {
+                close_under_the_junction = Some(rng.below(8));
+            }
         }
         // ...but not while the hand is closed: a press is refused under a hold, and a scheduled
         // press that lands there is a press that never happened.
-        if matches!(step, Step::BuildCross { .. }) && until_release.is_none() {
+        if matches!(step, Step::BuildCross { .. })
+            && until_release.is_none()
+            && until_junction_release.is_none()
+        {
             press_the_cross = true;
         }
         // Outside a hold there is no lock to catch mid-decay — `Step::Settle` just moves the
@@ -2937,6 +3573,8 @@ struct Run {
     cross: CrossWatch,
     /// How much of the interleaving a hold makes possible was reached — see [`HoldWatch`].
     holds: HoldWatch,
+    /// How much the junction gestures got to do — see [`JunctionWatch`].
+    junction: JunctionWatch,
     /// The first step that left the dock invalid, if any.
     failure: Option<Failure>,
 }
@@ -3051,7 +3689,9 @@ fn boundary_drift_complaint(
     }
     watch.under_pressure += under_pressure;
     for (path, was) in before {
-        if effect.boundaries == BoundaryRule::Only(*path) {
+        if let BoundaryRule::Only(named) = &effect.boundaries
+            && named.contains(path)
+        {
             continue;
         }
         let Some((_, now)) = after.iter().find(|(other, _)| other == path) else {
@@ -3210,6 +3850,7 @@ fn run(steps: &[Step]) -> Run {
         separator: sim.separator,
         cross: sim.cross,
         holds: sim.holds,
+        junction: sim.junction,
         failure,
     }
 }
@@ -3220,22 +3861,27 @@ fn run(steps: &[Step]) -> Run {
 /// step (see [`CommitRule`]) and the count from the frames, so neither side can quietly agree
 /// with itself: this is the seam where a commit with no mutation behind it, or a mutation that
 /// announced itself six times, becomes visible.
-fn commit_complaint(effect: &Effect, observed: usize) -> Option<String> {
+fn commit_complaint(effect: &Effect, commits: Commits) -> Option<String> {
+    let Commits {
+        frames: observed,
+        events: announced,
+    } = commits;
     match effect.commits {
         CommitRule::Unjudged => None,
         CommitRule::Exactly(0) if observed > 0 => Some(format!(
-            "the dock reported {observed} finalised layout change(s) for a step that changed \
-             nothing — a consumer would write an undo entry and a file for an interaction that \
-             never happened"
+            "the dock reported {observed} finalised layout change(s) {announced:?} for a step \
+             that changed nothing — a consumer would write an undo entry and a file for an \
+             interaction that never happened"
         )),
         CommitRule::Exactly(1) if observed != 1 => Some(format!(
-            "one completed gesture must be one finalised event, and the dock reported {observed}. \
-             Zero means a real change nobody will persist; more than one means the live frames of \
-             the drag are being announced as commits"
+            "one completed gesture must be one finalised event, and the dock reported \
+             {observed} {announced:?}. Zero means a real change nobody will persist; more than \
+             one means the live frames of the drag are being announced as commits"
         )),
         CommitRule::Exactly(expected) if observed != expected => Some(format!(
-            "this step changed {expected} things about the dock and the dock reported {observed} \
-             finalised event(s) — one per change is what a consumer diffing snapshots needs"
+            "this step changed {expected} things about the dock and the dock reported \
+             {observed} finalised event(s) {announced:?} — one per change is what a consumer \
+             diffing snapshots needs"
         )),
         _ => None,
     }
@@ -3293,7 +3939,16 @@ fn drag_complaint(sim: &Sim) -> Option<String> {
 
     let egui_drag = sim.ctx.dragged_id();
     let egui_tab = egui_drag.map(live_tab_for_widget);
-    if let Some(None) = egui_tab {
+    // "A drag that is not a tab's" is a fault only while nothing else in this vocabulary can be
+    // dragging. A junction handle can: it is a widget of the dock's, held across step
+    // boundaries by design, and its id is built inside the crate out of the surface's `Ui` —
+    // not from `DockArea::id` the way a tab's is — so there is nothing here to compare it
+    // against by name. What survives the exemption is the half that matters: both holders must
+    // still agree there is no *tab* in flight, which is checked below and is exactly the
+    // disagreement this function was written for.
+    if let Some(None) = egui_tab
+        && sim.junction_hold.is_none()
+    {
         return Some(format!(
             "egui is dragging widget {:?}, which is not the widget of any live tab",
             egui_drag.unwrap()
@@ -3553,7 +4208,7 @@ fn dragging_a_separator_moves_the_boundary_and_commits_once() {
         "dragging the separator right must move the boundary right: {before} -> {after}"
     );
     assert_eq!(
-        sim.take_commits(),
+        sim.take_commits().frames,
         1,
         "one completed drag is one finalised event, however many frames it spanned"
     );
@@ -3582,7 +4237,7 @@ fn a_separator_grabbed_and_released_commits_nothing() {
     );
     assert_eq!(sim.trace(), before, "nor anything else");
     assert_eq!(
-        sim.take_commits(),
+        sim.take_commits().frames,
         0,
         "and an unchanged dock may not report a finalised layout change"
     );
@@ -3614,7 +4269,7 @@ fn double_clicking_a_separator_centres_it_once() {
         Some(0.5),
         "a double-click centres the separator"
     );
-    assert_eq!(sim.take_commits(), 1, "and reports it once");
+    assert_eq!(sim.take_commits().frames, 1, "and reports it once");
 
     let (_, at, _) = sim.separators()[0];
     sim.double_click(at);
@@ -3624,7 +4279,7 @@ fn double_clicking_a_separator_centres_it_once() {
         "centring an already centred separator leaves it where it is"
     );
     assert_eq!(
-        sim.take_commits(),
+        sim.take_commits().frames,
         0,
         "and there is nothing to announce about it"
     );
@@ -3664,7 +4319,7 @@ fn a_separator_cannot_squeeze_a_child_to_nothing() {
         "a drag that is already against the clamp moves nothing"
     );
     assert_eq!(
-        sim.take_commits(),
+        sim.take_commits().frames,
         0,
         "so there is no finalised layout change to report"
     );
@@ -3820,7 +4475,7 @@ fn a_ratio_the_window_grew_too_small_for_comes_back_when_it_grows_again() {
         sim.trace()
     );
     assert_eq!(
-        sim.take_commits(),
+        sim.take_commits().frames,
         0,
         "and none of it is a layout change the user made, so there is nothing to announce"
     );
@@ -3885,7 +4540,7 @@ fn a_drag_on_a_divider_with_no_room_leaves_the_ratio_alone() {
         sim.trace()
     );
     assert_eq!(
-        sim.take_commits(),
+        sim.take_commits().frames,
         0,
         "and there is no finalised layout change to announce about it"
     );
@@ -4315,6 +4970,7 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
     let mut separator = SeparatorWatch::default();
     let mut cross = CrossWatch::default();
     let mut holds = HoldWatch::default();
+    let mut junction = JunctionWatch::default();
     let mut aimed = 0usize;
     let mut refused = [0usize; REFUSALS];
 
@@ -4353,6 +5009,21 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         holds.ui_closes += outcome.holds.ui_closes;
         holds.landings_after_a_change += outcome.holds.landings_after_a_change;
         holds.destination_died += outcome.holds.destination_died;
+        junction.offered += outcome.junction.offered;
+        junction.tees += outcome.junction.tees;
+        junction.crosses += outcome.junction.crosses;
+        junction.live += outcome.junction.live;
+        junction.short += outcome.junction.short;
+        junction.moves += outcome.junction.moves;
+        junction.moved_together += outcome.junction.moved_together;
+        junction.moved_line_and_divider += outcome.junction.moved_line_and_divider;
+        junction.clamped += outcome.junction.clamped;
+        junction.clicks += outcome.junction.clicks;
+        junction.releases += outcome.junction.releases;
+        junction.steps += outcome.junction.steps;
+        junction.closes += outcome.junction.closes;
+        junction.ended_early += outcome.junction.ended_early;
+        junction.died += outcome.junction.died;
 
         if let Some(failure) = outcome.failure {
             let minimal = quietly(|| shrink(&steps, &|candidate| run(candidate).failure.is_some()));
@@ -4385,6 +5056,7 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
     println!("boundary watch: {boundary:?}");
     println!("separator watch: {separator:?}");
     println!("hold watch: {holds:?}");
+    println!("junction watch: {junction:?}");
 
     // Asserted before the generic coverage loop below, which would otherwise fire first with
     // "the sweep never produced CrossTransposed" — true, but silent about which of the two very
@@ -4597,6 +5269,96 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         "the drop overlay's preference never once named a node that then left the tree, across \
          {SEEDS} seeds. That is the state `drag_hover_node`'s own self-heal exists for, so \
          `drop_complaint` has been watching a preference that could not go stale"
+    );
+
+    // The junction drag. Its zeros are the ones this stage exists to make impossible: the
+    // gesture that moves two or three persisted numbers at once was in the crate and in six
+    // scenes someone chose, and in nothing that sweeps.
+    assert!(
+        junction.offered > 0,
+        "no junction handle was ever grabbed across {SEEDS} seeds — the scenes never grew two \
+         splits of opposite orientation, so every gate below is vacuous"
+    );
+    assert!(
+        junction.tees > 0 && junction.crosses > 0,
+        "the {} handles grabbed were all of one kind (tees: {}, crosses: {}). The two are \
+         different shapes of the same gesture — a tee has one divider ending on the line and a \
+         cross has two that must stay in line with each other — and the sweep has to reach both",
+        junction.offered,
+        junction.tees,
+        junction.crosses
+    );
+    assert!(
+        junction.live > 0,
+        "{} presses on a junction handle and egui called none of them a drag — the travel this \
+         harness sends falls short of the threshold, so every gate below is about a hand resting \
+         on a button",
+        junction.offered
+    );
+    assert!(
+        junction.short > 0,
+        "every one of the {} presses travelled far enough to be a drag, so the case the gesture \
+         was redesigned around — a press meant as a drag that falls short and arrives as a click \
+         — was never once reached, and \"a click on a handle does nothing\" went unasked",
+        junction.offered
+    );
+    assert!(
+        junction.moved_together > 0,
+        "not one junction drag across {SEEDS} seeds moved more than a single boundary. That is \
+         the only signature this harness can tell a junction drag by — a separator drag moves \
+         the divider it holds and nothing else — so either the presses are landing somewhere \
+         other than a handle (`Sim::junctions` has drifted from the crate's detection) or every \
+         one of them ran into a clamp. {} legs moved something, {} moved nothing",
+        junction.moves,
+        junction.clamped
+    );
+    assert!(
+        junction.moved_line_and_divider > 0,
+        "{} junction drags moved more than one boundary and not one of them moved the line \
+         *and* a divider that ends on it. A crossing has two dividers, so the count above is \
+         satisfied without the line moving at all — and \"one drag resizes every panel around \
+         the junction\" is exactly the claim that needs both",
+        junction.moved_together
+    );
+    assert!(
+        junction.clamped > 0,
+        "all {} legs of a junction drag moved a boundary — none ever found every separator it \
+         holds already against its limit, so \"a drag that changed nothing announces nothing\" \
+         was never asked of this gesture",
+        junction.moves
+    );
+    assert!(
+        junction.steps > 0,
+        "no step ever ran while a junction handle was held. The alphabet has the words for it \
+         and the sweep never put anything between the grab and the release — which is the state \
+         this stage exists to reach, and the one a six-scene unit test cannot"
+    );
+    assert!(
+        junction.closes > 0,
+        "none of the {} steps that ran under a held junction handle closed anything. A close \
+         under the hand is the only thing in this vocabulary that can take the splits a drag is \
+         holding out of the tree",
+        junction.steps
+    );
+    assert!(
+        junction.died > 0,
+        "no junction ever stopped being offered while its handle was held, across {SEEDS} \
+         seeds. That is the state the whole interleaving is for — a handle that is no longer \
+         drawn cannot see its own release, so the gesture ends without anything ending it — and \
+         a sweep that never reaches it is judging a drag nothing happens to"
+    );
+    assert!(
+        junction.clicks > 0,
+        "no junction handle was ever plainly clicked across {SEEDS} seeds, so \"a click does \
+         nothing\" was never asked. Measured, not feared: with this step missing, making a plain \
+         click transpose again left this whole sweep green"
+    );
+    assert!(
+        junction.ended_early > 0,
+        "no junction drag was ever ended by something other than letting go, across {SEEDS} \
+         seeds. **Any** release ends an egui drag and a middle click is one, so closing a tab \
+         under the hand ends the resize and pays its commit in that frame — the asymmetry the \
+         fork already has a finding about for tab drags, unasked here"
     );
 }
 

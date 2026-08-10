@@ -1,6 +1,6 @@
-use egui::{Context, Id, Pos2};
+use egui::{Context, Id, Pos2, Rect};
 
-use super::drag_and_drop::{DragData, DragDropState, HoverData};
+use super::drag_and_drop::{DragDropState, DragSource, HoverData};
 use crate::{NodePath, Style, SurfaceIndex};
 
 /// What the hand is holding: the subject of the gesture in flight, named once and kept.
@@ -15,6 +15,16 @@ use crate::{NodePath, Style, SurfaceIndex};
 /// that fold them in. See `docs/PLAN_one_place_says_what_the_hand_holds.md`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum DragSubject {
+    /// One tab, carried by the hand — addressed by **identity**, never by position.
+    ///
+    /// The payload is [`DragSource`] itself and not a fresh triple of the same three coordinates:
+    /// the reason a carried tab is named by `(surface, node, TabId)` rather than by a
+    /// [`TabPath`](crate::TabPath) is written there, and so is the one operation that reads it
+    /// ([`DragSource::resolve`], which answers "where is it now" and answers `None` exactly when
+    /// the tab has left the tree). A second shape of the same address would be a second place to
+    /// keep that argument, which is the shape this whole field exists to remove.
+    Tab(DragSource),
+
     /// One separator: the split whose ratio the drag is writing.
     ///
     /// The path and not the widget id, even though the id is what the gesture is *named* by
@@ -79,6 +89,13 @@ pub(super) struct DragInFlight {
     /// here: a junction moves two fractions at once, so the starting *value* would be a pair
     /// whose shape depends on the subject, while each frame of any drag already answers "did I
     /// change anything" for itself — [`crate::DockArea::nudge_split`] returns exactly that.
+    ///
+    /// For a [tab](DragSubject::Tab) the same question is asked of the *pointer* rather than of
+    /// the tree: a carried tab writes nothing until it is dropped, so what this records is that
+    /// the hand travelled past the dock's own pull-out threshold — the moment the tab starts
+    /// following the pointer and a drop becomes possible at all. Below it the press is a
+    /// gesture that has taken hold of something and done nothing with it, which is the same
+    /// state a grabbed-but-unmoved separator is in.
     pub moved: bool,
 
     /// The pass this drag was last seen alive in — the frame the owning widget last reported it.
@@ -163,6 +180,23 @@ impl State {
         self.drag.as_ref()
     }
 
+    /// The tab the hand is carrying, or `None` if what it holds is not a tab (or nothing is).
+    ///
+    /// The one way the rest of the crate reads a tab drag's *subject*. Everything to do with
+    /// where it would land — the hovered destination, the preference lock, the pointer — is
+    /// [`State::dnd`]'s, and the two are not asked as one question: a drag can be live with
+    /// nowhere to drop it.
+    ///
+    /// Unfiltered by pass, like [`State::in_flight`] and for the same reason: the question is
+    /// "what is being carried", and the answer stops being a tab when the gesture ends, not when
+    /// the leaf it came from happens to skip a frame.
+    pub(super) fn carried_tab(&self) -> Option<DragSource> {
+        match self.drag?.subject {
+            DragSubject::Tab(src) => Some(src),
+            _ => None,
+        }
+    }
+
     /// What the hand is holding *now*: an entry last seen alive no earlier than the previous
     /// pass. Older than that and its owner has stopped reporting it, which is the only way a
     /// gesture whose subject stopped existing ever goes away.
@@ -196,15 +230,28 @@ impl State {
         self.drag.take_if(|drag| drag.widget == widget)
     }
 
+    /// The tab gesture is over — released, or cancelled because what it carried left the tree.
+    ///
+    /// Empties the field **only if a tab is what it holds**. The distinction is not caution, it
+    /// is the whole difference between the two callers this has: one of them fires on *any*
+    /// primary release, and a separator's release is a primary release too — it arrives at the
+    /// top of the same pass whose surfaces have not been drawn yet, so the divider's own
+    /// `drag_stopped` (and the commit it owes) is still ahead. A `reset` that took the field
+    /// whatever was in it would eat that gesture on its way past.
+    ///
+    /// The rule this is an instance of, in the plan's words: every reader written while the field
+    /// held one kind of subject says "a gesture" and means "*my* kind of gesture".
     pub(super) fn reset_drag(&mut self) {
         self.dnd = None;
         self.window_fade = None;
         self.drag_start = None;
+        self.drag
+            .take_if(|drag| matches!(drag.subject, DragSubject::Tab(_)));
     }
 
     pub(super) fn set_drag_and_drop(
         &mut self,
-        drag: DragData,
+        source_rect: Rect,
         drop: HoverData,
         ctx: &Context,
         style: &Style,
@@ -212,7 +259,7 @@ impl State {
         if !self.is_drag_drop_locked(ctx, style) {
             self.dnd = Some(DragDropState {
                 hover: Some(drop),
-                drag,
+                source_rect,
                 pointer: ctx.pointer_hover_pos().unwrap_or(Pos2::ZERO),
                 locked: None,
             })
@@ -235,9 +282,23 @@ impl State {
 /// which makes it worth an assertion that says so rather than an assumption nothing checks.
 #[cfg(test)]
 mod tests {
+    use super::super::drag_and_drop::DragSource;
     use super::{DragSubject, State};
-    use crate::{NodeId, NodePath, SurfaceIndex};
+    use crate::{DockState, NodeId, NodePath, SurfaceIndex, TabIndex};
     use egui::Id;
+
+    /// A tab identity has no public constructor — it is handed out by the leaf that owns it —
+    /// so the one in the field is the one a real dock would carry.
+    fn a_tab() -> DragSubject {
+        let dock = DockState::new(vec!["a"]);
+        let node = dock.main_surface().root().unwrap();
+        let path = NodePath::new(SurfaceIndex::main(), node);
+        DragSubject::Tab(DragSource {
+            surface: path.surface,
+            node: path.node,
+            tab: dock.leaf(path).unwrap().tab_id_at(TabIndex(0)).unwrap(),
+        })
+    }
 
     fn a_junction() -> DragSubject {
         let path = |slot| NodePath::new(SurfaceIndex::main(), NodeId::new(slot, 0));
@@ -284,5 +345,30 @@ mod tests {
         assert!(state.in_flight().is_some(), "left alone, not taken");
         assert!(state.end_drag(Id::new("mine")).unwrap().moved);
         assert!(state.in_flight().is_none(), "and now the hand is empty");
+    }
+
+    /// A primary release ends the tab gesture — and *only* the tab gesture.
+    ///
+    /// The second half is the load-bearing one, and it is not symmetry: [`State::reset_drag`]
+    /// runs at the top of a pass on any primary release, while a separator's own `drag_stopped`
+    /// (and the `LayoutCommitted` it owes) is reached later in that same pass, when the surfaces
+    /// are drawn. A reset that emptied the field regardless of what was in it would swallow the
+    /// boundary gesture on its way past — measured: dropping the subject test here reddens
+    /// `a_junction_drag_reports_itself_like_a_separator_drag`.
+    #[test]
+    fn a_release_ends_the_carried_tab_and_leaves_a_boundary_alone() {
+        let mut state = State::default();
+        state.begin_drag(Id::new("a tab"), a_tab(), 1);
+        assert!(state.carried_tab().is_some());
+        state.reset_drag();
+        assert!(state.in_flight().is_none(), "the hand let the tab go");
+
+        state.begin_drag(Id::new("a divider"), a_junction(), 2);
+        assert!(state.carried_tab().is_none(), "a boundary is not a tab");
+        state.reset_drag();
+        assert!(
+            state.in_flight().is_some(),
+            "the boundary gesture is still in flight, and still owes its commit"
+        );
     }
 }

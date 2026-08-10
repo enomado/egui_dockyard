@@ -7,7 +7,7 @@ use paste::paste;
 
 use super::{
     DockAreaResponse,
-    drag_and_drop::{DragData, HoverData},
+    drag_and_drop::{DragSource, HoverData},
     events::DockEvent,
     state::{DragSubject, State},
     tab_removal::TabRemoval,
@@ -85,28 +85,40 @@ impl<Tab> DockArea<'_, Tab> {
         // why it survived: the only witness was `dragged_tab`, answering with a tab that was
         // going nowhere. The dock's drag exists while egui's does, and that is now stated
         // rather than assumed.
+        //
+        // Asked of the one place that says what the hand holds, and asked once: the source used
+        // to be carried in two more places besides — this frame's `drag_data`, and the open
+        // `DragDropState` — and each of them had to be checked for the same decay separately.
         let primary_down = ui.input(|i| i.pointer.primary_down());
-        let drag_is_over = |data: &DragData| {
-            data.src.resolve(self.dock_state).is_none()
+        let carried = state.carried_tab();
+        let drag_is_over = |src: &DragSource| {
+            src.resolve(self.dock_state).is_none()
                 // Guarded on the button still being down, because the *ordinary* end of a drag
                 // looks exactly like this: egui stops dragging on the frame the primary comes
                 // up, and that frame is the drop — resolved a dozen lines below.
                 || (primary_down
                     && !ui.ctx().is_being_dragged(crate::tab_widget_id(
                         self.id,
-                        data.src.node_path(),
-                        data.src.tab,
+                        src.node_path(),
+                        src.tab,
                     )))
         };
-        let drag_data = drag_data.filter(|data| !drag_is_over(data));
-        if state
-            .dnd
-            .as_ref()
-            .is_some_and(|dnd| drag_is_over(&dnd.drag))
-        {
-            state.reset_drag();
-            ui.ctx().stop_dragging();
-        }
+        let carried = carried.filter(|src| {
+            if drag_is_over(src) {
+                state.reset_drag();
+                ui.ctx().stop_dragging();
+                false
+            } else {
+                true
+            }
+        });
+        // The rectangle published by the leaf that drew the carried tab last frame — geometry,
+        // and only geometry. Whether a drag exists, whose it is, and whether it has been pulled
+        // far enough out of the bar for a drop to resolve at all are three things the field
+        // answers: the last of them is `DragInFlight::moved`, and it is read here rather than
+        // re-derived from "was a rectangle published this frame".
+        let pulled_out = state.in_flight().is_some_and(|drag| drag.moved);
+        let drag_data = drag_data.filter(|_| carried.is_some() && pulled_out);
 
         // The hover's destination decays the same way the drag's source does, and for the same
         // reason: it addresses a *node*, and a node can leave the tree while this drag is
@@ -154,10 +166,10 @@ impl<Tab> DockArea<'_, Tab> {
             dnd.drop_stale_hover();
         }
 
-        if let (Some(source), Some(hover)) = (drag_data, hover_data) {
+        if let (Some(source_rect), Some(hover)) = (drag_data, hover_data) {
             let style = self.style.as_ref().unwrap();
-            state.set_drag_and_drop(source, hover, ui.ctx(), style);
-            let tab_dst = self.show_drag_drop_overlay(ui, &mut state, tab_viewer);
+            state.set_drag_and_drop(source_rect, hover, ui.ctx(), style);
+            let tab_dst = self.show_drag_drop_overlay(ui, &mut state, carried.unwrap(), tab_viewer);
             if ui.input(|i| i.pointer.primary_released())
                 && let Some(destination) = tab_dst
             {
@@ -166,12 +178,8 @@ impl<Tab> DockArea<'_, Tab> {
                 // move the tab the hand grabbed rather than whatever now sits at its old
                 // index. `None` cannot happen — a source that stopped resolving ended the
                 // drag above — so it is an assertion, not a branch.
-                let source = state
-                    .dnd
-                    .as_ref()
-                    .unwrap()
-                    .drag
-                    .src
+                let source = carried
+                    .expect("the overlay only resolves a destination for a carried tab")
                     .resolve(self.dock_state)
                     .expect("a drag whose tab is gone was already cancelled");
                 // A drop that resolves to the tab's current slot changes nothing; only a
@@ -337,10 +345,15 @@ impl<Tab> DockArea<'_, Tab> {
     }
 
     /// Resolve where a dragged tab would land given it's dropped this frame, returns `None` when the resulting drop is an invalid move.
+    ///
+    /// `carried` is what the hand holds, handed in by the caller that read it from the field
+    /// rather than read again off `state` here: the destination half (`state.dnd`) is borrowed
+    /// mutably for the length of this, and the subject is not part of it.
     fn show_drag_drop_overlay(
         &mut self,
         ui: &Ui,
         state: &mut State,
+        carried: DragSource,
         tab_viewer: &impl TabViewer<Tab = Tab>,
     ) -> Option<TabDestination> {
         let drag_state = state.dnd.as_mut().unwrap();
@@ -357,7 +370,7 @@ impl<Tab> DockArea<'_, Tab> {
             .expect("show_drag_drop_overlay is only called with a freshly-set hover");
 
         let deserted_node = {
-            let src = drag_state.drag.src;
+            let src = carried;
             match hover.dst.node_address() {
                 (dst_surf, Some(dst_node)) => {
                     src.surface == dst_surf
@@ -377,9 +390,7 @@ impl<Tab> DockArea<'_, Tab> {
         let allowed_splits = self.allowed_splits & restricted_splits;
 
         let allowed_in_window = {
-            let path = drag_state
-                .drag
-                .src
+            let path = carried
                 .resolve(self.dock_state)
                 .expect("a drag whose tab is gone was already cancelled");
             let Node::Leaf(leaf) = &mut self.dock_state[path.node_path()] else {
@@ -396,6 +407,7 @@ impl<Tab> DockArea<'_, Tab> {
         match (style.overlay.overlay_type, hover.tab.is_some()) {
             (OverlayType::HighlightedAreas, _) | (_, true) => drag_state.resolve_traditional(
                 &hover,
+                carried,
                 ui,
                 style,
                 allowed_splits,
@@ -404,6 +416,7 @@ impl<Tab> DockArea<'_, Tab> {
             ),
             (OverlayType::Widgets, false) => drag_state.resolve_icon_based(
                 &hover,
+                carried,
                 ui,
                 style,
                 allowed_splits,

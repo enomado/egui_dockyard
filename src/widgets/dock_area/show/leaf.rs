@@ -15,8 +15,8 @@ use crate::tab_viewer::OnCloseResponse;
 use crate::{
     DockArea, Style, SurfaceIndex, TabAddAlign, TabIndex, TabStyle, TabViewer,
     dock_area::{
-        drag_and_drop::{DragData, DragDropState, DragSource, HoverData, TreeComponent},
-        state::State,
+        drag_and_drop::{DragSource, HoverData, TreeComponent},
+        state::{DragSubject, State},
     },
     utils::{clip_to, fade_visuals, rect_set_size_centered, rect_stroke_box},
 };
@@ -304,6 +304,27 @@ impl<Tab> DockArea<'_, Tab> {
 
             if is_being_dragged {
                 tabs_ui.output_mut(|o| o.cursor_icon = CursorIcon::Grabbing);
+
+                // The hand has closed on this tab: name it in the one place that remembers what
+                // is being dragged, the same way a separator and a junction do at their own
+                // `drag_started`. This *is* the tab gesture's `drag_started`: egui reports the
+                // drag on the tab's own widget id, and the first frame it does is the first frame
+                // this branch runs — there is no `Response` here to ask, because the dragged tab
+                // is drawn into a layer of its own and interacted with under a second id.
+                //
+                // Told from the frames after it by the field itself rather than by a flag: the
+                // gesture is either already there under this id, or it is not.
+                let subject = DragSubject::Tab(DragSource {
+                    surface: path.surface,
+                    node: path.node,
+                    tab: tab_id,
+                });
+                let pass = tabs_ui.ctx().cumulative_pass_nr();
+                if state.in_flight().is_some_and(|drag| drag.widget == id) {
+                    state.keep_drag_alive(id, pass);
+                } else {
+                    state.begin_drag(id, subject, pass);
+                }
             }
 
             let (is_active, label, tab_style, closeable) = {
@@ -349,27 +370,28 @@ impl<Tab> DockArea<'_, Tab> {
                     let start = *state.drag_start.get_or_insert(pointer_pos);
                     let delta = pointer_pos - start;
                     if delta.x.abs() > 30.0 || delta.y.abs() > 6.0 {
+                        // Past the pull-out threshold: the tab now follows the pointer and a drop
+                        // becomes possible. Recorded in the gesture rather than re-derived by
+                        // whoever needs to know — see `DragInFlight::moved`. The rectangle below
+                        // is published either way, so that this stays the *one* expression of
+                        // "the tab has been pulled out"; a second copy of it in the shape of
+                        // "there is a rect in memory this frame" is what it used to be.
+                        state.mark_drag_moved();
                         tabs_ui
                             .ctx()
                             .transform_layer_shapes(layer_id, TSTransform::new(delta, 1.0));
-
-                        // Identity, not position: this outlives the frame, and the leaf can be
-                        // edited while the drag is in flight. See `DragSource`.
-                        let src = DragSource {
-                            surface: path.surface,
-                            node: path.node,
-                            tab: tab_id,
-                        };
-                        tabs_ui.memory_mut(|mem| {
-                            mem.data.insert_temp(
-                                self.id.with("drag_data"),
-                                Some(DragData {
-                                    src,
-                                    rect: self.layout.rect(path).unwrap(),
-                                }),
-                            );
-                        });
                     }
+
+                    // Geometry only: *what* is being carried was named in the field above, once,
+                    // and is not repeated here. What the next frame cannot recover for itself is
+                    // this leaf's rectangle as it stood while the tab was still part of it — the
+                    // size a window preview is drawn at.
+                    tabs_ui.memory_mut(|mem| {
+                        mem.data.insert_temp(
+                            self.id.with("drag_data"),
+                            Some(self.layout.rect(path).unwrap()),
+                        );
+                    });
                 }
 
                 (response, title_id)
@@ -1341,11 +1363,8 @@ impl<Tab> DockArea<'_, Tab> {
 
             // if the dragged tab isn't allowed in a window,
             // it's unnecessary to change the hover state
-            let is_dragged_valid = match &state.dnd {
-                Some(DragDropState {
-                    drag: DragData { src, .. },
-                    ..
-                }) => match src.resolve(self.dock_state) {
+            let is_dragged_valid = match state.carried_tab() {
+                Some(src) => match src.resolve(self.dock_state) {
                     Some(src_path) => {
                         let leaf = self.dock_state.leaf_mut(src_path.node_path()).unwrap();
                         tab_viewer.allowed_in_windows(&mut leaf[src_path.tab])
@@ -1355,7 +1374,7 @@ impl<Tab> DockArea<'_, Tab> {
                     // it has already ended the drag; nothing here has an opinion left to have.
                     None => true,
                 },
-                _ => true,
+                None => true,
             };
 
             // Use rect.contains instead of response.hovered as the dragged tab covers

@@ -38,7 +38,7 @@ pub(super) struct HoverData {
 /// [`resolve`](Self::resolve) answers "where is it now", and answers `None` exactly when the
 /// tab is gone — which is the one thing the drag has to notice, since a drag of a tab that no
 /// longer exists is over.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DragSource {
     pub surface: SurfaceIndex,
     pub node: NodeId,
@@ -58,13 +58,6 @@ impl DragSource {
     pub(super) fn node_path(&self) -> NodePath {
         NodePath::new(self.surface, self.node)
     }
-}
-
-/// Specifies the location of a tab on the tree, used when moving tabs.
-#[derive(Debug, Clone)]
-pub(super) struct DragData {
-    pub src: DragSource,
-    pub rect: Rect,
 }
 
 #[derive(Debug, Clone)]
@@ -223,7 +216,15 @@ pub(super) struct DragDropState {
     ///
     /// [`State::set_drag_and_drop`]: super::state::State::set_drag_and_drop
     pub hover: Option<HoverData>,
-    pub drag: DragData,
+
+    /// The rectangle of the leaf the carried tab came from, as it stood when the drag was
+    /// published — the size a "drop this into a window" preview is drawn at.
+    ///
+    /// Geometry and nothing else. *What* is being carried is not here and is not duplicated
+    /// here: it is [`State::carried_tab`](super::state::State::carried_tab), the one place that
+    /// says what the hand holds. This struct is the destination half of a drag.
+    pub source_rect: Rect,
+
     pub pointer: Pos2,
     /// Is some when the pointer is over rect, f64 holds the time when the lock was last active.
     pub locked: Option<f64>,
@@ -248,6 +249,7 @@ impl DragDropState {
     pub(super) fn resolve_icon_based(
         &mut self,
         hover: &HoverData,
+        source: DragSource,
         ui: &Ui,
         style: &Style,
         allowed_splits: AllowedSplits,
@@ -266,7 +268,7 @@ impl DragDropState {
             .min(style.overlay.max_button_size);
 
         let mut destination: Option<TabDestination> = windows_allowed.then(|| {
-            TabDestination::Window(Rect::from_min_size(pointer, self.drag.rect.size()).into())
+            TabDestination::Window(Rect::from_min_size(pointer, self.source_rect.size()).into())
         });
 
         let center = rect.center();
@@ -319,7 +321,7 @@ impl DragDropState {
         };
         self.update_lock(hover, target_lock_state, style, ui.ctx());
         if let Some(TabDestination::Window(rect)) = destination {
-            let rect = self.window_preview_rect(rect.into());
+            let rect = self.window_preview_rect(source, rect.into());
             let rect_bounded = constrain_rect_to_area(ui, rect, window_bounds);
             draw_window_rect(rect_bounded, ui, style);
         }
@@ -329,6 +331,7 @@ impl DragDropState {
     pub(super) fn resolve_traditional(
         &mut self,
         hover: &HoverData,
+        source: DragSource,
         ui: &Ui,
         style: &Style,
         allowed_splits: AllowedSplits,
@@ -421,7 +424,7 @@ impl DragDropState {
         };
 
         let default_value = windows_allowed.then(|| {
-            TabDestination::Window(Rect::from_min_size(pointer, self.drag.rect.size()).into())
+            TabDestination::Window(Rect::from_min_size(pointer, self.source_rect.size()).into())
         });
         let final_result = tab_insertion.map_or(default_value, |tab| match hover.dst {
             TreeComponent::Surface(surface) => Some(TabDestination::EmptySurface(surface)),
@@ -434,7 +437,7 @@ impl DragDropState {
         // Draw the overlay
         match final_result {
             Some(TabDestination::Window(rect)) => {
-                let rect = self.window_preview_rect(rect.into());
+                let rect = self.window_preview_rect(source, rect.into());
                 let rect_bounded = constrain_rect_to_area(ui, rect, window_bounds);
                 draw_window_rect(rect_bounded, ui, style);
             }
@@ -488,8 +491,12 @@ impl DragDropState {
         }
     }
 
-    fn window_preview_rect(&self, rect: Rect) -> Rect {
-        if self.drag.src.surface == SurfaceIndex::main() {
+    /// Takes the drag's source rather than reading it off `self`: the address of what is being
+    /// carried lives in one place now (`State::carried_tab`), and this is the only thing on the
+    /// destination side that still needs to know anything about it — a tab pulled out of the
+    /// main surface previews smaller than one already floating in a window of its own.
+    fn window_preview_rect(&self, source: DragSource, rect: Rect) -> Rect {
+        if source.surface == SurfaceIndex::main() {
             Rect::from_min_size(rect.min, rect.size() * 0.8)
         } else {
             rect

@@ -1,6 +1,6 @@
 # Plan: one place says what the hand holds
 
-**Status: steps 1–2 landed, steps 3–6 open.** Asked for by Стас on 2026-08-10, immediately after
+**Status: steps 1–3 landed, steps 4–6 open.** Asked for by Стас on 2026-08-10, immediately after
 `JunctionDrag` landed (`f2693f7`) — that struct is one corner of this and is explicitly *not*
 the shape wanted. Entry point for whoever picks it up: this file, then
 [src/widgets/dock_area/state.rs](../src/widgets/dock_area/state.rs), then the hold bookkeeping in
@@ -141,9 +141,11 @@ own order and comments, not in two types.
    today. The variant can land first (as the place for it), but then it is dead until the gesture
    arrives, and this crate does not keep dead branches. Probably: land the enum with the four
    gestures that exist, and add `Panels` in the same change as the gesture.
-3. **How much of `DragDropState` is the subject and how much is the *destination*?** `dnd` carries
-   the hover target and the overlay lock, which are not "what is in the hand" — they are where it
-   would land. The split is the real work of step 3 below.
+3. ~~**How much of `DragDropState` is the subject and how much is the *destination*?**~~ —
+   answered by step 3: all of it is the destination except the address and the source leaf's
+   rectangle. The address went to the field; the rectangle stayed, because it is geometry the
+   destination side draws with (the size of a "drop into a window" preview) rather than a second
+   name for what is being carried.
 4. **Public payload types.** `TabId`, `NodeId`, `NodePath`, `SurfaceIndex` are already public;
    `fraction_at_start` exposes a stored ratio, which is fine, and `outer_horizontal` exposes an
    orientation the caller can already read off the tree. Nothing here forces a new public type,
@@ -189,8 +191,35 @@ Smallest blast radius first, and each step is committable on its own:
    commit unconditionally on release (`is_some()` for `is_some_and(moved)`) reddens three by name,
    `a_separator_grabbed_and_released_commits_nothing` among them; never marking `moved` reddens
    `dragging_a_separator_moves_the_boundary_and_commits_once` and the sweep.
-3. **The tab**, which is the big one: `dnd` outlives frames, carries the destination and the
-   overlay's lock, and every drop path reads it. Split subject from destination here.
+3. ~~**The tab**, which is the big one~~ — **done.** The subject is `DragSubject::Tab(DragSource)`
+   in the field, written where egui first reports the drag on the tab's own widget id (`tabs`,
+   in `leaf.rs`); `DragDropState` keeps only the destination half, and its `drag: DragData` — the
+   address plus a rectangle — is now `source_rect: Rect`, geometry and nothing else. `DragData`
+   is gone. Every reader that used to take the address off `dnd` (`drag_is_over`, the drop's
+   `resolve`, `deserted_node`, `allowed_in_window`, `window_preview_rect`, `is_dragged_valid`)
+   reads `State::carried_tab()` instead, and the ones that need it *and* are inside a `&mut dnd`
+   borrow take it as an argument rather than reaching for it again.
+   Three things worth knowing before step 4:
+   * **The gesture's end had to learn the subject, and that is the whole of the backlog item
+     below.** `reset_drag` runs at the top of a pass on *any* primary release — and a separator's
+     release is a primary release too, whose own `drag_stopped` and `LayoutCommitted` are still
+     ahead in that same pass. So it empties the field only for a tab. Pinned by
+     `a_release_ends_the_carried_tab_and_leaves_a_boundary_alone`; measured, taking the subject
+     test out reddens it *and* `a_junction_drag_reports_itself_like_a_separator_drag`.
+   * **The pull-out threshold is `moved`, and it is read.** The 30/6-pixel threshold used to be
+     expressed twice — once as itself, once as "a rectangle was published in temp memory this
+     frame" — and the second copy was what every consumer actually tested. The leaf now publishes
+     the rectangle on every dragged frame, `mark_drag_moved` records the crossing, and the top of
+     the pass gates on the flag. Two expressions of one fact collapsed into one.
+   * **`dragged_tab` is deliberately still a conjunction** — `dnd` open *and* the field holding a
+     tab. That is what it has always meant (both halves lived in `dnd`, so the second was implied
+     by the first), and splitting the two answers is step 6's job, not a side effect of this one.
+   Measured, not assumed — three mutations, each red by name:
+   route the tab around the chokepoint (drop the `begin_drag` call) → the sweep dies at seed 0
+   step 8 on `mark_drag_moved`'s own `expect`, plus four cancellation tests by name; never read
+   the subject at the top of the pass (`carried` forced to `None`) → `drag_complaint` fires at
+   seed 2 — "egui says `Some(...)`, the dock's own state resolves to `None`"; `reset_drag`
+   forgetting the field entirely → `seeded_scenarios_keep_the_dock_well_formed`.
 4. **`drag_start`**, which is a press that has not become a drag — decide whether that is a
    `DragInFlight` with `moved: false` or a state before one.
 5. **The window**, if question 1 has an honest answer.
@@ -227,10 +256,25 @@ Smallest blast radius first, and each step is committable on its own:
 
 ## Backlog, found while doing step 1
 
-* **`State::reset_drag` does not touch `drag`, and by step 3 it will have to.** It clears `dnd`,
-  `window_fade` and `drag_start` — the tab gesture's three — and is called where a drag is
-  abandoned rather than released. Once the tab is in the field, "abandoned" and `end_drag` are the
-  same question asked twice, and the one that forgets is the one that leaves a leftover behind.
+* ~~**`State::reset_drag` does not touch `drag`, and by step 3 it will have to.**~~ — settled in
+  step 3, and the shape it settled into is not the one predicted here: `reset_drag` ends the tab
+  gesture *by subject*, because it is also the release of every other gesture and must not eat
+  one. `end_drag(widget)` was no use for it — the tab's end is reached from the top of the pass,
+  where there is no `Response` and so no id to speak for.
+* **The `drag_data` temp channel is now a rectangle looking for a home.** It carries geometry
+  only, published by the leaf and read one frame later at the top of the pass, and everything it
+  used to *mean* ("a drag exists", "past the threshold") is the field's answer now. The rectangle
+  itself is `self.layout.rect(src.node_path())` — which the top of the pass can ask for directly,
+  from the same last-frame `DockLayout` the leaf published it out of. Deleting the channel is a
+  step on its own, and it wants checking that the two rectangles really are the same one and not
+  merely equal most frames.
+* **The sweep has no gate that a drop ever *lands*.** Measured while looking for one: making every
+  drop a no-op (`move_tab` never called) is caught by two hand-written scenes in
+  `a_dead_drop_destination_is_not_a_drop.rs` and by `landings_after_a_change`, so the hole is
+  narrower than it looked — a counter for "a release rearranged the tabs" was written, found to
+  catch nothing the existing gate does not, and taken back out. Recorded so the next person does
+  not write it again. What is genuinely unwitnessed is per-*variant* coverage of the field, which
+  is oracle 3 below and belongs to step 6.
 * ~~**`separator_drag_start` already carries the widget id**~~ — settled in step 2. The id and the
   path are derivable one way only (`ui.id().with((path.node, "separator"))` mixes in the enclosing
   `Ui`'s), so both are kept: the id names the gesture, the path names what it writes to.

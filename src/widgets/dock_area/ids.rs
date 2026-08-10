@@ -195,11 +195,19 @@ pub fn dragged_tab<Tab>(
     dock_area_id: Id,
     dock_state: &DockState<Tab>,
 ) -> Option<TabPath> {
-    State::load(ctx, dock_area_id)
-        .dnd?
-        .drag
-        .src
-        .resolve(dock_state)
+    let state = State::load(ctx, dock_area_id);
+    // Two questions, deliberately, and this answers the conjunction of them: the *subject* is
+    // the field's (`carried_tab` — the one place that says what the hand holds), while `dnd`
+    // being open is the *destination* half, and it is what says the drag has been pulled far
+    // enough out of the bar for a drop to be resolvable at all.
+    //
+    // The conjunction is what this function has always meant, back when both halves lived in
+    // `dnd` together and the second was implied by the first. It stops being written this way
+    // in the step that publishes the subject itself, where "what is in the hand" and "where
+    // would it land" become two separate answers rather than one — see
+    // `docs/PLAN_one_place_says_what_the_hand_holds.md`.
+    state.dnd.as_ref()?;
+    state.carried_tab()?.resolve(dock_state)
 }
 
 /// The node the drag's drop indicator currently prefers, or `None` if no drag is in flight.

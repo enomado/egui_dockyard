@@ -1,6 +1,7 @@
 # Plan: one place says what the hand holds
 
-**Status: steps 1–4 landed, steps 5–6 open.** Asked for by Стас on 2026-08-10, immediately after
+**Status: steps 1–4 and 6 landed; step 5 (the window) is the only one open, and it is gated on
+open question 1.** Asked for by Стас on 2026-08-10, immediately after
 `JunctionDrag` landed (`f2693f7`) — that struct is one corner of this and is explicitly *not*
 the shape wanted. Entry point for whoever picks it up: this file, then
 [src/widgets/dock_area/state.rs](../src/widgets/dock_area/state.rs), then the hold bookkeeping in
@@ -244,25 +245,62 @@ Smallest blast radius first, and each step is committable on its own:
    pull-out never happens) reddens eleven by name, `seeded_scenarios_keep_the_dock_well_formed`
    and both `ids.rs` doctests among them.
 5. **The window**, if question 1 has an honest answer.
-6. **Publish, and delete the harness's private bookkeeping**: `Sim::hold`, `Sim::junction_hold`
-   and the `dragged_id()` exemption go, replaced by asking the dock.
+6. ~~**Publish, and delete the harness's private bookkeeping**~~ — **done**, and one half of the
+   sentence was wrong. The exemption went; the bookkeeping stayed, and had to.
+   `DragSubject`, `DragInFlight` and `DragSource` are public, readable two ways:
+   `DockAreaResponse::dragging` at the end of a pass and `drag_in_flight(ctx, dock_id)` between
+   frames — the same value through the same liveness filter, for a consumer that has a response
+   in hand and for a driver that has none. `drag_complaint` now compares egui's `dragged_id()`
+   against the dock's `widget` for every gesture, in one line.
+   Four things worth knowing:
+   * **The harness's own hold is the *other side* of the comparison, not a duplicate of it.**
+     "Delete `Sim::hold` and `Sim::junction_hold`, replaced by asking the dock" reads as one
+     move and is two: the subject the harness *believes* it grabbed is what the dock's answer is
+     judged against, and its `moved`/`scene`/`at` are independent expectations. A harness that
+     took those from the dock would be checking the dock against itself — the oracle in this
+     file's own words, "the dock and the harness name the same subject", needs a harness that
+     still names one. Same rule `HoldWatch::source_died` was already written under.
+   * **The whole gesture is published, not the subject alone.** `widget` is what makes the
+     comparison possible by name — the exemption existed precisely because a junction handle's id
+     is mixed out of the surface's `Ui` and cannot be built from outside. `moved` and `pass` come
+     with it because they are the same gesture; the doc says out loud that an oracle judging a
+     commit must not read `moved`.
+   * **One divergence is real, and it is checked rather than exempted.** A gesture whose subject
+     leaves the tree never gets its `drag_stopped`, so the dock drops it a pass later while egui
+     drags a widget nobody draws until the hand opens. Found by the sweep the moment the strong
+     form went in (seed 1, `CloseLeaf` under a held handle). The harness keeps the last gesture
+     the dock *announced* (`Sim::named_drag`) and asks the tree whether that subject is really
+     gone (`Sim::subject_is_gone`) — for a junction, "is a tee made of both splits still
+     offered", the same reading `ReleaseJunction` makes. Counted (`SubjectWatch::abandoned`, 8
+     across 96 seeds) and gated, because a tolerated state nothing reaches is an exemption again.
+   * **A leftover that is not kept alive is unobservable, and that is correct.** Measured:
+     re-entering an ended junction gesture into the field leaves the sweep green, because the
+     liveness filter is what the *dock* acts on too — the entry is gone for everyone at the same
+     moment. Only a leftover that is also reported alive every frame is a state, and that one
+     reddens by name.
+   Measured, not assumed — three mutations on the sweep: `begin_drag` twice while one is live →
+   seed 1 step 9 by the assertion's own message; the separator's subject never reaching the
+   response → the new `subjects.separator` gate, naming 29 separator drags that left no trace;
+   an ended junction gesture kept in the field *and* kept alive → "egui is dragging None, the
+   dock holds Junction {…}", which is exactly the class the old exemption could not see.
+   Coverage of the field across 96 seeds: `SubjectWatch { tab: 2833, separator: 221, junction:
+   47, abandoned: 8 }`.
 
 ## Oracles
 
-* **The exemption's deletion is the oracle.** When the harness can ask the dock what it holds, the
-  comment quoted above and the `sim.junction_hold.is_none()` escape hatch come out, and the check
-  becomes "the dock and the harness name the same subject, every frame, whatever it is". That is a
-  strictly stronger statement than what runs today, and it is a *deletion*, so it cannot be
-  satisfied by adding a green test.
-* **At most one subject, ever.** A property over the sweep: no frame has two, and no gesture ends
-  without the field emptying.
-* **Every gesture the vocabulary can start is seen in the field.** A counter per variant, gated
-  non-zero, in the sweep's totals — the same discipline `JunctionWatch` and `CrossWatch` already
-  keep. A variant that never appears means either the sweep cannot reach it or the gesture does
-  not route through the chokepoint, and both are the failure this plan exists to prevent.
-* **Mutation to run before believing any of it:** start a second drag while one is live (call
-  `begin_drag` twice) — the sweep must redden by name. And route one gesture around the chokepoint
-  (write the old way) — the per-variant counter must drop to zero.
+* ~~**The exemption's deletion is the oracle.**~~ — done in step 6. The comment quoted above and
+  the `sim.junction_hold.is_none()` escape hatch are out; the check is "the two holders name the
+  same widget, every step, whatever the gesture is", plus one *checked* divergence (a subject
+  that left the tree) where there used to be a blanket exemption.
+* **At most one subject, ever.** Held by construction — one field, and `begin_drag` fails loud on
+  a second — and measured in step 6: calling it twice reddens the sweep at seed 1 by the
+  assertion's own message.
+* ~~**Every gesture the vocabulary can start is seen in the field.**~~ — done in step 6:
+  `SubjectWatch`, counted per frame off the dock's own answer and gated non-zero per variant.
+  Per *frame* and not per step, because a separator drag is a whole gesture inside one step and a
+  step-boundary sample would have concluded the variant does not exist.
+* ~~**Mutation to run before believing any of it:**~~ — both run in step 6, both red by name; the
+  numbers and a third mutation are recorded there.
 
 ## What not to do
 
@@ -294,8 +332,8 @@ Smallest blast radius first, and each step is committable on its own:
   `a_dead_drop_destination_is_not_a_drop.rs` and by `landings_after_a_change`, so the hole is
   narrower than it looked — a counter for "a release rearranged the tabs" was written, found to
   catch nothing the existing gate does not, and taken back out. Recorded so the next person does
-  not write it again. What is genuinely unwitnessed is per-*variant* coverage of the field, which
-  is oracle 3 below and belongs to step 6.
+  not write it again. Per-*variant* coverage of the field, which this pointed at, landed with
+  step 6 as `SubjectWatch`.
 * ~~**`separator_drag_start` already carries the widget id**~~ — settled in step 2. The id and the
   path are derivable one way only (`ui.id().with((path.node, "separator"))` mixes in the enclosing
   `Ui`'s), so both are kept: the id names the gesture, the path names what it writes to.
@@ -320,9 +358,8 @@ Smallest blast radius first, and each step is committable on its own:
   belongs — but the hit test travels with the layer, so check what a press over the menu reaches
   before and after: a handle that is drawn under the menu and still *catches* the press is the
   same bug with the paint order fixed.
-* **`DragSubject` is `pub(super)` for now.** The plan publishes it in step 6; making it public
-  before there is an accessor would be a public type nobody can obtain. Named here so the step
-  that publishes it does not have to rediscover that it is not yet public.
+* ~~**`DragSubject` is `pub(super)` for now.**~~ — published in step 6, together with
+  `DragInFlight` and `DragSource` and the two accessors that hand one out.
 * **The stand-down guard reads liveness with an off-by-one that is now in two places** —
   `in_flight_at`'s `pass + 1 >= now` and the per-handle grip's `held_on + 1 >= pass` in
   `draw_one_handle`. Same rule, same reason, two copies; if a third arrives it wants a name.

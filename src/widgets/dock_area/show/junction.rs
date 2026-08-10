@@ -49,8 +49,8 @@
 use std::collections::VecDeque;
 
 use egui::{
-    CursorIcon, LayerId, Order, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder,
-    Vec2, epaint::CornerRadius, pos2, vec2,
+    CursorIcon, Order, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
+    epaint::CornerRadius, pos2, vec2,
 };
 
 use crate::core::tree::regroup::Regroup;
@@ -281,19 +281,17 @@ fn toggle_metrics(toggle: &CrossSplitToggleStyle, room: f32) -> (f32, f32, f32) 
 /// only where a tier is left to be above: a dock hosted in a floating window already draws in
 /// [`Order::Middle`], and egui has nothing between that and `Foreground`.
 ///
-/// Why the tier decides the *paint* and not merely the press, which is the bug this exists for:
-/// egui ranks layers for the pointer by `Areas::compare_order`, where a layer that is not an
-/// [`egui::Area`] — and a handle's is not — compares below every area of the same tier, because
-/// `None < Some(i)`. It paints them by `GraphicLayers::drain`, which walks a tier's areas in that
-/// same order and then sweeps up every layer of the tier it has not seen yet. So a non-area layer
-/// is ranked *under* the areas of its tier and painted *over* them: at `Foreground` the handle lost
-/// the press to a menu, as it should, and still put a square on top of it. A tier lower it does
-/// neither.
-///
-/// The residue is written down rather than papered over: inside a floating window the handle is at
-/// `Foreground` alongside menus, so the square is on top of one again. Fixing that needs the
-/// handle's layer to be an area (which is what would give it a rank of its own), and that is a
-/// larger change than this one.
+/// Why the tier alone used to be the wrong fix for the paint, not merely the press: egui ranks
+/// layers for the pointer by `Areas::compare_order`, where a layer that is not an [`egui::Area`]
+/// compares below every area of the same tier, because `None < Some(i)`. It paints them by
+/// `GraphicLayers::drain`, which walks a tier's areas in that same order and then sweeps up every
+/// layer of the tier it has not seen yet. So a non-area layer is ranked *under* the areas of its
+/// tier and painted *over* them: at `Foreground` a handle that was a bare layer lost the press to
+/// a menu, as it should, and still put a square on top of it. `draw_one_handle` now draws the
+/// handle as a real [`egui::Area`] instead, which is what registers a layer into that order and
+/// so paints and ranks it the same way a menu does. The tier computed here is still what decides
+/// *which* areas the handle has to rank correctly against — one tier above the dock's own content,
+/// capped at `Foreground` because there is nothing above that for a window-hosted dock to give it.
 fn handle_layer(dock: Order) -> Order {
     match dock {
         Order::Background => Order::Middle,
@@ -745,10 +743,12 @@ impl<Tab> DockArea<'_, Tab> {
     ///
     /// # It claims no space
     ///
-    /// The handle is drawn into a child [`Ui`] made with [`Ui::new_child`], and that is not a
-    /// stylistic choice over `ui.scope_builder`: a *scope* ends by folding the child's
-    /// `min_rect` into the parent and advancing its cursor past it. The parent here is the `Ui`
-    /// the entire dock is drawn into, and in a floating window that `Ui`'s `min_rect` is the
+    /// The handle is drawn into an [`egui::Area`] of its own, and that is not a stylistic choice
+    /// over folding it into the surrounding `Ui`: an `Area` floats outside the `Ui` stack
+    /// entirely (see the module doc on [`egui::Area`] itself — "no parent"), so it cannot fold
+    /// its size into the parent's `min_rect` and advance its cursor the way a `ui.scope_builder`
+    /// would. That is what a raw child `Ui` used to do here, and what broke: the parent is the
+    /// `Ui` the entire dock is drawn into, and in a floating window that `Ui`'s `min_rect` is the
     /// size the window asks for — so each handle drawn grew the window by one item spacing,
     /// every frame, and `constrain_to` turned that into a slide up the screen once it reached
     /// the bottom. See `a_cross_in_a_window_does_not_make_the_window_creep`. A handle sitting
@@ -785,12 +785,13 @@ impl<Tab> DockArea<'_, Tab> {
     /// "Not dragged" has to be **no widget**, not a widget that senses no drags. egui drops
     /// every layer behind a widget that covers the pointer's search area
     /// (`hit_test.rs`, "nothing behind this layer could ever be interacted with"), and the
-    /// handles live in their own [`Order::Foreground`] layer — so a click-only handle at the
-    /// crossing takes the point away from the separators under it just as surely as a draggable
-    /// one, and a drag there moves nothing whatsoever. Hence the rule this follows: **a handle
-    /// exists exactly while it has a gesture to offer.** A crossing's one gesture is the
-    /// ctrl+click, so its handle is there while ctrl is held and not otherwise, and the plain
-    /// drag it used to swallow is plain again by construction rather than by careful sense flags.
+    /// handles live in their own layer — one tier above the dock's own content (see
+    /// [`handle_layer`]) — so a click-only handle at the crossing takes the point away from the
+    /// separators under it just as surely as a draggable one, and a drag there moves nothing
+    /// whatsoever. Hence the rule this follows: **a handle exists exactly while it has a
+    /// gesture to offer.** A crossing's one gesture is the ctrl+click, so its handle is there
+    /// while ctrl is held and not otherwise, and the plain drag it used to swallow is plain
+    /// again by construction rather than by careful sense flags.
     fn draw_one_handle(
         &mut self,
         ui: &mut Ui,
@@ -840,7 +841,7 @@ impl<Tab> DockArea<'_, Tab> {
             )
             .collect();
         let handle_id = ui.id().with((key, "junction_handle"));
-        let layer_id = LayerId::new(handle_layer(ui.layer_id().order), handle_id);
+        let order = handle_layer(ui.layer_id().order);
 
         // Never wider than the junction has room for — see `toggle_metrics` for how the three
         // lengths are cut down, and `handle_room` for what "room" answers to.
@@ -872,102 +873,132 @@ impl<Tab> DockArea<'_, Tab> {
             catch_rect
         };
 
-        let ui = &mut ui.new_child(UiBuilder::new().layer_id(layer_id).max_rect(hit_rect));
-
-        // A tee is a thing you drag, in either direction at once, and the cursor says so. A
-        // crossing is a thing you ctrl+click, and it only exists while ctrl is down.
-        let response = if is_cross {
-            ui.interact(hit_rect, handle_id, Sense::click())
-        } else {
-            ui.interact(hit_rect, handle_id, Sense::click_and_drag())
-                .on_hover_and_drag_cursor(CursorIcon::Move)
-        };
-
-        // A press keeps its grip even if the pointer slides off, the same way any button does;
-        // without it, releasing a hair outside would both cancel the click and disarm.
-        let holds_now = response.hovered() || response.is_pointer_button_down_on();
-        ui.data_mut(|data| {
-            if holds_now {
-                data.insert_temp(handle_id, pass);
-            } else {
-                data.remove_temp::<u64>(handle_id);
-            }
-        });
-
-        // Painted only where the pointer is (see the note above), and one rectangle whether it
-        // is merely under it or held. The margins widen what answers to the pointer; they do
-        // not widen what is painted. Growing the square to the catch zone was tried — it made
-        // the handle more than double under the cursor at the default style, which reads as the
-        // thing being dragged rather than offered. Colour carries the "you have it" instead.
+        // A real `Area`, not a bare layer sharing its `Order`: `GraphicLayers::drain` paints a
+        // tier's areas in the order `Memory::areas` ranks them in, and then sweeps up every layer
+        // of that tier it has not seen — so a layer that never joined that order was always
+        // painted last, on top of real areas ranked above it, however the press had already
+        // resolved. An `Area` is what registers a layer into that order (`Areas::set_state`);
+        // nothing short of one does. See `handle_layer`.
         //
-        // `dragged()` is in there for the frames a drag travels: the pointer leads the handle,
-        // which follows a frame behind, so the hover it started from is not a thing that keeps
-        // being true — and a handle that vanished mid-gesture would say the gesture had ended.
-        if holds_now || response.dragged() {
-            let handle_size = drawn_idle.width();
-            // The palette swaps rather than shifts while it is held: whichever of the two the
-            // square takes, the icon takes the other, so the arms stay legible against it. A
-            // handle is never seen cold, so `color_idle` — the separator's own resting colour —
-            // is not one of the two.
-            let (fill, icon) = if response.is_pointer_button_down_on() {
-                (style.color_dragged, style.color_hovered)
-            } else {
-                (style.color_hovered, style.color_dragged)
-            };
-            ui.painter().rect(
-                drawn_idle,
-                CornerRadius::from(handle_size * 0.25),
-                fill,
-                Stroke::NONE,
-                StrokeKind::Inside,
-            );
-            let stroke = Stroke::new(1.5, icon);
-            for dir in icon_arms(kind, junctions.outer_horizontal) {
-                draw_arrow(ui.painter(), center, dir, handle_size * 0.28, stroke);
-            }
-        }
+        // `fixed_pos` and `movable(false)` say the handle's place is ours to give, every frame —
+        // egui never lags the *position* behind a fixed one. The `size` it hands back a frame
+        // late (`AreaState::size` is written only at the end of a pass) is accepted: a handle can
+        // be a frame behind its own room shrinking, the same way `holding` above is allowed to be
+        // a pass behind the pointer leaving. `sense(Sense::hover())` keeps the area's own
+        // built-in "move" widget from competing with the `interact` below over the same
+        // rectangle — it still promotes the handle to the top of its tier on a press or on first
+        // appearing (`pointer_pressed_on_area` / `!visible_last_frame`), which is all "move to
+        // top" ought to mean for something that is not itself dragged.
+        egui::Area::new(handle_id)
+            .order(order)
+            .fixed_pos(hit_rect.min)
+            .default_size(hit_rect.size())
+            .movable(false)
+            .sense(Sense::hover())
+            .constrain(false)
+            .show(ui.ctx(), |ui| {
+                ui.set_min_size(hit_rect.size());
 
-        // What the gesture has hold of, named once and kept: the nodes, not an index into a list
-        // that is rebuilt from the geometry this drag is about to move. See
-        // [`DragSubject::Junction`].
-        if response.drag_started() {
-            let mut dividers = kind.dividers().map(|(band, k)| {
-                NodePath::new(junctions.outer.surface, junctions.bands[band].dividers[k])
-            });
-            state.begin_drag(
-                handle_id,
-                DragSubject::Junction {
-                    outer: junctions.outer,
-                    outer_horizontal: junctions.outer_horizontal,
-                    divider: dividers
-                        .next()
-                        .expect("every junction is made of at least one divider"),
-                },
-                response
-                    .interact_pointer_pos()
-                    .expect("a drag that started was pressed somewhere"),
-                pass,
-            );
-        }
-        if response.drag_stopped() {
-            if state.end_drag(handle_id).is_some_and(|drag| drag.moved) {
-                self.events.push(DockEvent::LayoutCommitted);
-            }
-        }
-        if response.dragged() {
-            // Alive this frame, so a stale entry can be told from a live one.
-            state.keep_drag_alive(handle_id, pass);
-            return Grip::Resize(response.drag_delta());
-        }
+                // A tee is a thing you drag, in either direction at once, and the cursor says
+                // so. A crossing is a thing you ctrl+click, and it only exists while ctrl is
+                // down.
+                let response = if is_cross {
+                    ui.interact(hit_rect, handle_id, Sense::click())
+                } else {
+                    ui.interact(hit_rect, handle_id, Sense::click_and_drag())
+                        .on_hover_and_drag_cursor(CursorIcon::Move)
+                };
 
-        // Ctrl, because a plain click is what a press aimed at the separator underneath comes
-        // out as when it does not travel far enough, and a gesture aimed at a line must not
-        // rewrite the tree when it falls short.
-        if response.clicked() && transposable && ui.input(|i| i.modifiers.command) {
-            return Grip::Transpose;
-        }
+                // A press keeps its grip even if the pointer slides off, the same way any
+                // button does; without it, releasing a hair outside would both cancel the click
+                // and disarm.
+                let holds_now = response.hovered() || response.is_pointer_button_down_on();
+                ui.data_mut(|data| {
+                    if holds_now {
+                        data.insert_temp(handle_id, pass);
+                    } else {
+                        data.remove_temp::<u64>(handle_id);
+                    }
+                });
 
-        Grip::Idle
+                // Painted only where the pointer is (see the note above), and one rectangle
+                // whether it is merely under it or held. The margins widen what answers to the
+                // pointer; they do not widen what is painted. Growing the square to the catch
+                // zone was tried — it made the handle more than double under the cursor at the
+                // default style, which reads as the thing being dragged rather than offered.
+                // Colour carries the "you have it" instead.
+                //
+                // `dragged()` is in there for the frames a drag travels: the pointer leads the
+                // handle, which follows a frame behind, so the hover it started from is not a
+                // thing that keeps being true — and a handle that vanished mid-gesture would say
+                // the gesture had ended.
+                if holds_now || response.dragged() {
+                    let handle_size = drawn_idle.width();
+                    // The palette swaps rather than shifts while it is held: whichever of the
+                    // two the square takes, the icon takes the other, so the arms stay legible
+                    // against it. A handle is never seen cold, so `color_idle` — the separator's
+                    // own resting colour — is not one of the two.
+                    let (fill, icon) = if response.is_pointer_button_down_on() {
+                        (style.color_dragged, style.color_hovered)
+                    } else {
+                        (style.color_hovered, style.color_dragged)
+                    };
+                    ui.painter().rect(
+                        drawn_idle,
+                        CornerRadius::from(handle_size * 0.25),
+                        fill,
+                        Stroke::NONE,
+                        StrokeKind::Inside,
+                    );
+                    let stroke = Stroke::new(1.5, icon);
+                    for dir in icon_arms(kind, junctions.outer_horizontal) {
+                        draw_arrow(ui.painter(), center, dir, handle_size * 0.28, stroke);
+                    }
+                }
+
+                // What the gesture has hold of, named once and kept: the nodes, not an index
+                // into a list that is rebuilt from the geometry this drag is about to move. See
+                // [`DragSubject::Junction`].
+                if response.drag_started() {
+                    let mut dividers = kind.dividers().map(|(band, k)| {
+                        NodePath::new(junctions.outer.surface, junctions.bands[band].dividers[k])
+                    });
+                    state.begin_drag(
+                        handle_id,
+                        DragSubject::Junction {
+                            outer: junctions.outer,
+                            outer_horizontal: junctions.outer_horizontal,
+                            divider: dividers
+                                .next()
+                                .expect("every junction is made of at least one divider"),
+                        },
+                        response
+                            .interact_pointer_pos()
+                            .expect("a drag that started was pressed somewhere"),
+                        pass,
+                    );
+                }
+                if response.drag_stopped() {
+                    if state.end_drag(handle_id).is_some_and(|drag| drag.moved) {
+                        self.events.push(DockEvent::LayoutCommitted);
+                    }
+                }
+                if response.dragged() {
+                    // Alive this frame, so a stale entry can be told from a live one.
+                    state.keep_drag_alive(handle_id, pass);
+                    return Grip::Resize(response.drag_delta());
+                }
+
+                // Ctrl, because a plain click is what a press aimed at the separator underneath
+                // comes out as when it does not travel far enough, and a gesture aimed at a
+                // line must not rewrite the tree when it falls short.
+                if response.clicked() && transposable && ui.input(|i| i.modifiers.command) {
+                    return Grip::Transpose;
+                }
+
+                Grip::Idle
+            })
+            .inner
     }
 
     /// Moves the two separators the drag grabbed by `delta`. Answers whether either of them
@@ -1729,6 +1760,17 @@ mod tests {
     /// `PointerButton` events alone leaves that state untouched, and a ctrl+click assembled that
     /// way arrives as a plain one; releasing them afterwards keeps a test's ctrl out of the
     /// frames that follow, which live in the same [`Context`].
+    ///
+    /// **Two** warm-up frames, not one — this is what `draw_one_handle`'s handle-as-`Area` costs
+    /// a crossing's handle the first time it is ever shown (a tee's is up from frame one, so it
+    /// never pays this). egui hit-tests a frame against the *previous* frame's committed
+    /// [`egui::containers::area::AreaState::interactable`], and an area whose state did not
+    /// exist yet commits that as `false` for the sizing pass egui forces on it — so a press on
+    /// the very frame the handle first appears is invisible twice over: once because the square
+    /// itself is not painted, and once more because the frame after that still cannot be hit
+    /// against. A real user pauses between pressing ctrl and clicking far longer than two
+    /// frames; a test that presses on the first or second one is testing a gap nothing else
+    /// reaches, not the gesture.
     fn click_holding(
         ctx: &Context,
         state: &mut DockState<u32>,
@@ -1739,13 +1781,15 @@ mod tests {
     ) {
         use egui::{Event, Modifiers, PointerButton};
 
-        run_frame(
-            ctx,
-            state,
-            style,
-            id,
-            vec![Event::ModifiersChanged(modifiers), Event::PointerMoved(at)],
-        );
+        for _ in 0..2 {
+            run_frame(
+                ctx,
+                state,
+                style,
+                id,
+                vec![Event::ModifiersChanged(modifiers), Event::PointerMoved(at)],
+            );
+        }
         for pressed in [true, false] {
             run_frame(
                 ctx,
@@ -2455,16 +2499,20 @@ mod tests {
                 modifiers: Modifiers::COMMAND,
             }]
         };
-        run_frame(
-            &ctx,
-            &mut state,
-            &style,
-            id,
-            vec![
-                Event::ModifiersChanged(Modifiers::COMMAND),
-                Event::PointerMoved(center),
-            ],
-        );
+        // Two warm-up frames, not one — see `click_holding`'s doc for why a crossing's handle
+        // needs both before it can be hit at all.
+        for _ in 0..2 {
+            run_frame(
+                &ctx,
+                &mut state,
+                &style,
+                id,
+                vec![
+                    Event::ModifiersChanged(Modifiers::COMMAND),
+                    Event::PointerMoved(center),
+                ],
+            );
+        }
         run_frame(&ctx, &mut state, &style, id, button(true));
         // The release frame is the one that transposes, mid-pass. No quiet frame after it.
         run_frame(&ctx, &mut state, &style, id, button(false));

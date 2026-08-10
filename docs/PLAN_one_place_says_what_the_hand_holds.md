@@ -1,8 +1,8 @@
 # Plan: one place says what the hand holds
 
-**Status: every step landed — 1–6, the window included.** What is left is in the backlog at the
-end, and the one gesture still outside the field is named there (a window *resize*, which is not
-a window *move*). Asked for by Стас on 2026-08-10, immediately after
+**Status: every step landed — 1–6, the window included — and the one gesture the backlog named as
+still outside the field (a window *resize*) has landed too.** What is left is the rest of the
+backlog, at the end. Asked for by Стас on 2026-08-10, immediately after
 `JunctionDrag` landed (`f2693f7`) — that struct is one corner of this and is explicitly *not*
 the shape wanted. Entry point for whoever picks it up: this file, then
 [src/widgets/dock_area/state.rs](../src/widgets/dock_area/state.rs), then the hold bookkeeping in
@@ -434,15 +434,36 @@ Smallest blast radius first, and each step is committable on its own:
   the menu — the square and its arrows); dropping the handle *into* the dock's own tier reddens
   **seventeen** tests in `junction.rs` by name, which is how well "the handle is above the content"
   was already witnessed.
-* **A dock inside a floating window still paints its handles over menus** (the residue above). The
-  fix needs the handle's layer to have a rank of its own within `Foreground`, which means making it
-  an `egui::Area` — `Area` is what calls `Areas::set_state` and so what puts a layer in the order
-  list; `Context::set_sublayer` cannot do it alone, since it only moves children *already* in that
-  list. Worth knowing before trying: an `Area` brings a sizing pass (its first frame is invisible,
-  and handles appear and vanish with the pointer), a persisted `AreaState` per handle id, and its
-  own `move_to_top` on press. The scene is the one in
-  `a_menu_is_above_the_junction_handle.rs` with the dock shown in a window surface instead of a
-  panel.
+* ~~**A dock inside a floating window still paints its handles over menus**~~ (the residue above)
+  — **fixed**, and by the route this item named: `draw_one_handle` draws the handle as a real
+  `egui::Area` (`fixed_pos` + `movable(false)` + `sense(Sense::hover())` + `constrain(false)`), so
+  the layer joins `Memory::areas`' order list and `GraphicLayers::drain` paints it *where it is
+  ranked* instead of sweeping it up last. `handle_layer` stays and keeps its meaning — it decides
+  *which* areas the handle must rank against; the `Area` is what makes ranking happen at all.
+  Three things the doing of it turned up:
+  * **Every cost this item predicted was real, and two of them were paid rather than avoided.**
+    `fixed_pos` means egui never lags the *position* (a fixed area's place is ours every frame),
+    but `AreaState::size` is written only at the end of a pass, so a handle can be one frame
+    behind its own room shrinking — accepted, the same latitude the per-handle `holding` grip
+    already has. `sense(Sense::hover())` is what keeps the area's own built-in `"move"` widget
+    from competing with the `interact` below over the same rectangle, while leaving its
+    promote-to-top on press and on first appearance intact.
+  * **The sizing pass costs a crossing's handle TWO frames, not one, and it changed the tests.**
+    egui hit-tests a frame against the *previous* frame's committed `AreaState::interactable`,
+    which an area that did not exist yet commits as `false` for its forced sizing pass — so a
+    press on the frame a handle first appears is invisible twice over. A tee's handle is up from
+    frame one and never pays it; a crossing's appears with ctrl, so `click_holding` and the
+    transpose scene now hold ctrl for two warm-up frames. Written into `click_holding`'s doc: a
+    real hand pauses far longer than two frames between ctrl and the click, so a test pressing on
+    the first is testing a gap nothing else reaches.
+  * **The paint fix does not touch the press, again.** Both press tests were green before and
+    after in both scenes — the same asymmetry the tier fix had, from the other side.
+  Measured, not assumed — `tests/a_menu_is_above_the_junction_handle_in_a_window.rs` is the panel
+  scene with the dock in a window surface, and the mutation is the code this replaced: putting the
+  handle back into a bare `LayerId` child `Ui` of the same `Order` reddens
+  `a_menu_over_a_junction_in_a_window_is_painted_last` by its own message while the **panel**
+  scene stays green — which is exactly the residue, isolated. Full suite green after the revert
+  (`cargo test --all-targets`, 115 unit + every integration file).
 * **The tab drag's overlay has the same shape and has not been looked at.**
   `drag_and_drop.rs:128` builds `LayerId::new(Order::Foreground, id)` the way the handle used to,
   so a drop overlay drawn while a menu is open is the same "ranked under, painted over" pair. Not
@@ -456,21 +477,30 @@ Smallest blast radius first, and each step is committable on its own:
   through `in_flight_at`, which is where the rule lives — but the pairing "filter by the current
   pass" is written twice, and a third reader that forgot the filter would publish a leftover as a
   live gesture. If one arrives, the pairing wants a name of its own.
-* ~~**`window_ui::create_window` is the only gesture left outside the field**~~ — the *move* moved
-  in with step 5. What is left outside is the **resize**: egui's resize edges are separate widgets
-  (`do_resize_interaction`, ids mixed off the area's own), and `Window::show` hands the dock no
-  response for them, so a window being resized is a hand the field cannot see. Two ways in, and
-  neither is free: read them by id off the context (`ctx.read_response(area_id.with("right"))`),
-  which hard-codes egui's private naming and would rot silently; or take the resize over the way
-  the dock could have taken the title bar over. Worth doing only with a gate that catches the
-  rot — and note the sweep never reaches it either (it aims at leaf rects, and the edges are on
-  the frame), so a gate would need a directed scene first.
-* **A window that is resized is invisible to the sweep's own agreement check, and that is luck.**
-  `drag_complaint` compares `ctx.dragged_id()` against the dock's `widget` for every gesture; a
-  resize drag would be egui dragging a widget the dock does not name, which is the complaint's
-  strong form firing on something that is not a bug. It stays green today only because the sweep
-  never presses on a window's frame edge. Whoever teaches the harness to resize a window must
-  settle the item above first, or that scene will arrive as a false failure.
+* ~~**`window_ui::create_window` is the only gesture left outside the field**~~ — **done**, both
+  halves. The *move* moved in with step 5; the **resize** is now `DragSubject::Window`'s `edge:
+  Option<WindowEdge>` field, read by `follow_window_resize` in `window_surface.rs`. The chosen way
+  in was the first of the two this item offered: `ctx.read_response` against the id egui itself
+  builds inside `do_resize_interaction` (`Id::new(LayerId::new(Order::Middle,
+  window_id)).with("edge_drag").with(<side>)`, one of eight salts — `WINDOW_EDGES` carries them
+  with a comment naming the egui source it must be kept in step with). That hard-codes egui's
+  private naming, exactly as flagged — the mitigation is the canary test below, not avoidance.
+  `tests/a_resized_window_says_so.rs` is the directed scene: press on a window's outer-rect right
+  edge, drag outward, and check the two holders (egui's `dragged_id()`, the dock's own field) name
+  the same widget and the same subject, the same shape `a_moved_window_says_so.rs` already uses
+  for the move. Two mutations run, both red by name: dropping the `follow_window_resize` call
+  entirely reddens `a_window_dragged_by_its_right_edge_is_named_by_the_dock` at its own `expect`
+  ("the dock is holding the edge being dragged"); the full suite (`cargo test --all-targets`,
+  115+ unit tests and every integration file) stayed green throughout, so nothing already using
+  `DragSubject::Window { surface, .. }` needed anything but the wildcard it already had.
+* ~~**A window that is resized is invisible to the sweep's own agreement check, and that is
+  luck.**~~ — the luck is unchanged, and that is now a known gap rather than an implicit one.
+  `drag_complaint` in `tests/dst.rs` still never sees a resize drag: the fuzzer's steps aim at leaf
+  rects and separators, and a window's frame edge is on neither, so `SubjectWatch` was left folding
+  a resize frame into the same `window` counter a move already fills rather than growing a fifth
+  bucket nothing would increment. Teaching the harness to press a window's edge — so
+  `drag_complaint`'s strong form actually gets exercised against a resize — is still open; it was
+  out of scope for wiring the gesture itself, which the new unit test now covers on its own.
 * **The stand-down guard reads liveness with an off-by-one that is now in two places** —
   `in_flight_at`'s `pass + 1 >= now` and the per-handle grip's `held_on + 1 >= pass` in
   `draw_one_handle`. Same rule, same reason, two copies; if a third arrives it wants a name.

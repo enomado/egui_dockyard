@@ -484,7 +484,12 @@ impl<Tab> DockArea<'_, Tab> {
                     // Use response.rect.contains instead of
                     // response.hovered as the dragged tab covers
                     // the underlying tab
-                    if state.carried_tab().is_some() && response.rect.contains(pos) {
+                    //
+                    // No `carried_tab().is_some()` guard here: an idle hover writing this rect is
+                    // inert, because the only reader (`show/mod.rs`) gates on `carried` itself
+                    // before it ever looks at `tab_hover_rect` — see
+                    // `tests/hovering_with_nothing_carried_does_nothing.rs`.
+                    if response.rect.contains(pos) {
                         self.tab_hover_rect = Some((response.rect, tab_index));
                     }
                 }
@@ -1377,7 +1382,14 @@ impl<Tab> DockArea<'_, Tab> {
 
             // Use rect.contains instead of response.hovered as the dragged tab covers
             // the underlying responses.
-            if carried.is_some() && rect.contains(pointer) && is_dragged_valid {
+            //
+            // No `carried.is_some()` guard here, for the same reason `tab_hover_rect`'s write
+            // above lost one: `is_dragged_valid` is already `true` when `carried` is `None` (see
+            // its match above), so this condition would degrade to `rect.contains(pointer)`
+            // regardless — and the write it guards is inert without a carried tab, because
+            // `show/mod.rs` never reads `hover_data` without `source_rect`, which requires
+            // `carried` itself. See `tests/hovering_with_nothing_carried_does_nothing.rs`.
+            if rect.contains(pointer) && is_dragged_valid {
                 let on_title_bar = tabbar_rect.contains(pointer);
                 let (dst, tab) = {
                     match self.tab_hover_rect {

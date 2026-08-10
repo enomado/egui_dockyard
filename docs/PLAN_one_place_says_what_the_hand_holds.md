@@ -394,18 +394,22 @@ Smallest blast radius first, and each step is committable on its own:
   path are derivable one way only (`ui.id().with((path.node, "separator"))` mixes in the enclosing
   `Ui`'s), so both are kept: the id names the gesture, the path names what it writes to.
 
-* **The two "is a tab in flight" gates in `leaf.rs` are unwitnessed, and probably redundant**
-  (found while doing step 4). `carried_tab().is_some()` guards setting `tab_hover_rect`
-  (leaf.rs:499) and publishing `hover_data` (leaf.rs:1392) — both were `drag_start.is_some()`
-  before. Measured: removing *either* guard reddens nothing in the whole suite. The reason looks
-  structural rather than a hole in the sweep — what those two write is only ever consumed
-  alongside the source rectangle, which the top of the pass already gates on `carried` and
-  `pulled_out` (show/mod.rs), so a hover destination published with an empty hand is read back and dropped
-  the next frame. If that is right they are a third expression of a fact the field already states,
-  and deleting them is the same collapse step 3 did for the pull-out threshold. It was left in
-  place here because step 4 is a port, not a deletion: check the consumers first, and if they are
-  really redundant, delete them *with* a gate that would have caught it — otherwise the next
-  person measures the same nothing and concludes the same maybe.
+* ~~**The two "is a tab in flight" gates in `leaf.rs` are unwitnessed, and probably redundant**~~
+  — **deleted.** Both guards (`state.carried_tab().is_some()` on `tab_hover_rect`,
+  `carried.is_some()` on `hover_data`) are gone; the writes they used to condition now happen on
+  every hovered frame regardless of whether a tab is carried.
+  Confirmed structural, not merely unreached: `show/mod.rs` never turns `hover_data` into a
+  `move_tab` without a resolved `DragSource` in hand (`source_rect` is `carried.filter(pulled_out)
+  .and_then(...)`, and the drop itself reads `carried.expect(...)`) — a write made with an empty
+  hand cannot reach `move_tab` by construction, not by luck of what the current gate happens to
+  check.
+  The gate asked for is `tests/hovering_with_nothing_carried_does_nothing.rs`: sweeps the pointer
+  across both tabs and both leaf bodies of a two-leaf dock for several frames with no drag ever
+  started — the exact geometry the deleted guards used to condition on — and asserts nothing moved
+  and the tree stayed well-formed. It pins the invariant `show/mod.rs` already enforces one level
+  up, so a future change that let `hover_data` alone drive a move (loosening `carried.expect` or
+  `source_rect`'s filter) would go red here rather than silently reopening the gap step 4 was
+  written to close. Full suite green throughout (`cargo test --all-targets`).
 * ~~**The junction handle is painted over everything, including menus**~~ (Стас, 2026-08-10 — a
   bug, not a preference) — **fixed.** The tier is now `handle_layer(ui.layer_id().order)`: one
   above the dock's own content, which is `Order::Middle` for the ordinary case of a dock in a

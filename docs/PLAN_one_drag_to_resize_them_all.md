@@ -125,9 +125,14 @@ Mutation-checked, and the first attempt was the point:
   sweep and deliberately left `Unjudged`: whether that release owes an event is a question about
   the crate's contract, and the answer is not obviously "yes" (the close that killed the handle
   announces itself, so a consumer saving the whole layout still saves the fractions).
-* **`unrenestable` reads 0.** The sweep never squeezes a band thin enough for a crossing to be
-  offered a handle while the transposition is withheld, so the branch that tells the two
-  gestures apart is exercised only by `a_cross_whose_parts_are_thinner_than_the_margin_...`.
+* ~~**`unrenestable` reads 0.**~~ Closed. The sweep never resized the window at all, so no band
+  was ever nested small enough to be unrenestable. Added `Step::ResizeWindow { to: WindowSize }`
+  (`Roomy` = `SCREEN`, `Squeezed` = 320x320) to the generator's vocabulary, drawn on the same
+  "has to be built on purpose" footing as `Step::BuildCross`; wired `cross.unrenestable` into the
+  totals loop (it was tracked per-run but never summed) and gated it alongside the other cross
+  counters. Measured: 46 of 85 crosses offered across the sweep now sit on an unrenestable line,
+  against zero before. Whole suite stayed green — resizing never touches a stored ratio or a
+  leaf's identity, which the directed margin tests already pin.
 * ~~**`dbg_moved_leaf` asserts nothing.**~~ Removed — it ran a scene and printed, left over from
   diagnosing the settle problem, and could not fail.
 * ~~**The handle count grew from crossings to all junctions, and `handle_room` is O(nodes) per
@@ -156,3 +161,72 @@ Mutation-checked, and the first attempt was the point:
   meets the dock's own border rather than another separator — has no handle. Nothing to drag
   there, so this is a note rather than a gap; it is written down because "every junction has a
   handle" is not quite what the code says.
+
+## Follow-up: what the hand actually wanted (2026-08-10)
+
+Three changes from Стас after living with the gesture, and each reverses or narrows something
+decided above. Written here rather than in a new file because they are the same feature.
+
+1. **A handle is drawn only under the pointer.** This reverses "handles are drawn always (not
+   revealed on approach)" from the decisions above. There is one at *every* junction of *every*
+   line, and painted cold they are a grid of squares the eye has to read past to see the panels.
+   The widget is still registered every frame — that registration is what the hit test answers
+   "is the pointer here" from — so only the painting is conditional.
+2. **What a drag has hold of is remembered explicitly**, as `State::junction_drag:
+   Option<JunctionDrag>`: the handle's id, the two nodes it grabbed, the pass it was last alive
+   in. Every other handle stands down while it is live. The gesture is then carried out on the
+   nodes named at `drag_started` rather than on `junctions.at[index]` of the frame — an index
+   into a list rebuilt from the geometry the drag is moving.
+3. **A crossing is not dragged.** A tee is structural: a divider genuinely ends on the line. A
+   crossing is a *coincidence* — two dividers happen to be aligned to within `align_tolerance` —
+   and resizing four panels off that is a gesture nobody asked for. A press at a crossing now
+   means what it means anywhere else on that separator. The ctrl+click transposition stays; it
+   is the crossing's own gesture and the only thing there.
+
+The mechanism finding that shaped (3): **"not dragged" has to be no widget, not a widget that
+senses no drags.** A click-only handle at the crossing swallowed the drag just as thoroughly as
+a draggable one, because egui drops every layer *behind* a widget covering the pointer's search
+area (`hit_test.rs`: "nothing behind this layer could ever be interacted with") and the handles
+live in their own `Order::Foreground` layer. The first attempt at (3) — `Sense::click()` — left
+a drag at the crossing moving nothing at all, which is neither the old behaviour nor the asked-for
+one. Hence the rule the code now follows: **a handle exists exactly while it has a gesture to
+offer**, so a crossing's handle is there while ctrl is held and not otherwise.
+
+What went with the cross drag: `DockArea::admissible_delta` and the tightest-of-two coordination
+it existed for (a crossing was the only junction with two dividers to keep in line), the two unit
+tests that pinned them, and the harness's `dividers.len() == 2` rule. The backlog item "the
+cross-pair coordination is gated by one scene, not by the sweep" is closed by deletion.
+
+Oracles added, all mutation-checked:
+
+* `a_crossing_drags_like_any_other_point_on_the_separator` — the same drag at the crossing and
+  200pt clear of it must leave the same four rectangles. Stated as a *sameness* rather than as a
+  list of things that must not move, so anything the crossing still did specially shows up.
+* `a_handle_is_drawn_only_under_the_pointer` and `a_crossing_shows_no_handle_until_ctrl_is_held`
+  — read off the frame's paint list (`run_frame_painting` / `handle_squares`), because whether a
+  handle was *drawn* is not a thing any other state in the dock records.
+* the sweep's `junction.crossings_passed_over > 0` — the run has to have met crossings while
+  looking for handles, or "a crossing is not a handle" was never asked.
+
+## Backlog found in the follow-up
+
+* **"What is being dragged" should be one explicit thing across the whole dock, not one per
+  gesture** (Стас, and the reason is testability). `JunctionDrag` is a corner; a tab in flight is
+  `DragDropState`; a floating window's move is egui's and the dock does not model it at all. A
+  test — and a consumer — cannot ask the dock "what is in your hand right now" and get a single
+  answer naming *a panel, several panels, or a window*. The shape wanted is one enum the dock
+  publishes, with every gesture a variant, so a sweep can assert on it directly instead of
+  inferring the gesture from which fractions moved.
+* **`a_drag_keeps_hold_of_the_junction_it_grabbed` pins the contract, not the repair.** Measured:
+  it is green on the code that came before `JunctionDrag`, and green with the stand-down guard
+  mutated out — egui hands one drag to one widget and suppresses hover on the rest, so neither
+  hole was reachable from outside. The explicit state is worth having for the reason above; it
+  is not a bug fix, and the plan should not read as though it were.
+* **A handle is discoverable by pointing, not by looking.** That is the deliberate trade in (1),
+  and it means a user who does not already know a corner can be dragged has nothing to see. If
+  discoverability ever becomes a complaint, the answer is probably a faint idle form at the
+  junctions of the line under the pointer — not a return to painting all of them.
+* **The crossing's ctrl+click is now doubly hidden**: no handle until ctrl is down, and no handle
+  at all where the bands cannot be re-nested. The earlier backlog item about that failing
+  silently is superseded — it does not fail, it is not offered — but nothing on screen
+  distinguishes the two.

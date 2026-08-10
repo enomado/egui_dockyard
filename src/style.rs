@@ -178,13 +178,17 @@ pub struct SeparatorStyle {
     pub color_dragged: Color32,
 }
 
-/// Geometry of the cross-split toggle: the small button offered where two separators cross,
-/// which swaps the grouping around that point without moving a pixel.
+/// Geometry of the handle offered where separators meet: the square drawn at a junction, which
+/// drags the corner at a tee and swaps the grouping at a crossing.
 ///
-/// Colors are not here — the button is drawn in the separator's own palette
-/// ([`SeparatorStyle::color_idle`] / [`SeparatorStyle::color_hovered`] /
-/// [`SeparatorStyle::color_dragged`]), because it *is* part of the separator as far as the eye
-/// is concerned. What this struct carries is the one thing the button cannot inherit: how big
+/// It is only ever on screen **under the pointer** — one is offered at every junction of every
+/// line, and painted cold they would be a grid of squares over the panels — and at a crossing
+/// only while ctrl is held, that being the modifier its one gesture is named by.
+///
+/// Colors are not here — the handle is drawn in the separator's own palette
+/// ([`SeparatorStyle::color_hovered`] and [`SeparatorStyle::color_dragged`], swapped between
+/// square and icon while it is held), because it *is* part of the separator as far as the eye
+/// is concerned. What this struct carries is the one thing the handle cannot inherit: how big
 /// a target it is.
 ///
 /// # Why there are two margins

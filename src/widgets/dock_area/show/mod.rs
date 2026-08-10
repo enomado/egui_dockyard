@@ -901,35 +901,14 @@ impl<Tab> DockArea<'_, Tab> {
         Some((range, band))
     }
 
-    /// How much of `delta` the boundary of the split at `path` may actually take, in points
-    /// along its own axis, and `0.0` where it may take none.
-    ///
-    /// Separate from [`Self::nudge_split`] because a junction moves two boundaries as one line
-    /// and they are cut from *different* intervals: the same delta in points is a different
-    /// fraction for each, so one can run out of room while the other still has plenty. Ask both
-    /// first, move both by the tightest answer, and the line stays a line.
-    fn admissible_delta(
-        &self,
-        path: NodePath,
-        pixels_per_point: f32,
-        extra: f32,
-        delta: f32,
-    ) -> f32 {
-        let Some((range, band)) = self.split_gesture(path, pixels_per_point, extra) else {
-            return 0.0;
-        };
-        let reached = (band.effective + delta / range).clamp(band.min, band.max);
-        (reached - band.effective) * range
-    }
-
     /// Moves the boundary of the split at `path` by `delta` points along its own axis. Answers
     /// whether the stored ratio changed.
     ///
     /// **The only place a gesture writes a `fraction`** — see the note on [`SeparatorBand`]
     /// listing every writer there is and why that list is worth keeping short. `show_separator`
-    /// calls it for the divider under the pointer, the junction handles for the two or three
-    /// that meet at one point; both get the same clamp because it is the same function, not the
-    /// same idea written twice.
+    /// calls it for the divider under the pointer, a junction handle for the two boundaries a
+    /// corner is made of; both get the same clamp because it is the same function, not the same
+    /// idea written twice.
     ///
     /// The delta is in **points**, not in fractions, and that is what makes a junction possible:
     /// the boundary is drawn at `near + range * effective`, so `delta / range` moves it by

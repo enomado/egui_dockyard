@@ -9,15 +9,27 @@
 //! * a **cross** — four panels, three separators: the line, and a divider on each side of it
 //!   that are one and the same line on screen.
 //!
-//! Both get a small square handle, and **dragging it moves every separator that meets there**:
-//! the panels around the junction are resized in both directions by one gesture, which is what
-//! a hand wants at the corner of four panels and could only be done in two drags before.
+//! Both get a small square handle **under the pointer and only there** — there is one at every
+//! junction of every line, and painted cold they are a grid of squares laid over the panels for
+//! nobody.
 //!
-//! A cross is offered one thing more. It is ambiguous — the exact same rectangles are produced
+//! What the handle offers is not the same at the two, and the difference is the difference
+//! between the shapes. A tee is structural: a divider genuinely ends on the line, so the corner
+//! is a thing, and **dragging its handle moves both separators at once** — the panels around it
+//! are resized in both directions by one gesture, which could only be done in two drags before.
+//! A crossing is a *coincidence*: two dividers on either side of the line happen to be aligned,
+//! to within [`CrossSplitToggleStyle::align_tolerance`], and nothing holds them there. Resizing
+//! four panels because of that is a gesture nobody asked for, so **a crossing is not dragged**:
+//! a press there means what it means anywhere else on that separator, and moves that separator
+//! alone.
+//!
+//! A cross is offered one thing instead. It is ambiguous — the exact same rectangles are produced
 //! by either grouping (rows of columns, or columns of rows) and nothing on screen says which one
 //! the tree holds — so **ctrl+clicking** it swaps the two representations without moving a single
-//! pixel. A plain click does nothing: a press that was meant as a drag and did not travel far
-//! enough must not rewrite the tree.
+//! pixel. That modifier is also when its handle exists at all: a handle sitting at a crossing
+//! takes the point away from the separators under it whatever it senses (egui drops the layers
+//! behind a widget covering the pointer), so the rule is **a handle exists exactly while it has
+//! a gesture to offer** — see `draw_one_handle`.
 //!
 //! # Why the law is stated on bands
 //!
@@ -43,7 +55,7 @@ use egui::{
 
 use crate::core::tree::regroup::Regroup;
 use crate::dock_area::events::DockEvent;
-use crate::dock_area::state::State;
+use crate::dock_area::state::{JunctionDrag, State};
 use crate::{CrossSplitToggleStyle, DockArea, NodeId, NodePath, SeparatorStyle};
 
 /// One side of a split, with the chain of same-orientation splits at its root flattened: `n`
@@ -665,10 +677,16 @@ impl<Tab> DockArea<'_, Tab> {
         }
 
         match acted {
-            Some((index, Grip::Resize(delta))) => {
-                if self.drag_junction(pixels_per_point, &junctions, index, style.extra, delta) {
-                    if let Some((_, moved)) = &mut state.junction_drag {
-                        *moved = true;
+            // The delta goes to what the *gesture* grabbed, not to the junction that happens to
+            // sit at this index now: `index` is a position in a list rebuilt from this frame's
+            // geometry, which the drag has been moving since it started. See [`JunctionDrag`].
+            Some((_, Grip::Resize(delta))) => {
+                let Some(drag) = state.junction_drag else {
+                    return;
+                };
+                if self.drag_junction(pixels_per_point, &drag, style.extra, delta) {
+                    if let Some(drag) = &mut state.junction_drag {
+                        drag.moved = true;
                     }
                     self.events.push(DockEvent::SeparatorDragging);
                 }
@@ -702,6 +720,36 @@ impl<Tab> DockArea<'_, Tab> {
     /// from `catch_extra` outside the drawn square, and held until it leaves a zone
     /// `hold_extra` wider than that. Which of the two applies is state — "is this handle
     /// currently holding the pointer" — so it is remembered per handle between frames.
+    ///
+    /// # It is drawn only under the pointer
+    ///
+    /// A handle sits on a place the layout already uses, and there is one at every junction of
+    /// every line: painted whether or not anything is near them, they are a grid of squares the
+    /// eye has to read past to see the panels. What each of them offers is a thing you do *to
+    /// the corner you are pointing at*, so the corner you are pointing at is when it has anything
+    /// to say. Cold, it is not merely quiet — it is not there.
+    ///
+    /// The widget is still registered every frame, hovered or not: that registration is what the
+    /// hit test answers "is the pointer here" *from*. Only the painting is conditional.
+    ///
+    /// # What a cross offers is not a drag
+    ///
+    /// A tee is structural — a divider genuinely ends on the line, and the two move as one
+    /// corner. A crossing is a *coincidence*: two dividers on either side of the line happen to
+    /// be aligned, to within [`CrossSplitToggleStyle::align_tolerance`], and nothing keeps them
+    /// that way. Resizing four panels at once because two independent dividers happened to line
+    /// up is a gesture nobody asked for on a layout that merely looks like a "+", so a crossing
+    /// is not dragged at all: a press there means what it means anywhere else on that separator.
+    ///
+    /// "Not dragged" has to be **no widget**, not a widget that senses no drags. egui drops
+    /// every layer behind a widget that covers the pointer's search area
+    /// (`hit_test.rs`, "nothing behind this layer could ever be interacted with"), and the
+    /// handles live in their own [`Order::Foreground`] layer — so a click-only handle at the
+    /// crossing takes the point away from the separators under it just as surely as a draggable
+    /// one, and a drag there moves nothing whatsoever. Hence the rule this follows: **a handle
+    /// exists exactly while it has a gesture to offer.** A crossing's one gesture is the
+    /// ctrl+click, so its handle is there while ctrl is held and not otherwise, and the plain
+    /// drag it used to swallow is plain again by construction rather than by careful sense flags.
     fn draw_one_handle(
         &mut self,
         ui: &mut Ui,
@@ -712,6 +760,28 @@ impl<Tab> DockArea<'_, Tab> {
         state: &mut State,
     ) -> Grip {
         let Junction { kind, center } = junctions.at[index];
+        let pass = ui.ctx().cumulative_pass_nr();
+
+        // A crossing offers the transposition and nothing else: not where it is withheld (see
+        // `Junctions::can_transpose`), and not while the modifier that names it is up. Either
+        // way there is no gesture to be had, and a handle with no gesture is a handle that takes
+        // the point away from the separators under it — see the note above.
+        let is_cross = matches!(kind, JunctionKind::Cross(_));
+        let transposable = is_cross && junctions.can_transpose;
+        if is_cross && !(transposable && ui.input(|i| i.modifiers.command)) {
+            return Grip::Idle;
+        }
+
+        // While one handle is being dragged, every other one stands down — not drawn, not
+        // registered, not interacted. egui would not hand two widgets one drag, but the handles
+        // are read off geometry the drag is moving: a neighbour that keeps answering can inherit
+        // the gesture the moment the junction under the pointer is re-detected as a different
+        // one. `pass` is what keeps a drag whose junction died from holding the rest down for
+        // good — see [`JunctionDrag::pass`].
+        let dragged_elsewhere = state
+            .junction_drag
+            .is_some_and(|drag| drag.pass + 1 >= pass);
+
         // Keyed by the dividers that meet here rather than by their position in the band: an id
         // has to survive a neighbouring divider being dragged past, and an index does not. The
         // side a tee's divider is on is already in the id it contributes; `outer` is in there
@@ -732,12 +802,19 @@ impl<Tab> DockArea<'_, Tab> {
         let drawn_idle = Rect::from_center_size(center, Vec2::splat(size));
         let catch_rect = drawn_idle.expand(catch_extra);
 
+        // Another handle has the pointer: this one is not on screen and not in the way. Checked
+        // after the id is derived — "which handle is being dragged" is a question about ids —
+        // and before anything is registered or painted.
+        let owns_the_drag = state.junction_drag.is_some_and(|drag| drag.id == handle_id);
+        if dragged_elsewhere && !owns_the_drag {
+            return Grip::Idle;
+        }
+
         // The grip is remembered as *when* it was last held, not as a flag. A junction can stop
         // existing while it holds the pointer — the layout changes under it — and a bare `true`
         // left in memory would arm the handle the moment the same dividers meet again, widening
         // its reach for a frame at a point the pointer merely happens to be near. A pass number
         // cannot go stale: it either names the frame before this one, or it does not.
-        let pass = ui.ctx().cumulative_pass_nr();
         let held_on: Option<u64> = ui.data(|data| data.get_temp(handle_id));
         let holding = held_on.is_some_and(|last| last + 1 >= pass);
         let hit_rect = if holding {
@@ -748,11 +825,14 @@ impl<Tab> DockArea<'_, Tab> {
 
         let ui = &mut ui.new_child(UiBuilder::new().layer_id(layer_id).max_rect(hit_rect));
 
-        // Both gestures live on one widget, and the cursor names the one that needs no
-        // modifier: this is a thing you drag, in either direction at once.
-        let response = ui
-            .interact(hit_rect, handle_id, Sense::click_and_drag())
-            .on_hover_and_drag_cursor(CursorIcon::Move);
+        // A tee is a thing you drag, in either direction at once, and the cursor says so. A
+        // crossing is a thing you ctrl+click, and it only exists while ctrl is down.
+        let response = if is_cross {
+            ui.interact(hit_rect, handle_id, Sense::click())
+        } else {
+            ui.interact(hit_rect, handle_id, Sense::click_and_drag())
+                .on_hover_and_drag_cursor(CursorIcon::Move)
+        };
 
         // A press keeps its grip even if the pointer slides off, the same way any button does;
         // without it, releasing a hair outside would both cancel the click and disarm.
@@ -765,53 +845,76 @@ impl<Tab> DockArea<'_, Tab> {
             }
         });
 
-        // One rectangle, held or not. The margins widen what answers to the pointer; they do
+        // Painted only where the pointer is (see the note above), and one rectangle whether it
+        // is merely under it or held. The margins widen what answers to the pointer; they do
         // not widen what is painted. Growing the square to the catch zone was tried — it made
         // the handle more than double under the cursor at the default style, which reads as the
         // thing being dragged rather than offered. Colour carries the "you have it" instead.
-        let handle_size = drawn_idle.width();
-        let color = if holds_now {
-            style.color_hovered
-        } else {
-            style.color_idle
-        };
-        ui.painter().rect(
-            drawn_idle,
-            CornerRadius::from(handle_size * 0.25),
-            color,
-            Stroke::NONE,
-            StrokeKind::Inside,
-        );
-        let stroke = Stroke::new(1.5, style.color_dragged);
-        for dir in icon_arms(kind, junctions.outer_horizontal) {
-            draw_arrow(ui.painter(), center, dir, handle_size * 0.28, stroke);
+        //
+        // `dragged()` is in there for the frames a drag travels: the pointer leads the handle,
+        // which follows a frame behind, so the hover it started from is not a thing that keeps
+        // being true — and a handle that vanished mid-gesture would say the gesture had ended.
+        if holds_now || response.dragged() {
+            let handle_size = drawn_idle.width();
+            // The palette swaps rather than shifts while it is held: whichever of the two the
+            // square takes, the icon takes the other, so the arms stay legible against it. A
+            // handle is never seen cold, so `color_idle` — the separator's own resting colour —
+            // is not one of the two.
+            let (fill, icon) = if response.is_pointer_button_down_on() {
+                (style.color_dragged, style.color_hovered)
+            } else {
+                (style.color_hovered, style.color_dragged)
+            };
+            ui.painter().rect(
+                drawn_idle,
+                CornerRadius::from(handle_size * 0.25),
+                fill,
+                Stroke::NONE,
+                StrokeKind::Inside,
+            );
+            let stroke = Stroke::new(1.5, icon);
+            for dir in icon_arms(kind, junctions.outer_horizontal) {
+                draw_arrow(ui.painter(), center, dir, handle_size * 0.28, stroke);
+            }
         }
 
-        // Whether this drag has moved anything is what tells a gesture that changed the layout
-        // from one that was swallowed by the clamp — the same question `separator_drag_start`
-        // answers for a single divider, asked of two or three at once.
+        // What the gesture has hold of, named once and kept: the nodes, not an index into a list
+        // that is rebuilt from the geometry this drag is about to move. See [`JunctionDrag`].
         if response.drag_started() {
-            state.junction_drag = Some((handle_id, false));
+            let mut dividers = kind.dividers().map(|(band, k)| {
+                NodePath::new(junctions.outer.surface, junctions.bands[band].dividers[k])
+            });
+            state.junction_drag = Some(JunctionDrag {
+                id: handle_id,
+                outer: junctions.outer,
+                outer_horizontal: junctions.outer_horizontal,
+                divider: dividers
+                    .next()
+                    .expect("every junction is made of at least one divider"),
+                moved: false,
+                pass,
+            });
         }
         if response.drag_stopped() {
             let moved = state
                 .junction_drag
-                .take_if(|(id, _)| *id == handle_id)
-                .is_some_and(|(_, moved)| moved);
+                .take_if(|drag| drag.id == handle_id)
+                .is_some_and(|drag| drag.moved);
             if moved {
                 self.events.push(DockEvent::LayoutCommitted);
             }
         }
         if response.dragged() {
+            // Alive this frame, so a stale entry can be told from a live one.
+            if let Some(drag) = state.junction_drag.as_mut().filter(|d| d.id == handle_id) {
+                drag.pass = pass;
+            }
             return Grip::Resize(response.drag_delta());
         }
 
-        // Ctrl, because a plain click is what a drag that did not travel far enough comes out
-        // as, and a gesture aimed at moving a line must not rewrite the tree when it falls
-        // short. `can_transpose` and the kind are both real refusals rather than guards against
-        // the impossible: a tee has nothing to transpose, and a line whose parts cannot be
-        // re-nested cannot be transposed without the picture jumping.
-        let transposable = junctions.can_transpose && matches!(kind, JunctionKind::Cross(_));
+        // Ctrl, because a plain click is what a press aimed at the separator underneath comes
+        // out as when it does not travel far enough, and a gesture aimed at a line must not
+        // rewrite the tree when it falls short.
         if response.clicked() && transposable && ui.input(|i| i.modifiers.command) {
             return Grip::Transpose;
         }
@@ -819,58 +922,33 @@ impl<Tab> DockArea<'_, Tab> {
         Grip::Idle
     }
 
-    /// Moves every separator that meets at junction `index` by `delta`. Answers whether any of
-    /// them actually moved.
+    /// Moves the two separators the drag grabbed by `delta`. Answers whether either of them
+    /// actually moved.
     ///
     /// The delta is split by axis, and which component goes where is the whole geometry of the
     /// gesture: the line between `outer`'s children runs *across* `outer`'s own axis, so the
-    /// component along that axis moves `outer` itself, and the other one moves the divider — or
-    /// the two aligned dividers — that end on it.
+    /// component along that axis moves `outer` itself, and the other one moves the divider that
+    /// ends on it. Two boundaries, at right angles, from one gesture.
+    ///
+    /// It reads [`JunctionDrag`] and not this frame's junctions, and that is the point: the
+    /// gesture keeps hold of what it grabbed even as the detector's answer moves under it.
     fn drag_junction(
         &mut self,
         pixels_per_point: f32,
-        junctions: &Junctions,
-        index: usize,
+        drag: &JunctionDrag,
         extra: f32,
         delta: Vec2,
     ) -> bool {
-        let (along_outer, along_bands) = if junctions.outer_horizontal {
+        let (along_outer, along_bands) = if drag.outer_horizontal {
             (delta.x, delta.y)
         } else {
             (delta.y, delta.x)
         };
 
-        let dividers: Vec<NodePath> = junctions.at[index]
-            .kind
-            .dividers()
-            .map(|(band, k)| {
-                NodePath::new(junctions.outer.surface, junctions.bands[band].dividers[k])
-            })
-            .collect();
-
-        // The tightest of what the dividers can each take, applied to all of them: a cross is
-        // two dividers cut from *different* intervals, so the same delta in points is a
-        // different fraction for each and one of them can hit its limit while the other still
-        // has room. Moving them by what each can take on its own would leave the "+" a jog —
-        // the very thing the magnet exists to close — so the pair moves together or not at all.
-        let common = dividers
-            .iter()
-            .map(|path| self.admissible_delta(*path, pixels_per_point, extra, along_bands))
-            .fold(along_bands, |tightest, allowed| {
-                if allowed.abs() < tightest.abs() {
-                    allowed
-                } else {
-                    tightest
-                }
-            });
-
-        // `outer` is not part of that: it is one boundary along the other axis, with nothing to
-        // stay in line with.
-        let mut moved = self.nudge_split(junctions.outer, pixels_per_point, extra, along_outer);
-        for path in dividers {
-            moved |= self.nudge_split(path, pixels_per_point, extra, common);
-        }
-        moved
+        // Each is clamped on its own by `nudge_split`: they are cut from intervals at right
+        // angles to each other and have nothing to stay in line with.
+        let moved = self.nudge_split(drag.outer, pixels_per_point, extra, along_outer);
+        moved | self.nudge_split(drag.divider, pixels_per_point, extra, along_bands)
     }
 
     /// Transposes the grouping around crossing `index`, keeping every leaf exactly where it is
@@ -1102,6 +1180,22 @@ mod tests {
         id: Id,
         events: Vec<egui::Event>,
     ) -> Vec<DockEvent> {
+        run_frame_painting(ctx, state, style, id, events).0
+    }
+
+    /// [`run_frame`], and what the frame *painted* as well as what it reported.
+    ///
+    /// Only the handles' own squares come back — see [`handle_squares`]. A handle that is not
+    /// drawn is the whole of what "no hover, no button" means, and nothing else in the dock's
+    /// state says whether it was: the widget is registered either way (that registration is what
+    /// answers "is the pointer here"), so the paint list is the only place the difference shows.
+    fn run_frame_painting(
+        ctx: &Context,
+        state: &mut DockState<u32>,
+        style: &Style,
+        id: Id,
+        events: Vec<egui::Event>,
+    ) -> (Vec<DockEvent>, Vec<Rect>) {
         let input = RawInput {
             screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, SCREEN)),
             events,
@@ -1117,9 +1211,41 @@ mod tests {
                     .events;
             });
         });
+        let painted = handle_squares(&output.shapes);
         // Headless harness, no GPU backend to hand the delta to.
         output.textures_delta.clear();
-        reported
+        (reported, painted)
+    }
+
+    /// Every junction handle painted in a frame, as the square each of them draws.
+    ///
+    /// Read off the shapes rather than off any flag, because the flag is what is being checked.
+    /// A handle is the only thing in this dock that paints a *rounded square* of a few dozen
+    /// points: separators are thin rectangles with square corners, tab bars and bodies are
+    /// oblong, and both are told apart from a handle by shape alone rather than by position —
+    /// so a handle drawn somewhere it should not be is caught as readily as one missing.
+    fn handle_squares(shapes: &[egui::epaint::ClippedShape]) -> Vec<Rect> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<Rect>) {
+            match shape {
+                egui::Shape::Rect(rect) => {
+                    let (w, h) = (rect.rect.width(), rect.rect.height());
+                    if (w - h).abs() < 0.5 && (4.0..=64.0).contains(&w) {
+                        out.push(rect.rect);
+                    }
+                }
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        walk(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
     }
 
     /// Drags from `from` to `to` over several frames, the way a hand would — egui only calls
@@ -1836,6 +1962,29 @@ mod tests {
     /// from the widget rectangles registered during it, so a widget learns it is hovered one
     /// frame after the pointer arrives.
     fn hover(ctx: &Context, state: &mut DockState<u32>, style: &Style, id: Id, at: Pos2) {
+        hover_holding(ctx, state, style, id, at, egui::Modifiers::NONE);
+    }
+
+    /// [`hover`] with `modifiers` held down throughout — the only way to rest the pointer on a
+    /// crossing's handle, which is not there while ctrl is up.
+    ///
+    /// The modifiers are left held: this is used to set up a press that follows, and taking them
+    /// back would take the handle away again between the two.
+    fn hover_holding(
+        ctx: &Context,
+        state: &mut DockState<u32>,
+        style: &Style,
+        id: Id,
+        at: Pos2,
+        modifiers: egui::Modifiers,
+    ) {
+        run_frame(
+            ctx,
+            state,
+            style,
+            id,
+            vec![egui::Event::ModifiersChanged(modifiers)],
+        );
         for _ in 0..3 {
             run_frame(ctx, state, style, id, vec![egui::Event::PointerMoved(at)]);
         }
@@ -1996,6 +2145,9 @@ mod tests {
     ///
     /// The cold half of this is the same press the magnet test uses as its control, on purpose:
     /// what is a miss when you arrive is a hit when you were already there.
+    ///
+    /// The resting half holds ctrl while it rests: a crossing's handle exists while the modifier
+    /// its one gesture is named by is down, so an open-handed hover has nothing to arm.
     #[test]
     fn a_button_holding_the_pointer_keeps_it_past_the_catch_zone() {
         let id = Id::new(DOCK_ID);
@@ -2014,7 +2166,14 @@ mod tests {
         );
 
         let (ctx, mut state, outer, center) = cross_scene(&style, id);
-        hover(&ctx, &mut state, &style, id, center);
+        hover_holding(
+            &ctx,
+            &mut state,
+            &style,
+            id,
+            center,
+            egui::Modifiers::COMMAND,
+        );
         assert!(
             click_flips(&ctx, &mut state, &style, id, outer, center + out_of_catch),
             "the button let the pointer go {}px out, inside its {}px hold zone",
@@ -2791,6 +2950,177 @@ mod tests {
             .collect()
     }
 
+    /// A handle is on screen where the pointer is, and nowhere else.
+    ///
+    /// There is one at every junction of every line, and each offers a thing you do *to the
+    /// corner you are pointing at* — painted cold they are a grid of squares laid over the
+    /// panels for no one. So the cold half is the assertion, and the warm half is what keeps it
+    /// from passing on a handle that had stopped being drawn at all.
+    ///
+    /// Both halves rest the pointer for several frames: egui decides what is hovered from the
+    /// rectangles registered during a frame, so the answer arrives one frame after the pointer.
+    #[test]
+    fn a_handle_is_drawn_only_under_the_pointer() {
+        /// Well inside the top-left panel, far from any junction of this scene.
+        const ELSEWHERE: Pos2 = Pos2::new(80.0, 80.0);
+
+        let id = Id::new(DOCK_ID);
+        let style = Style::default();
+        let (ctx, mut state, outer, _) = tee_scene(&style, id);
+        let at = junctions_on(&ctx, &mut state, &style, id, outer)[0].1;
+
+        hover(&ctx, &mut state, &style, id, ELSEWHERE);
+        let (_, cold) = run_frame_painting(&ctx, &mut state, &style, id, vec![]);
+        assert!(
+            cold.is_empty(),
+            "the junction drew a handle with the pointer at {ELSEWHERE:?}: {cold:?}"
+        );
+
+        hover(&ctx, &mut state, &style, id, at);
+        let (_, warm) = run_frame_painting(&ctx, &mut state, &style, id, vec![]);
+        assert_eq!(
+            warm.len(),
+            1,
+            "the pointer is on the junction at {at:?} and this is what was drawn: {warm:?}"
+        );
+        assert!(
+            (warm[0].center() - at).length() < 2.0,
+            "the handle drawn for the junction at {at:?} is at {:?}",
+            warm[0].center()
+        );
+    }
+
+    /// A crossing's handle appears while ctrl is held, and not before.
+    ///
+    /// It is the modifier the crossing's one gesture is named by, and a handle with no gesture to
+    /// offer is not merely idle — it takes the point away from the separators under it, because
+    /// egui drops the layers behind a widget covering the pointer (see `draw_one_handle`). This
+    /// is the *visible* half of that rule; the half it is there for is
+    /// `a_crossing_drags_like_any_other_point_on_the_separator`.
+    #[test]
+    fn a_crossing_shows_no_handle_until_ctrl_is_held() {
+        let id = Id::new(DOCK_ID);
+        let style = Style::default();
+        let (ctx, mut state, _, center) = cross_scene(&style, id);
+
+        hover(&ctx, &mut state, &style, id, center);
+        let (_, open_hand) = run_frame_painting(&ctx, &mut state, &style, id, vec![]);
+        assert!(
+            open_hand.is_empty(),
+            "an open-handed hover over a crossing drew {open_hand:?}"
+        );
+
+        hover_holding(
+            &ctx,
+            &mut state,
+            &style,
+            id,
+            center,
+            egui::Modifiers::COMMAND,
+        );
+        let (_, with_ctrl) = run_frame_painting(&ctx, &mut state, &style, id, vec![]);
+        assert_eq!(
+            with_ctrl.len(),
+            1,
+            "ctrl is down and the pointer is on the crossing at {center:?}: {with_ctrl:?}"
+        );
+    }
+
+    /// A drag has hold of one junction, and the ones it travels past are not part of it.
+    ///
+    /// The gesture is carried out on the nodes named at `drag_started` (see [`JunctionDrag`]),
+    /// and every other handle stands down for as long as it runs — so a drag that sweeps its
+    /// divider across a neighbouring junction cannot pick that neighbour up, and cannot leave a
+    /// second handle lit under the pointer either. Both are asserted: the neighbour's boundary
+    /// where it was, and never two handles drawn in one frame.
+    ///
+    /// The control is the first assertion — the grabbed divider has to travel most of the way,
+    /// or the sweep never reaches the neighbour and the rest is free.
+    ///
+    /// Measured, and worth saying plainly: this test is **green on the code that came before
+    /// [`JunctionDrag`] too**, and green with the stand-down guard mutated out. egui hands one
+    /// drag to one widget and suppresses hover on the rest, so neither hole was reachable from
+    /// the outside — what the explicit state buys is that "what is being dragged" is a thing the
+    /// dock says rather than a thing rederived per frame from geometry the drag is moving. This
+    /// pins the contract, not the repair.
+    #[test]
+    fn a_drag_keeps_hold_of_the_junction_it_grabbed() {
+        /// Far enough to carry the grabbed divider from 0.3 of the band across the other's 0.7.
+        const DOWN: f32 = 380.0;
+
+        let ctx = Context::default();
+        let id = Id::new(DOCK_ID);
+        let style = band_style();
+        let (mut state, outer_id, _) = build_bands(
+            &ctx,
+            &style,
+            id,
+            true,
+            [&[0.3], &[0.7]],
+            [Leaning::Left, Leaning::Left],
+        );
+        let outer = NodePath::new(SurfaceIndex::main(), outer_id);
+        let [b0, b1] = state.main_surface().children(outer_id).unwrap();
+        let positions = |state: &DockState<u32>| {
+            (
+                divider_positions_of(&ctx, state, id, b0, false)[0],
+                divider_positions_of(&ctx, state, id, b1, false)[0],
+            )
+        };
+
+        let junctions = junctions_on(&ctx, &mut state, &style, id, outer);
+        assert_eq!(
+            junctions.len(),
+            2,
+            "the scene is meant to be two tees on one line: {junctions:?}"
+        );
+        let at = junctions[0].1;
+        let (before_grabbed, before_neighbour) = positions(&state);
+
+        // Hand-run so every frame of the drag can be looked at, which is where "one handle at a
+        // time" lives — a whole-gesture helper only shows the last one.
+        use egui::{Event, Modifiers, PointerButton};
+        let press = |pressed: bool, pos: Pos2| {
+            vec![Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            }]
+        };
+        run_frame(&ctx, &mut state, &style, id, vec![Event::PointerMoved(at)]);
+        run_frame(&ctx, &mut state, &style, id, press(true, at));
+        for step in 1..=6u8 {
+            let to = at + Vec2::new(0.0, DOWN * f32::from(step) / 6.0);
+            let (_, painted) =
+                run_frame_painting(&ctx, &mut state, &style, id, vec![Event::PointerMoved(to)]);
+            assert!(
+                painted.len() <= 1,
+                "{} handles were drawn during the drag, at {painted:?}",
+                painted.len()
+            );
+        }
+        run_frame(
+            &ctx,
+            &mut state,
+            &style,
+            id,
+            press(false, at + Vec2::new(0.0, DOWN)),
+        );
+
+        let (after_grabbed, after_neighbour) = positions(&state);
+        assert!(
+            after_grabbed - before_grabbed > DOWN * 0.5,
+            "the grabbed divider moved {}pt of {DOWN}pt, so it never swept past the neighbour",
+            after_grabbed - before_grabbed
+        );
+        assert!(
+            (after_neighbour - before_neighbour).abs() < 1.0,
+            "the junction the drag swept past moved with it: {before_neighbour} to \
+             {after_neighbour}"
+        );
+    }
+
     /// A column beside a stack — `H(A, V(B, C))`. The stack's divider ends on the line between
     /// the two children: three panels meet there, and nothing crosses.
     ///
@@ -2966,108 +3296,54 @@ mod tests {
         );
     }
 
-    /// A cross is three separators, and a drag moves all three: the line, and the two dividers
-    /// that make it a "+" — which come out of the gesture still on one line.
+    /// A crossing is dragged like any other point of the separator it sits on — because there is
+    /// nothing there to drag.
+    ///
+    /// Four panels moving at once off a coincidence of alignment is the gesture this took away,
+    /// and "took away" is stated as a *sameness* rather than as a list of things that must not
+    /// move: the same drag, at the crossing and at a point of the same line 200pt clear of it,
+    /// has to leave the same four rectangles. Anything the crossing still did specially — a
+    /// second boundary carried along, a clamp of its own, a press swallowed and dropped — comes
+    /// out as a difference between the two.
+    ///
+    /// The control is the second half of that: both scenes must actually move, or "the same"
+    /// would also be true of a dock where dragging did nothing anywhere.
     #[test]
-    fn dragging_a_cross_moves_all_three_of_its_separators() {
+    fn a_crossing_drags_like_any_other_point_on_the_separator() {
         const BY: Vec2 = Vec2::new(-60.0, 55.0);
+        /// Far enough down the line to be clear of the handle's reach at any style.
+        const CLEAR: f32 = 200.0;
 
-        let ctx = Context::default();
         let id = Id::new(DOCK_ID);
         let style = Style::default();
-        let (mut state, outer_id, leaves) = build_cross(true, 0.5, 0.5);
-        let outer = NodePath::new(SurfaceIndex::main(), outer_id);
-        render(&ctx, &mut state, &style, id);
 
-        let at = toggle_center(&ctx, &mut state, &style, id, outer).expect("a 2x2 is a cross");
-        let before = leaf_rects(&DockLayout::load(&ctx, id), &leaves);
-        drag(&ctx, &mut state, &style, id, at, at + BY);
-        let after = leaf_rects(&DockLayout::load(&ctx, id), &leaves);
-
-        // `leaves` is `[top_left, bottom_left, top_right, bottom_right]`.
-        assert!(
-            (after[0].right() - before[0].right() - BY.x).abs() < 1.5,
-            "the line between the two columns did not follow the drag"
-        );
-        for (name, k) in [("left", 0), ("right", 2)] {
-            assert!(
-                (after[k].bottom() - before[k].bottom() - BY.y).abs() < 1.5,
-                "the {name} column's divider was to move {}pt down, and went from {} to {}",
-                BY.y,
-                before[k].bottom(),
-                after[k].bottom()
-            );
-        }
-        assert_eq!(
-            toggle_centers(&ctx, &mut state, &style, id, outer).len(),
-            1,
-            "the drag broke the crossing apart into two tees"
-        );
-    }
-
-    /// Pushed past what one of its dividers can give, a cross still comes out as one line.
-    ///
-    /// The two dividers are cut from *different* intervals, so the same drag in points is a
-    /// different fraction for each and the tighter one runs out first. Moving each by what it can
-    /// take on its own would leave the "+" a jog of exactly the overshoot — which is the shape the
-    /// magnet exists to close, produced by the gesture that is supposed to preserve it.
-    ///
-    /// The scene: a 2-part band beside a 3-part one, sharing the divider at 0.4 of the height.
-    /// Left-leaning, so the shared divider of the second band is nested inside the chain covering
-    /// its first two parts and cannot pass 0.75 of the band, while the first band's may go all the
-    /// way down.
-    #[test]
-    fn a_cross_dragged_past_one_dividers_limit_stays_one_line() {
-        /// Far enough past the tighter divider's limit that a per-divider clamp would show.
-        const DOWN: f32 = 400.0;
-
-        let ctx = Context::default();
-        let id = Id::new(DOCK_ID);
-        let style = band_style();
-        let (mut state, outer_id, _) = build_bands(
-            &ctx,
-            &style,
-            id,
-            true,
-            [&[0.4], &[0.4, 0.75]],
-            [Leaning::Left, Leaning::Left],
-        );
-        let outer = NodePath::new(SurfaceIndex::main(), outer_id);
-        let [b0, b1] = state.main_surface().children(outer_id).unwrap();
-        let positions = |state: &DockState<u32>| {
-            (
-                divider_positions_of(&ctx, state, id, b0, false),
-                divider_positions_of(&ctx, state, id, b1, false),
-            )
+        // A scene per gesture: the first drag is a real edit, and what the second is about is
+        // where it was aimed, not the layout the first one left.
+        let scene = |from: Option<Vec2>| {
+            let ctx = Context::default();
+            let (mut state, outer_id, leaves) = build_cross(true, 0.5, 0.5);
+            let outer = NodePath::new(SurfaceIndex::main(), outer_id);
+            render(&ctx, &mut state, &style, id);
+            let at = toggle_center(&ctx, &mut state, &style, id, outer).expect("a 2x2 is a cross")
+                + from.unwrap_or(Vec2::ZERO);
+            let before = leaf_rects(&DockLayout::load(&ctx, id), &leaves);
+            drag(&ctx, &mut state, &style, id, at, at + BY);
+            (before, leaf_rects(&DockLayout::load(&ctx, id), &leaves))
         };
 
-        let at = toggle_center(&ctx, &mut state, &style, id, outer).expect("the bands share 0.4");
-        let (before0, before1) = positions(&state);
-        drag(&ctx, &mut state, &style, id, at, at + Vec2::new(0.0, DOWN));
-        let (after0, after1) = positions(&state);
+        let (before_at, after_at) = scene(None);
+        let (before_clear, after_clear) = scene(Some(Vec2::new(0.0, CLEAR)));
 
         assert!(
-            (after0[0] - after1[0]).abs() < 1.0,
-            "the two dividers of the crossing came apart: {} and {}",
-            after0[0],
-            after1[0]
+            (after_clear[0].right() - before_clear[0].right() - BY.x).abs() < 1.5,
+            "the control drag, {CLEAR}pt clear of the crossing, did not move the line it grabbed"
         );
+        assert_rects_close(&after_at, &after_clear);
         assert!(
-            after0[0] - before0[0] > 100.0,
-            "the drag moved the crossing by {}pt, so there is no clamp to speak of",
-            after0[0] - before0[0]
-        );
-        assert!(
-            after0[0] - before0[0] < DOWN - 50.0,
-            "the drag was not clamped at all ({}pt of {DOWN}pt), so this scene proves nothing",
-            after0[0] - before0[0]
-        );
-        assert!(
-            (after1[1] - before1[1]).abs() < 1.0,
-            "the second band's other divider is not part of this junction and moved anyway: {} \
-             to {}",
-            before1[1],
-            after1[1]
+            (after_at[0].bottom() - before_at[0].bottom()).abs() < 0.5,
+            "the crossing carried its columns' dividers along: the left one went from {} to {}",
+            before_at[0].bottom(),
+            after_at[0].bottom()
         );
     }
 

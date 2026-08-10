@@ -220,6 +220,14 @@ enum Step {
     /// A release with no junction in hand is a *skipped* step, like every other step that finds
     /// nothing to act on — the same shrinker contract [`Step::Release`] keeps.
     ReleaseJunction,
+    /// Resize the window the dock is shown in.
+    ///
+    /// Carries no button, so it runs under a hold exactly as it would between an open hand's
+    /// steps — a window can be resized with a tab or a junction in flight, and neither drag
+    /// promises anything about the window staying still while it is held. The margin its
+    /// `Squeezed` size reaches for is a fact about geometry, not about a gesture, so this step
+    /// commits nothing and touches no leaf: see `a_ratio_the_window_grew_too_small_for_comes_back_when_it_grows_again`.
+    ResizeWindow { to: WindowSize },
     /// Let a frame pass with no input at all.
     Idle,
 }
@@ -384,6 +392,34 @@ enum Deepen {
     /// dividers line up, so the line carries a *second* "+": two buttons, and a press on one of
     /// them has to pivot around that one rather than around "the crossing".
     BothBands,
+}
+
+/// A size a [`Step::ResizeWindow`] step may ask for.
+///
+/// Two members rather than a free-floating `Vec2`, same reasoning as [`Deepen`]: the interesting
+/// states are the ones the directed margin tests already build by hand — full room, and a window
+/// too small to leave `separator.extra` clear on both sides of *every* part — and drawing
+/// arbitrary sizes between them would spend the sweep's budget on a regime nothing reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowSize {
+    /// [`SCREEN`], the size every other step is drawn against.
+    Roomy,
+    /// Small on both axes, whatever a junction's line runs along: a band nested a level or two
+    /// under another split — which is what [`Step::BuildCross`] and plain [`Step::Split`] both
+    /// produce — lands well under `2 * separator.extra` here, the one regime the crate's own
+    /// `Band::parts_can_be_renested` ever refuses in. Before this step existed nothing in the
+    /// sweep ever changed the window at all, which is exactly why `CrossWatch::unrenestable` read
+    /// zero across the whole thing.
+    Squeezed,
+}
+
+impl WindowSize {
+    fn points(self) -> Vec2 {
+        match self {
+            Self::Roomy => SCREEN,
+            Self::Squeezed => Vec2::new(320.0, 320.0),
+        }
+    }
 }
 
 /// What a drop somewhere means, in the dock's own terms.
@@ -640,14 +676,14 @@ struct JunctionHold {
 struct JunctionWatch {
     /// Grabs that found a handle to press at all.
     offered: usize,
-    /// ...of which pressed a tee, and of which a cross.
+    /// Junctions passed over while looking for one: crossings, which carry no drag handle.
     ///
-    /// Two numbers because they are not interchangeable: a tee is the shape this harness could
-    /// not see at all until the detection was rewritten, and a sweep that only ever grabbed
-    /// crosses would say nothing about the kind that outnumbers them — every band divider ends
-    /// on the line, and only some of them find a partner across it.
-    tees: usize,
-    crosses: usize,
+    /// A crossing is two dividers that *happen* to be aligned, and the crate stopped resizing
+    /// four panels off that coincidence — a press there is a press on the separator underneath.
+    /// So this is not a filter for convenience but the shape of the feature, and it is counted
+    /// rather than dropped quietly: a zero means the sweep never once had to tell the two kinds
+    /// apart, and "a crossing is not a handle" went unasked across every seed.
+    crossings_passed_over: usize,
     /// Grabs egui called a drag.
     live: usize,
     /// ...and grabs whose travel fell short of egui's threshold, so the gesture is a click. A
@@ -664,12 +700,10 @@ struct JunctionWatch {
     /// other than a handle — the drift [`Sim::junctions`] can otherwise hide behind a clamp,
     /// since a drag that moves nothing looks the same whatever it was aimed at.
     moved_together: usize,
-    /// ...of which moved the line the junction sits on *and* a divider that ends on it.
+    /// ...of which moved the line the junction sits on *and* the divider that ends on it.
     ///
-    /// The sharp form of the number above, and the one that survives a mutation: a cross has
-    /// two dividers, so "more than one boundary moved" is satisfied without the line moving at
-    /// all. Measured — zeroing `outer`'s delta in `drag_junction` left `moved_together` green
-    /// and this at nothing.
+    /// The sharp form of the number above: it names *which* two moved, and a junction drag is
+    /// the only gesture that moves those two at once.
     moved_line_and_divider: usize,
     /// ...and drag steps that moved nothing at all, every separator already against its clamp.
     clamped: usize,
@@ -1549,6 +1583,26 @@ impl Sim {
             .collect()
     }
 
+    /// The junctions that carry a handle a hand can grab: the **tees**.
+    ///
+    /// A crossing carries no drag handle. Its two dividers are aligned by coincidence, and the
+    /// crate stopped resizing four panels off one — a press at a crossing is a press on the
+    /// separator underneath, which is a gesture [`Step::GrabSeparator`] already sweeps. What is
+    /// left there is the ctrl+click, and [`Step::ToggleCrossSplit`] is the step that presses it.
+    ///
+    /// The crossings passed over are counted rather than dropped in silence: a run in which this
+    /// filter never fired is one where "a crossing is not a handle" was never asked.
+    fn draggable_junctions(&mut self) -> Vec<JunctionPoint> {
+        let all = self.junctions();
+        let handles: Vec<JunctionPoint> = all
+            .iter()
+            .filter(|point| point.kind == Meeting::Tee)
+            .cloned()
+            .collect();
+        self.junction.crossings_passed_over += all.len() - handles.len();
+        handles
+    }
+
     /// The band one side of a split flattens into. `None` only when the geometry map does not
     /// describe every part of it, or one of them is degenerate — the two cases in which there is
     /// nothing to say rather than something to refuse.
@@ -2117,19 +2171,6 @@ impl Sim {
             }
         } else {
             self.junction.clamped += 1;
-        }
-        // A cross's two dividers are one line on screen and have to stay one: they are cut from
-        // different intervals, so the same delta in points is a different fraction for each and
-        // one can reach its limit while the other has room. The crate moves both by the tightest
-        // of the two admissible deltas, so the pair moves together or not at all — which is a
-        // claim about *these two numbers* and can be checked wherever they are read.
-        if dividers.len() == 2 && dividers[0] != dividers[1] {
-            *forbidden = Some(format!(
-                "a drag on a crossing moved one of its two aligned dividers and not the other \
-                 ({was:?} -> {now:?}). They are one line on screen; moving them by what each can \
-                 take on its own leaves the \"+\" a jog, which is the very thing the magnet \
-                 exists to close"
-            ));
         }
         if !dragging && changed > 0 {
             *forbidden = Some(format!(
@@ -2802,7 +2843,7 @@ impl Sim {
                     self.refused[refused_index(Refused::Unsettled)] += 1;
                     return None;
                 }
-                let handles = self.junctions();
+                let handles = self.draggable_junctions();
                 if handles.is_empty() {
                     return None;
                 }
@@ -2812,10 +2853,6 @@ impl Sim {
                     return None;
                 }
                 self.junction.offered += 1;
-                match point.kind {
-                    Meeting::Tee => self.junction.tees += 1,
-                    Meeting::Cross => self.junction.crosses += 1,
-                }
 
                 let was = self.fractions_of(&point.moves);
                 let focus_before = self.focus_trace();
@@ -2861,7 +2898,7 @@ impl Sim {
                     self.refused[refused_index(Refused::Unsettled)] += 1;
                     return None;
                 }
-                let handles = self.junctions();
+                let handles = self.draggable_junctions();
                 if handles.is_empty() {
                     return None;
                 }
@@ -2982,6 +3019,16 @@ impl Sim {
                         commits = CommitRule::Unjudged;
                     }
                 }
+                Vec::new()
+            }
+
+            // No pointer or keyboard event either — `resize` runs its frame the same way `Idle`
+            // does, only with `self.screen` changed first — and the margin tests already pin
+            // that it may not touch a stored ratio or a leaf's identity.
+            Step::ResizeWindow { to } => {
+                stillness = Stillness::NoInput;
+                commits = CommitRule::Exactly(0);
+                self.resize(to.points());
                 Vec::new()
             }
 
@@ -3402,7 +3449,7 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
             steps.push(previous);
             continue;
         }
-        let step = match rng.below(32) {
+        let step = match rng.below(34) {
             0..=4 => Step::Drag {
                 from: rng.below(8),
                 to: rng.below(8),
@@ -3504,6 +3551,21 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
             },
             30 => Step::MoveJunction {
                 by: JUNCTION_TRAVEL[rng.below(JUNCTION_TRAVEL.len())],
+            },
+            // The window resize. Two draws, the same idiom as `Step::BuildCross`: the regime
+            // `CrossWatch::unrenestable` counts — a band nested under another split with the
+            // window too small to leave `separator.extra` clear on both sides of every part — is
+            // not one independent draws ever find, because nothing else in this vocabulary asks
+            // for it. `Squeezed` twice as likely as `Roomy`: the growing-back half of the margin
+            // contract already has directed tests of its own, and what the sweep was short on is
+            // time spent small. Measured once this step existed: 46 of 85 crosses offered across
+            // the sweep sat on an unrenestable line, against zero before it.
+            31..=32 => Step::ResizeWindow {
+                to: [
+                    WindowSize::Squeezed,
+                    WindowSize::Squeezed,
+                    WindowSize::Roomy,
+                ][rng.below(3)],
             },
             // The plain click, drawn on its own rather than folded into the hold: a click is a
             // press and a release inside egui's click window, and a hold's release is a step
@@ -4953,6 +5015,7 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         cross.in_a_long_band += outcome.cross.in_a_long_band;
         cross.in_two_long_bands += outcome.cross.in_two_long_bands;
         cross.on_a_crowded_line += outcome.cross.on_a_crowded_line;
+        cross.unrenestable += outcome.cross.unrenestable;
         holds.grabs += outcome.holds.grabs;
         holds.live += outcome.holds.live;
         holds.releases += outcome.holds.releases;
@@ -4963,8 +5026,7 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         holds.landings_after_a_change += outcome.holds.landings_after_a_change;
         holds.destination_died += outcome.holds.destination_died;
         junction.offered += outcome.junction.offered;
-        junction.tees += outcome.junction.tees;
-        junction.crosses += outcome.junction.crosses;
+        junction.crossings_passed_over += outcome.junction.crossings_passed_over;
         junction.live += outcome.junction.live;
         junction.short += outcome.junction.short;
         junction.moves += outcome.junction.moves;
@@ -5050,6 +5112,13 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
          transposition pivots around the crossing that was pressed, and with only one on the \
          line that is indistinguishable from pivoting around \"the crossing\" — the two produce \
          the same picture and different trees",
+        cross.offered
+    );
+    assert!(
+        cross.unrenestable > 0,
+        "not one of the {} cross toggles pressed sat on a line whose bands cannot be re-nested \
+         — `Step::ResizeWindow` never left the window small enough. The branch that tells a \
+         drag-only handle apart from one that also transposes went untried across {SEEDS} seeds",
         cross.offered
     );
 
@@ -5225,21 +5294,19 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
     );
 
     // The junction drag. Its zeros are the ones this stage exists to make impossible: the
-    // gesture that moves two or three persisted numbers at once was in the crate and in six
-    // scenes someone chose, and in nothing that sweeps.
+    // gesture that moves two persisted numbers at once was in the crate and in six scenes
+    // someone chose, and in nothing that sweeps.
     assert!(
         junction.offered > 0,
         "no junction handle was ever grabbed across {SEEDS} seeds — the scenes never grew two \
          splits of opposite orientation, so every gate below is vacuous"
     );
     assert!(
-        junction.tees > 0 && junction.crosses > 0,
-        "the {} handles grabbed were all of one kind (tees: {}, crosses: {}). The two are \
-         different shapes of the same gesture — a tee has one divider ending on the line and a \
-         cross has two that must stay in line with each other — and the sweep has to reach both",
-        junction.offered,
-        junction.tees,
-        junction.crosses
+        junction.crossings_passed_over > 0,
+        "the {} grabs never once passed over a crossing, so the sweep never had to tell a handle \
+         from a coincidence of alignment. \"A crossing carries no drag handle — a press there is \
+         a press on the separator\" went unasked across {SEEDS} seeds",
+        junction.offered
     );
     assert!(
         junction.live > 0,

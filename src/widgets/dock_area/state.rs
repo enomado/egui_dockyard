@@ -1,7 +1,51 @@
 use egui::{Context, Id, Pos2};
 
 use super::drag_and_drop::{DragData, DragDropState, HoverData};
-use crate::{Style, SurfaceIndex};
+use crate::{NodePath, Style, SurfaceIndex};
+
+/// The junction a drag has hold of, remembered whole for as long as the button is down.
+///
+/// Not bookkeeping for its own sake. The handles are read off the geometry afresh every frame,
+/// and the geometry is exactly what the drag is moving: a junction can change its index along
+/// its line, change kind, or stop existing altogether while the hand is still down. So "the
+/// junction at the index that reported a drag this frame" names a *different* junction from one
+/// frame to the next, and the neighbours it names get moved by a gesture that never grabbed
+/// them. What the gesture has hold of is decided once, at `drag_started`, and every frame after
+/// that moves *those* nodes — whatever the detector now says is at that spot.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct JunctionDrag {
+    /// The handle whose press started this. Every other handle stands down while it is live —
+    /// neither drawn nor interacted — so a drag cannot pick up a neighbour it passes over.
+    pub id: Id,
+
+    /// The split on whose line between its two children the junction sits. One boundary the
+    /// drag moves, along that split's own axis.
+    pub outer: NodePath,
+
+    /// Orientation of `outer` itself: `true` if [`crate::Node::Horizontal`]. Which component of
+    /// the drag goes to `outer` and which to `divider` is read off it.
+    pub outer_horizontal: bool,
+
+    /// The divider that ends on that line — the tee's stem. The other boundary the drag moves,
+    /// across `outer`'s axis.
+    pub divider: NodePath,
+
+    /// Whether any of it has actually moved yet.
+    ///
+    /// The same question [`State::separator_drag_start`] answers for a single divider, asked of a
+    /// gesture that moves two fractions at once. Remembering their starting values would mean
+    /// remembering a pair whose meaning depends on the junction; what the commit event needs is
+    /// only whether either of them ever moved, and each frame of the drag already answers that
+    /// for itself.
+    pub moved: bool,
+
+    /// The pass this drag was last seen alive in — the frame the owning handle last reported it.
+    ///
+    /// A drag whose junction stopped existing never gets a `drag_stopped` to clear it, and an
+    /// entry left behind would hold every other handle down for good. A pass number cannot go
+    /// stale that way: it either names the frame before this one, or it does not.
+    pub pass: u64,
+}
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct State {
@@ -24,15 +68,8 @@ pub(super) struct State {
     /// to diff otherwise. If level (1) is ever needed (telemetry, focus-on-grab),
     /// split it into a separate event rather than removing the guard.
     pub separator_drag_start: Option<(Id, f32)>,
-    /// `(junction handle id, whether the drag has moved anything yet)`, kept for as long as one
-    /// of the handles at a separator crossing is held.
-    ///
-    /// The same question `separator_drag_start` answers — did this gesture change the layout,
-    /// or was it a grab and a release — asked of a gesture that moves *two or three* fractions
-    /// at once. Remembering their starting values would mean remembering a list whose length
-    /// depends on the junction; what the commit event needs is only whether any of them ever
-    /// moved, and each frame of the drag already answers that for itself.
-    pub junction_drag: Option<(Id, bool)>,
+    /// The junction handle that is being dragged, and the nodes it grabbed. See [`JunctionDrag`].
+    pub junction_drag: Option<JunctionDrag>,
 }
 
 impl State {

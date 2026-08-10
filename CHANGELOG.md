@@ -4,28 +4,35 @@
 
 ### Added
 
-- **One drag resizes every panel around a junction.** Where separators meet — a "+" of four
-  panels, or a "T" of three — the dock draws a small handle, and dragging it moves *all* the
-  separators that meet there at once: the line that runs through, and the divider (or the two
-  aligned dividers) that end on it. Resizing the corner of four panels was two drags before,
-  one per axis, and a tee had nothing there at all. Carries the idea of upstream PR
-  [#155](https://github.com/anhosh/egui_dock/pull/155), which was never merged.
+- **One drag resizes the panels around a tee.** Where a divider ends on the line between a
+  split's two children — a "T" of three panels — the dock offers a small handle, and dragging it
+  moves *both* separators that meet there at once: the line that runs through, and the one that
+  stops on it. That corner was two drags before, one per axis, and had nothing there at all.
+  Carries the idea of upstream PR [#155](https://github.com/anhosh/egui_dock/pull/155), which was
+  never merged.
 
-  The handle a cross carries is the one that was already there, and its icon still says what it
-  is: four arms for a cross, three for a tee, drawn along the separators that actually meet.
+  A "+" of four panels is **not** dragged: its two dividers are aligned by coincidence, to within
+  `CrossSplitToggleStyle::align_tolerance`, and a press there means what it means anywhere else
+  on that separator — it resizes that one separator, as before.
+
+- **A junction handle is drawn under the pointer and nowhere else.** One is offered at every
+  junction of every line; painted cold they would be a grid of squares over the panels. The icon
+  says which junction it is: three arms for a tee, drawn along the separators that meet there,
+  and four for the crossing's pinwheel.
 
 ### Changed
 
-- **The cross-split toggle is a ctrl+click.** A plain click on the handle used to transpose the
-  grouping; the same handle now takes a drag, and a press that was meant as a drag and did not
-  travel far enough arrives as a click. Ctrl+clicking a "+" still transposes, and still moves no
-  pixel. A tee has no grouping to swap and answers to drags only.
+- **The cross-split toggle is a ctrl+click, and its handle appears with the modifier.** A plain
+  click on the "+" used to transpose the grouping; it now takes ctrl, so that a press meant for
+  the separator cannot rewrite the tree. The handle itself is only there while ctrl is held —
+  a widget sitting at the crossing takes the point away from the separators under it whatever it
+  senses, and the plain drag there has to stay plain. Ctrl+clicking still moves no pixel.
 
 - **`DockArea::show_cross_split_toggle` is now `show_junction_handles`.** It gates the handles at
   both kinds of junction, and the transposition along with them. Same default (`true`).
 
-- **A crossing whose parts are too thin to re-nest still gets its handle.** Only the
-  transposition is withheld there — the drag is meaningful whatever the margin allows.
+- **A crossing whose parts are too thin to re-nest offers nothing at all.** The transposition
+  cannot promise "no pixel moves" there, and it is the only gesture a crossing has.
 
 - **A leaf's focus history is a stack, and the application can overrule it.** Closing the
   active tab walks back through the tabs that were open before it — the tab you came from,

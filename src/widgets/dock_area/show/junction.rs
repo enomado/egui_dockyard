@@ -874,9 +874,9 @@ impl<Tab> DockArea<'_, Tab> {
                     .on_hover_and_drag_cursor(CursorIcon::Move);
 
                 let (fill, icon) = if response.is_pointer_button_down_on() {
-                    (style.color_dragged, style.color_hovered)
+                    (style.color_dragged, toggle.icon_color)
                 } else {
-                    (style.color_hovered, style.color_dragged)
+                    (style.color_hovered, toggle.icon_color)
                 };
                 ui.painter().rect(
                     drawn,
@@ -1117,10 +1117,14 @@ impl<Tab> DockArea<'_, Tab> {
                     // two the square takes, the icon takes the other, so the arms stay legible
                     // against it. A handle is never seen cold, so `color_idle` — the separator's
                     // own resting colour — is not one of the two.
+                    // The square takes the separator's palette; the arrows take their own colour,
+                    // which is the panel fill by default — a cut-out rather than a second bright
+                    // grey. See `CrossSplitToggleStyle::icon_color` for why the swap that used to
+                    // be here produced a plain white square with no arrows on it.
                     let (fill, icon) = if response.is_pointer_button_down_on() {
-                        (style.color_dragged, style.color_hovered)
+                        (style.color_dragged, toggle.icon_color)
                     } else {
-                        (style.color_hovered, style.color_dragged)
+                        (style.color_hovered, toggle.icon_color)
                     };
                     ui.painter().rect(
                         drawn_idle,
@@ -1490,6 +1494,79 @@ mod tests {
         // Headless harness, no GPU backend to hand the delta to.
         output.textures_delta.clear();
         (reported, painted)
+    }
+
+    /// One frame's handle paint, in two parts: the square (its rectangle and fill) and the colours
+    /// of every stroked shape drawn *inside* it — the arrows.
+    ///
+    /// Separate from [`handle_squares`] because the question is different: that one asks whether a
+    /// handle was drawn at all and is deliberately blind to colour, this one asks whether what was
+    /// drawn can be seen. "Inside the square" is how the arrows are told from the rest of the
+    /// frame — every stroke of the dock's own separators is somewhere else on screen.
+    fn handle_paint(
+        ctx: &Context,
+        state: &mut DockState<u32>,
+        style: &Style,
+        id: Id,
+    ) -> (Option<(Rect, egui::Color32)>, Vec<egui::Color32>) {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, SCREEN)),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ctx| {
+            CentralPanel::default().show(ctx, |ui| {
+                DockArea::new(state)
+                    .id(id)
+                    .style(style.clone())
+                    .show_inside_with_response(ui, &mut Viewer);
+            });
+        });
+        output.textures_delta.clear();
+
+        let mut square: Option<(Rect, egui::Color32)> = None;
+        let mut strokes = Vec::new();
+        fn walk(
+            shape: &egui::Shape,
+            square: &mut Option<(Rect, egui::Color32)>,
+            strokes: &mut Vec<(Rect, egui::Color32)>,
+        ) {
+            match shape {
+                egui::Shape::Rect(rect) => {
+                    let (w, h) = (rect.rect.width(), rect.rect.height());
+                    if (w - h).abs() < 0.5 && (4.0..=64.0).contains(&w) {
+                        *square = Some((rect.rect, rect.fill));
+                    }
+                }
+                egui::Shape::LineSegment { points, stroke } => {
+                    strokes.push((Rect::from_two_pos(points[0], points[1]), stroke.color));
+                }
+                egui::Shape::Path(path) => {
+                    // A path's stroke can be a gradient (`ColorMode::UV`); the arrows are solid,
+                    // and a gradient here would be something else's shape.
+                    if let egui::epaint::ColorMode::Solid(color) = path.stroke.color {
+                        strokes.push((path.visual_bounding_rect(), color));
+                    }
+                }
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        walk(shape, square, strokes);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut square, &mut strokes);
+        }
+        let inside: Vec<egui::Color32> = match square {
+            Some((rect, _)) => strokes
+                .iter()
+                .filter(|(bounds, _)| rect.expand(1.0).contains_rect(*bounds))
+                .map(|(_, color)| *color)
+                .collect(),
+            None => Vec::new(),
+        };
+        (square, inside)
     }
 
     /// Every junction handle painted in a frame, as the square each of them draws.
@@ -2175,7 +2252,13 @@ mod tests {
     #[test]
     fn a_cross_without_room_for_the_whole_button_has_no_handle() {
         let id = Id::new(DOCK_ID);
-        let style = band_style();
+        // A deliberately big button, so "the squeezed scene has no room for it" is a fact about the
+        // gate and not about whatever the shipped `size` happens to be this month. The squeezed
+        // scene leaves ~20pt; the default button asks for 13 and fits, which made this test pass
+        // for the wrong reason the moment the defaults were trimmed.
+        let mut style = band_style();
+        style.cross_split_toggle.size = 40.0;
+        let style = style;
         let toggle = &style.cross_split_toggle;
 
         let (ctx, mut state, outer, center) = cross_scene(&style, id);
@@ -2373,7 +2456,7 @@ mod tests {
     #[test]
     fn the_toggle_catches_a_press_that_misses_the_drawn_square() {
         let id = Id::new(DOCK_ID);
-        let style = band_style();
+        let style = wide_toggle_style();
         let toggle = &style.cross_split_toggle;
 
         // Along the outer divider, so a press that is not caught lands squarely on a separator.
@@ -2414,7 +2497,7 @@ mod tests {
     #[test]
     fn a_button_holding_the_pointer_keeps_it_past_the_catch_zone() {
         let id = Id::new(DOCK_ID);
-        let style = band_style();
+        let style = wide_toggle_style();
         let toggle = &style.cross_split_toggle;
 
         let out_of_catch = Vec2::new(
@@ -2736,6 +2819,25 @@ mod tests {
     fn band_style() -> Style {
         let mut style = Style::default();
         style.separator.extra = 4.0;
+        style
+    }
+
+    /// A style whose catch and hold margins are wide enough to aim between, for the two tests that
+    /// are about the *mechanism* — a press that misses the square is still the button, and the zone
+    /// that keeps the pointer is wider than the zone that caught it.
+    ///
+    /// Written down rather than taken from the defaults, and that is the lesson of trimming them:
+    /// the shipped margins are a **feel**, tuned against a screen and a hand (1.0 and 0.5 as of
+    /// 2026-08-10, from 6.0 and 6.0), while "there are two radii and the outer one holds" is a
+    /// rule. A test that aims at `catch + hold - 1` reads as being about the rule and is really
+    /// about the numbers: at half a point of hysteresis the band between the two radii is thinner
+    /// than the pixel grid it is measured on, and the tests went red on a change that broke
+    /// nothing.
+    fn wide_toggle_style() -> Style {
+        let mut style = band_style();
+        style.cross_split_toggle.size = 14.0;
+        style.cross_split_toggle.catch_extra = 6.0;
+        style.cross_split_toggle.hold_extra = 6.0;
         style
     }
 
@@ -3255,6 +3357,57 @@ mod tests {
             "the handle drawn for the junction at {at:?} is at {:?}",
             warm[0].center()
         );
+    }
+
+    /// The arrows inside the handle are **visible against the square they are drawn on** — under
+    /// the host's theme, which is the case that was broken.
+    ///
+    /// Reported from the screen: «кнопка стала полностью белой рисоваться без рисок» (Стас,
+    /// 2026-08-10). The square and the icon used to take the two ends of the separator's palette,
+    /// and under [`Style::from_egui`] those are `widgets.hovered.fg_stroke` and
+    /// `widgets.active.fg_stroke` — **gray(240) and white** in egui's dark theme. Two roles, one
+    /// colour, no arrows. The icon has a colour of its own now
+    /// ([`CrossSplitToggleStyle::icon_color`], the panel fill by default).
+    ///
+    /// So the scene is built with `Style::from_egui` and not with `Style::default()`, which is the
+    /// whole point of it: the crate's own defaults (black / gray / white) are legible and every
+    /// other test here uses them, so none of them could see this. The difference is measured as a
+    /// per-channel gap rather than as inequality — two greys a pixel apart are "different" and
+    /// still invisible.
+    #[test]
+    fn the_handle_icon_is_visible_against_its_square() {
+        /// How far apart the two colours must be, per channel, to read as an icon rather than as a
+        /// smudge. Generous: the failure this pins had a gap of 15.
+        const GAP: i32 = 60;
+
+        let id = Id::new(DOCK_ID);
+        let style = Style::from_egui(&egui::Style::default());
+        let (ctx, mut state, outer, _) = tee_scene(&style, id);
+        let at = junctions_on(&ctx, &mut state, &style, id, outer)[0].1;
+
+        hover(&ctx, &mut state, &style, id, at);
+        let (square, strokes) = handle_paint(&ctx, &mut state, &style, id);
+        let square = square.expect("the pointer is on the junction, so a handle was painted");
+        assert!(
+            !strokes.is_empty(),
+            "the handle's square was painted with no arrows on it at all"
+        );
+
+        let channels = |c: egui::Color32| [c.r() as i32, c.g() as i32, c.b() as i32];
+        let (sq, sqc) = (square.1, channels(square.1));
+        for stroke in strokes {
+            let gap = channels(stroke)
+                .iter()
+                .zip(&sqc)
+                .map(|(a, b)| (a - b).abs())
+                .max()
+                .unwrap();
+            assert!(
+                gap >= GAP,
+                "an arrow is {stroke:?} on a {sq:?} square — {gap} apart per channel, which is a \
+                 white square with nothing visible on it"
+            );
+        }
     }
 
     /// A crossing's handle is there under the pointer, ctrl or no ctrl.

@@ -206,7 +206,7 @@ pub struct SeparatorStyle {
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(default))]
 pub struct CrossSplitToggleStyle {
-    /// Side of the square the button is drawn as, in points. By `Default` it's `14.0`.
+    /// Side of the square the button is drawn as, in points. By `Default` it's `10.0`.
     ///
     /// One size, hovered or not: the margins below widen what answers to the pointer, never
     /// what is painted. A button that grew under the cursor was tried and taken back out —
@@ -215,21 +215,22 @@ pub struct CrossSplitToggleStyle {
     pub size: f32,
 
     /// How far outside that square the pointer is still caught, in points. By `Default` it's
-    /// `2.0`.
+    /// `1.0`.
     ///
-    /// A couple of points, deliberately, and it used to be `6.0`: a handle that answers well
+    /// One point, deliberately, and it was `6.0` two revisions ago: a handle that answers well
     /// outside itself is a handle that takes the separator's own grab zone away, and on a dock with
     /// a junction every few hundred points that reads as the lines being hard to grab —
-    /// «область у Т слишком большая слишком назойливая» (Стас, 2026-08-10). What it is *for* is
-    /// missing the square by a pixel or two, not aiming near it.
+    /// «область у Т слишком большая слишком назойливая», then «надо еще меньше — в два три раза»
+    /// (Стас, 2026-08-10). What it is *for* is missing the square by a pixel, not aiming near it.
     pub catch_extra: f32,
 
     /// How far outside the catch zone the pointer is held once caught, in points. By `Default`
-    /// it's `2.0`. Setting it to `0.0` removes the hysteresis.
+    /// it's `0.5`. Setting it to `0.0` removes the hysteresis.
     ///
     /// Trimmed with `catch_extra` and for the same reason. It is the hysteresis and not the reach:
     /// what it buys is that a hand resting on the edge of the catch zone does not flip between
-    /// "handle" and "separator" on every pixel of jitter, and two points buy that as well as six.
+    /// "handle" and "separator" on every pixel of jitter, and half a point buys that at the one
+    /// place it matters — the boundary itself.
     pub hold_extra: f32,
 
     /// How far apart the two dividers may sit and still be offered a button, in points. By
@@ -250,9 +251,45 @@ pub struct CrossSplitToggleStyle {
     /// Floored at one device pixel, so `0.0` still means "the same line" rather than "bit-exact",
     /// and means it identically at every `pixels_per_point` — see `Crossings::tolerance`.
     pub align_tolerance: f32,
+
+    /// Colour of the arrows drawn inside the square. By `Default` it's `Color32::from_gray(27)` —
+    /// egui's own dark-theme panel fill — and [`Style::from_egui`] takes the host's
+    /// [`egui::Visuals::panel_fill`] instead, so the icon reads as a *cut-out* of the square.
+    ///
+    /// It has to be its own colour, and that was found on the screen rather than reasoned out. The
+    /// square and the icon used to take the two ends of the separator's palette, swapped depending
+    /// on whether the handle was held: [`SeparatorStyle::color_hovered`] and
+    /// [`SeparatorStyle::color_dragged`]. Under [`Style::from_egui`] those are
+    /// `widgets.hovered.fg_stroke` and `widgets.active.fg_stroke`, which in egui's dark theme are
+    /// **gray(240) and white** — so the handle came out as a plain white square with no arrows
+    /// visible at all («кнопка стала полностью белой рисоваться без рисок», Стас, 2026-08-10). Two
+    /// roles, one colour: the palette had no third end to give.
+    ///
+    /// The panel fill is the honest choice for it, because a theme already promises that its
+    /// `fg_stroke` colours are legible *on* that fill — that is what they are for. So whatever the
+    /// square takes, the arrows stay readable, in a light theme as in a dark one, without this
+    /// having to inspect the square's colour and guess a contrast.
+    pub icon_color: Color32,
 }
 
 impl CrossSplitToggleStyle {
+    /// Derives relevant fields from `egui::Style` and sets the remaining fields to their default
+    /// values.
+    ///
+    /// Fields overwritten by [`egui::Style`] are:
+    /// - [`CrossSplitToggleStyle::icon_color`]
+    ///
+    /// The geometry is not: how big a target a handle is, and how far it catches from, are this
+    /// crate's own answers and have nothing in an egui theme to read them off.
+    pub fn from_egui(style: &egui::Style) -> Self {
+        Self {
+            // The surface the theme's own `fg_stroke` colours are meant to be legible on, which is
+            // exactly the promise the icon needs — see the field's doc.
+            icon_color: style.visuals.panel_fill,
+            ..Self::default()
+        }
+    }
+
     /// The width of the button in its widest form: the drawn square plus both margins, which is
     /// the zone it answers to while it is holding the pointer.
     ///
@@ -536,10 +573,11 @@ impl Default for SeparatorStyle {
 impl Default for CrossSplitToggleStyle {
     fn default() -> Self {
         Self {
-            size: 14.0,
-            catch_extra: 2.0,
-            hold_extra: 2.0,
+            size: 10.0,
+            catch_extra: 1.0,
+            hold_extra: 0.5,
             align_tolerance: 8.0,
+            icon_color: Color32::from_gray(27),
         }
     }
 }
@@ -685,6 +723,7 @@ impl Style {
             tab_bar: TabBarStyle::from_egui(style),
             tab: TabStyle::from_egui(style),
             overlay: OverlayStyle::from_egui(style),
+            cross_split_toggle: CrossSplitToggleStyle::from_egui(style),
             ..Self::default()
         }
     }

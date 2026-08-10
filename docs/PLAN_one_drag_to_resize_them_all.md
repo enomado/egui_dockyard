@@ -1,6 +1,7 @@
 # Plan: one drag to resize them all
 
-**Status: in progress.** Entry point for whoever picks this up — read this file, then
+**Status: done** — commit `a231e4d`, mirrored into the application's vendored copy. Entry point
+for whoever picks this up — read this file, then
 [src/widgets/dock_area/show/junction.rs](../src/widgets/dock_area/show/junction.rs).
 
 **Where it comes from.** Upstream PR [#155](https://github.com/anhosh/egui_dock/pull/155), "one
@@ -60,6 +61,42 @@ approach), plain click does nothing, cross keeps the pinwheel.
 * a plain click transposes nothing; ctrl+click still does;
 * everything the crossing suite already pins, unchanged, with its clicks now carrying ctrl.
 
+## What was checked, and how
+
+* The whole suite is green (181 tests), the new gestures pinned by six tests of their own.
+* Mutation-checked twice, because both rules are the kind a test can pass without: dropping the
+  tightest-delta coordination reddens `a_cross_dragged_past_one_dividers_limit_stays_one_line`,
+  and feeding `outer` a zero delta reddens both "moves all of its separators" tests.
+* The DST sweep's own positive control found the gesture change before any new test did — 62
+  toggle presses flipped nothing, because they were plain clicks. `Sim::click_holding` now holds
+  ctrl for that step.
+* Rendered and looked at, in a headless sway session: a scene with two tees and a cross on one
+  line. The three handles are drawn where the separators meet, and the two tees' stems point at
+  their own bands (mirror images of each other).
+
 ## Backlog found while doing this
 
-(filled in as the work goes)
+* **The sweep has no junction drag in its alphabet.** `Step::CrossToggle` presses the handle;
+  nothing drags it. The gesture that moves two or three fractions at once is exactly the shape
+  the sweep is good at judging (`BoundaryRule`, the commit counters, `validate()` after every
+  step) and it is currently unswept — the six unit tests are scenes someone chose.
+* **The handle count grew from crossings to all junctions, and `handle_room` is O(nodes) per
+  handle per frame** — it walks the whole surface breadth-first to find the nearest divider. It
+  was that before; what changed is how many handles there are. Worth a measure on a real
+  application layout (a few dozen panels) before assuming it is free.
+* **At the default 14 pt the icons are cramped.** The arms are 4 px with arrowheads on them, so
+  what reads at a glance is "three arms" versus "four arms" rather than "arrows". The shapes are
+  distinguishable and mirror correctly; whether they should be bigger is a style question and
+  `CrossSplitToggleStyle::size` already answers it.
+* **`CrossSplitToggleStyle` and `Style::cross_split_toggle` keep their names** though they now
+  govern both kinds of handle. Left alone deliberately: they are public and serialized, and the
+  rename buys nothing but churn. If the style is ever revised for another reason, rename then.
+* **A crossing whose parts cannot be re-nested ignores ctrl+click silently.** The handle is
+  there and drags fine; the transposition simply does not happen, with nothing on screen saying
+  why. It was invisible before (no handle at all), so this is not a regression, but it is now a
+  gesture that can fail quietly.
+* **A tee is detected from the ancestor that owns the line, and only from there.** That is
+  correct and cheap, and it means a junction on the *outer* edge of a band — where a divider
+  meets the dock's own border rather than another separator — has no handle. Nothing to drag
+  there, so this is a note rather than a gap; it is written down because "every junction has a
+  handle" is not quite what the code says.

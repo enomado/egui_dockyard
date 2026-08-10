@@ -11,10 +11,18 @@ use crate::{NodePath, Style, SurfaceIndex};
 /// happened to move. The two families in it (things that move, boundaries that resize) are not
 /// the same kind of thing, but a consumer asking "is the layout being edited" wants both.
 ///
-/// Only [`DragSubject::Junction`] lives here so far; the rest arrive with the gestures that own
-/// them. See `docs/PLAN_one_place_says_what_the_hand_holds.md`.
+/// The boundary gestures live here; the tab, the panels and the window arrive with the steps
+/// that fold them in. See `docs/PLAN_one_place_says_what_the_hand_holds.md`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum DragSubject {
+    /// One separator: the split whose ratio the drag is writing.
+    ///
+    /// The path and not the widget id, even though the id is what the gesture is *named* by
+    /// ([`DragInFlight::widget`]) and is derived from this path: the derivation only runs one
+    /// way — the id mixes in the enclosing `Ui`'s — so an id cannot say which split it moves.
+    /// What the drag writes to is a node, so a node is what the field remembers.
+    Separator { path: NodePath },
+
     /// A junction corner: the line the drag moves along, and the divider that ends on it.
     ///
     /// Remembered whole, and not bookkeeping for its own sake. The handles are read off the
@@ -53,13 +61,24 @@ pub(super) struct DragInFlight {
     /// them by this and not by a position in a list the drag is busy moving.
     pub widget: Id,
 
-    /// Whether any of it has actually moved yet.
+    /// Whether any of it has actually moved yet — the commit gate, for every gesture.
     ///
-    /// The same question [`State::separator_drag_start`] answers for a single divider, asked of
-    /// a gesture that may move two fractions at once. Remembering their starting values would
-    /// mean remembering a pair whose meaning depends on the subject; what the commit event needs
-    /// is only whether anything ever moved, and each frame of the drag already answers that for
-    /// itself.
+    /// It tells a real move from "grabbed and released with no effective motion" (a click while
+    /// the split is already clamped to its min/max, so the accumulated delta changes nothing),
+    /// and lets [`crate::DockEvent::LayoutCommitted`] be skipped in the latter case — otherwise a
+    /// consumer that diffs a layout snapshot gets a commit event with nothing to diff.
+    ///
+    /// Semantic note, inherited from the separator's own version of this flag: these are
+    /// conceptually two levels — (1) *interaction*, "the user touched the boundary" (always true
+    /// on release), and (2) *state change*, "the layout actually changed". They are merged into a
+    /// single `LayoutCommitted`, and this deliberately drops level (1) in favour of (2). If level
+    /// (1) is ever needed (telemetry, focus-on-grab), split it into a separate event rather than
+    /// removing the gate.
+    ///
+    /// A flag and not the starting ratio, which is what the separator kept before it folded in
+    /// here: a junction moves two fractions at once, so the starting *value* would be a pair
+    /// whose shape depends on the subject, while each frame of any drag already answers "did I
+    /// change anything" for itself — [`crate::DockArea::nudge_split`] returns exactly that.
     pub moved: bool,
 
     /// The pass this drag was last seen alive in — the frame the owning widget last reported it.
@@ -76,21 +95,6 @@ pub(super) struct State {
     pub last_hover_pos: Option<Pos2>,
     pub dnd: Option<DragDropState>,
     pub window_fade: Option<(f64, SurfaceIndex)>,
-    /// `(separator id, its `fraction` at `drag_started()`)`, kept until
-    /// `drag_stopped()`. Lets us tell a real move from "grabbed and released with
-    /// no effective motion" (a click while the split is already clamped to its
-    /// min/max, so the accumulated delta is zero) and skip `LayoutCommitted` in
-    /// the latter case.
-    ///
-    /// Semantic note: these are conceptually two levels — (1) *interaction*, "the
-    /// user touched the separator" (always fires on release), and (2) *state
-    /// change*, "the layout actually changed" (only when
-    /// `fraction_end != fraction_start`). They are currently merged into a single
-    /// `LayoutCommitted`, and this guard deliberately drops level (1) in favour of
-    /// (2): consumers that diff a layout snapshot get a commit event with nothing
-    /// to diff otherwise. If level (1) is ever needed (telemetry, focus-on-grab),
-    /// split it into a separate event rather than removing the guard.
-    pub separator_drag_start: Option<(Id, f32)>,
     /// What the hand is holding, if anything — see [`DragInFlight`].
     ///
     /// **Private on purpose, and that is the whole point of the field.** The rest of the crate
@@ -113,7 +117,6 @@ impl State {
             last_hover_pos: None,
             dnd: None,
             window_fade: None,
-            separator_drag_start: None,
             drag: None,
         })
     }

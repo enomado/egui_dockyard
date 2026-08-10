@@ -1,6 +1,6 @@
 # Plan: one place says what the hand holds
 
-**Status: step 1 landed, steps 2–6 open.** Asked for by Стас on 2026-08-10, immediately after
+**Status: steps 1–2 landed, steps 3–6 open.** Asked for by Стас on 2026-08-10, immediately after
 `JunctionDrag` landed (`f2693f7`) — that struct is one corner of this and is explicitly *not*
 the shape wanted. Entry point for whoever picks it up: this file, then
 [src/widgets/dock_area/state.rs](../src/widgets/dock_area/state.rs), then the hold bookkeeping in
@@ -169,8 +169,26 @@ Smallest blast radius first, and each step is committable on its own:
      answers "is anything being dragged" and is the one the stand-down guard uses.
    Measured, not assumed: mutating `in_flight()` to `None` reddens
    `seeded_scenarios_keep_the_dock_well_formed`, so the sweep does reach the new path.
-2. **The separator**, folding `separator_drag_start` in. Its `moved` question becomes
-   `DragInFlight::moved`, which is where the duplication between the two gestures disappears.
+2. ~~**The separator**, folding `separator_drag_start` in~~ — **done.** The field is gone; the
+   gesture is `DragSubject::Separator { path }` plus the id it is named by, and the commit gate
+   is `DragInFlight::moved`, written by the same `nudge_split` answer the junction writes it with.
+   `fraction_at_start` did not survive: the starting *ratio* is a per-subject shape (a junction
+   moves two), while "did anything change" is one question every gesture answers per frame.
+   One thing found by doing it, and it is the reason the step was not a pure deletion:
+   * **The stand-down guard had to learn to read the subject.** `draw_one_handle` stood every
+     other handle down while *anything* was in flight, which was the same statement as "while
+     another handle is" only for as long as the field held junctions alone. It is not: a crossing
+     senses clicks only, so the press that offers its toggle leaves the drag to the divider
+     underneath, and the two are live at once **by design**. Four toggle tests reddened by name
+     (`the_toggle_catches_a_press_that_misses_the_drawn_square` and friends) — the handle took its
+     own button off the screen the moment it was pressed. Now the guard matches on
+     `DragSubject::Junction`. Worth carrying into step 3: every reader of the field that was
+     written when it held one kind of subject is a place that says "a gesture" and means "*my*
+     kind of gesture".
+   Measured, not assumed — both mutations the plan asks for, run on the sweep:
+   commit unconditionally on release (`is_some()` for `is_some_and(moved)`) reddens three by name,
+   `a_separator_grabbed_and_released_commits_nothing` among them; never marking `moved` reddens
+   `dragging_a_separator_moves_the_boundary_and_commits_once` and the sweep.
 3. **The tab**, which is the big one: `dnd` outlives frames, carries the destination and the
    overlay's lock, and every drop path reads it. Split subject from destination here.
 4. **`drag_start`**, which is a press that has not become a drag — decide whether that is a
@@ -213,11 +231,18 @@ Smallest blast radius first, and each step is committable on its own:
   `window_fade` and `drag_start` — the tab gesture's three — and is called where a drag is
   abandoned rather than released. Once the tab is in the field, "abandoned" and `end_drag` are the
   same question asked twice, and the one that forgets is the one that leaves a leftover behind.
-* **`separator_drag_start: Option<(Id, f32)>` already carries the widget id**, which is
-  `DragInFlight::widget`. Step 2 is therefore mostly deletion: the pair becomes
-  `DragSubject::Separator { path, fraction_at_start }` plus the id the gesture already has. Worth
-  checking whether the separator's id and its `NodePath` are derivable from each other — if they
-  are, only one of the two belongs in the field.
+* ~~**`separator_drag_start` already carries the widget id**~~ — settled in step 2. The id and the
+  path are derivable one way only (`ui.id().with((path.node, "separator"))` mixes in the enclosing
+  `Ui`'s), so both are kept: the id names the gesture, the path names what it writes to.
+
+* **The junction handle is painted over everything, including menus** (Стас, 2026-08-10 — a bug,
+  not a preference). `draw_one_handle` puts it in `LayerId::new(Order::Foreground, handle_id)`
+  (junction.rs:805), which is the order egui's own context menus and popups use, and a fresh layer
+  in that order goes on top of them. So a menu opened over a separator has a square sitting on it.
+  The handle only needs to be above the dock's own content — `Order::Middle` is probably where it
+  belongs — but the hit test travels with the layer, so check what a press over the menu reaches
+  before and after: a handle that is drawn under the menu and still *catches* the press is the
+  same bug with the paint order fixed.
 * **`DragSubject` is `pub(super)` for now.** The plan publishes it in step 6; making it public
   before there is an accessor would be a public type nobody can obtain. Named here so the step
   that publishes it does not have to rediscover that it is not yet public.

@@ -789,7 +789,15 @@ impl<Tab> DockArea<'_, Tab> {
         // the gesture the moment the junction under the pointer is re-detected as a different
         // one. `pass` is what keeps a drag whose junction died from holding the rest down for
         // good — see [`crate::dock_area::state::DragInFlight::pass`].
-        let dragged_elsewhere = state.in_flight_at(pass).is_some();
+        //
+        // A *handle's* drag, and not merely "something is in flight": since the separator folded
+        // into the same field, the subject has to be read, not just its presence. A crossing
+        // senses clicks only, so the press that offers its toggle leaves the drag to the divider
+        // underneath — the two are live at once, by design, and a handle that stood down for it
+        // would take its own button off the screen the moment it was pressed.
+        let dragged_elsewhere = state
+            .in_flight_at(pass)
+            .is_some_and(|drag| matches!(drag.subject, DragSubject::Junction { .. }));
 
         // Keyed by the dividers that meet here rather than by their position in the band: an id
         // has to survive a neighbouring divider being dragged past, and an index does not. The

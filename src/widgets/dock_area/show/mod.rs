@@ -9,7 +9,7 @@ use super::{
     DockAreaResponse,
     drag_and_drop::{DragData, HoverData},
     events::DockEvent,
-    state::State,
+    state::{DragSubject, State},
     tab_removal::TabRemoval,
 };
 use crate::NodePath;
@@ -712,6 +712,9 @@ impl<Tab> DockArea<'_, Tab> {
         let separator_style = style.separator.clone();
         let toggle_style = style.cross_split_toggle.clone();
         let pixels_per_point = ui.ctx().pixels_per_point();
+        // The frame this pass is, which is how a gesture in the field is told alive from stale —
+        // see `DragInFlight::pass`.
+        let pass = ui.ctx().cumulative_pass_nr();
 
         // Where the divider is *this frame* — one derivation, shared with everything else that
         // needs to know (see `separator_rect`). The collapsed cases it answers `None` for have
@@ -726,13 +729,13 @@ impl<Tab> DockArea<'_, Tab> {
                 [Horizontal]  [x];
                 [Vertical]    [y];
             ]
-            if let Node::orientation(split) = &self.dock_state[path.surface][path.node] {
-                // The one thing read off the node here, and the borrow of the tree ends with it:
-                // every write below goes through `nudge_split`, which takes `&mut self`. What
-                // the gesture answers to — the band this frame's geometry can honour — lives
-                // there too, so the divider drawn, the rectangle it is grabbed by and the ratio
-                // a drag writes all still name one line (see `SeparatorBand`).
-                let fraction_at_entry = split.fraction;
+            if let Node::orientation(_) = &self.dock_state[path.surface][path.node] {
+                // Which axis this split divides, and nothing else is read off the node: the
+                // borrow of the tree ends here, because every write below goes through
+                // `nudge_split`, which takes `&mut self`. What the gesture answers to — the band
+                // this frame's geometry can honour — lives there too, so the divider drawn, the
+                // rectangle it is grabbed by and the ratio a drag writes all name one line
+                // (see `SeparatorBand`).
                 let separator = drawn;
 
                 let mut expand = Vec2::ZERO;
@@ -798,15 +801,13 @@ impl<Tab> DockArea<'_, Tab> {
                 // Arrow-key nudges (`arrow_key_offset.is_some()`) are atomic
                 // per keypress, so each one is a finalised event right away.
                 //
-                // Remember the starting fraction in explicit state (see
-                // `State::separator_drag_start`): on `drag_stopped` it lets us
-                // tell a real move from "grabbed and released with no effective
-                // motion" (clicking a separator that is already clamped) and
-                // skip `LayoutCommitted` in the latter case — otherwise
-                // consumers that diff a layout snapshot receive a commit event
-                // with no mutation behind it.
+                // What the hand holds is named once, in the one place that
+                // remembers it (`State::begin_drag`), and the commit gate below
+                // reads that gesture's `moved` — see `DragInFlight::moved` for
+                // what it is for and why it is a flag rather than the starting
+                // ratio.
                 if response.drag_started() {
-                    state.separator_drag_start = Some((response.id, fraction_at_entry));
+                    state.begin_drag(response.id, DragSubject::Separator { path }, pass);
                 }
 
                 // `drag_delta()` is zero on any frame the separator is not being dragged, so a
@@ -820,25 +821,30 @@ impl<Tab> DockArea<'_, Tab> {
                     if is_arrow {
                         self.events.push(DockEvent::LayoutCommitted);
                     } else {
+                        // The drag wrote something, so the gesture holding this divider is the
+                        // one that owes a commit on release. A keyboard nudge is not a gesture
+                        // and holds nothing — it commits on the spot, above.
+                        state.mark_drag_moved();
                         self.events.push(DockEvent::SeparatorDragging);
                     }
                 }
 
+                if response.dragged() {
+                    // Alive this frame, so a stale entry can be told from a live one — the same
+                    // reporting a junction handle does, for the same reason.
+                    state.keep_drag_alive(response.id, pass);
+                }
+
                 // egui only flips `drag_stopped` after `drag_started`, so a
-                // simple click without motion does not reach this branch.
-                // Additionally check that the fraction really changed since
-                // `drag_started`: a grab-and-release with no effective motion
-                // would otherwise emit a commit event with no mutation behind
-                // it, which breaks snapshot-diffing consumers.
-                if response.drag_stopped() {
-                    let start = state
-                        .separator_drag_start
-                        .take_if(|(id, _)| *id == response.id)
-                        .map(|(_, f)| f);
-                    let moved = start.is_none_or(|f| f != self.split_fraction(path));
-                    if moved {
-                        self.events.push(DockEvent::LayoutCommitted);
-                    }
+                // simple click without motion does not reach this branch. What
+                // decides the commit is whether the gesture ever moved
+                // anything: a grab-and-release with no effective motion would
+                // otherwise emit a commit event with no mutation behind it,
+                // which breaks snapshot-diffing consumers.
+                if response.drag_stopped()
+                    && state.end_drag(response.id).is_some_and(|drag| drag.moved)
+                {
+                    self.events.push(DockEvent::LayoutCommitted);
                 }
 
                 if response.double_clicked() && self.split_fraction(path) != 0.5 {

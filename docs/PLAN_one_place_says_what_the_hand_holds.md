@@ -206,3 +206,21 @@ Smallest blast radius first, and each step is committable on its own:
 * **Do not let this become a rename.** If the four fields simply move inside one struct and every
   call site keeps writing its own, nothing is gained: the chokepoint and the loud failure are the
   refactor. Everything else is furniture.
+
+## Backlog, found while doing step 1
+
+* **`State::reset_drag` does not touch `drag`, and by step 3 it will have to.** It clears `dnd`,
+  `window_fade` and `drag_start` — the tab gesture's three — and is called where a drag is
+  abandoned rather than released. Once the tab is in the field, "abandoned" and `end_drag` are the
+  same question asked twice, and the one that forgets is the one that leaves a leftover behind.
+* **`separator_drag_start: Option<(Id, f32)>` already carries the widget id**, which is
+  `DragInFlight::widget`. Step 2 is therefore mostly deletion: the pair becomes
+  `DragSubject::Separator { path, fraction_at_start }` plus the id the gesture already has. Worth
+  checking whether the separator's id and its `NodePath` are derivable from each other — if they
+  are, only one of the two belongs in the field.
+* **`DragSubject` is `pub(super)` for now.** The plan publishes it in step 6; making it public
+  before there is an accessor would be a public type nobody can obtain. Named here so the step
+  that publishes it does not have to rediscover that it is not yet public.
+* **The stand-down guard reads liveness with an off-by-one that is now in two places** —
+  `in_flight_at`'s `pass + 1 >= now` and the per-handle grip's `held_on + 1 >= pass` in
+  `draw_one_handle`. Same rule, same reason, two copies; if a third arrives it wants a name.

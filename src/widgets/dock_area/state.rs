@@ -71,6 +71,20 @@ pub(super) struct DragInFlight {
     /// them by this and not by a position in a list the drag is busy moving.
     pub widget: Id,
 
+    /// Where the press that started this landed — the origin every delta is measured from.
+    ///
+    /// A gesture's field and not a tab's, even though the tab is the only subject that reads it
+    /// today: "where did the hand close" is the same question whatever it closed on, and egui
+    /// answers it for a separator and a junction at their `drag_started` exactly as it does for
+    /// a tab at its first dragged frame. Answering it only where it is currently consumed is the
+    /// mistake this file keeps finding — a field written for one kind of subject and then read as
+    /// if it spoke for the gesture.
+    ///
+    /// This is what `State::drag_start` was, and the name it had was the misreading: nothing ever
+    /// wrote it before egui had decided a drag, so it was never "a press that has not become a
+    /// drag" — it was this drag's beginning, kept in a field that could not say whose it was.
+    pub started_at: Pos2,
+
     /// Whether any of it has actually moved yet — the commit gate, for every gesture.
     ///
     /// It tells a real move from "grabbed and released with no effective motion" (a click while
@@ -108,7 +122,6 @@ pub(super) struct DragInFlight {
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct State {
-    pub drag_start: Option<Pos2>,
     pub last_hover_pos: Option<Pos2>,
     pub dnd: Option<DragDropState>,
     pub window_fade: Option<(f64, SurfaceIndex)>,
@@ -130,7 +143,6 @@ impl State {
     #[inline(always)]
     pub(super) fn load(ctx: &Context, id: Id) -> Self {
         ctx.data_mut(|d| d.get_temp(id)).unwrap_or(Self {
-            drag_start: None,
             last_hover_pos: None,
             dnd: None,
             window_fade: None,
@@ -154,7 +166,13 @@ impl State {
     /// A *stale* entry is not that bug and is not reported as one: a gesture whose subject left
     /// the tree never gets its `drag_stopped`, so what it leaves behind is a leftover, and it is
     /// dropped here. See [`DragInFlight::pass`].
-    pub(super) fn begin_drag(&mut self, widget: Id, subject: DragSubject, pass: u64) {
+    pub(super) fn begin_drag(
+        &mut self,
+        widget: Id,
+        subject: DragSubject,
+        started_at: Pos2,
+        pass: u64,
+    ) {
         if self.drag.is_some_and(|drag| drag.pass + 1 < pass) {
             self.drag = None;
         }
@@ -166,6 +184,7 @@ impl State {
         self.drag = Some(DragInFlight {
             subject,
             widget,
+            started_at,
             moved: false,
             pass,
         });
@@ -244,7 +263,6 @@ impl State {
     pub(super) fn reset_drag(&mut self) {
         self.dnd = None;
         self.window_fade = None;
-        self.drag_start = None;
         self.drag
             .take_if(|drag| matches!(drag.subject, DragSubject::Tab(_)));
     }
@@ -285,7 +303,7 @@ mod tests {
     use super::super::drag_and_drop::DragSource;
     use super::{DragSubject, State};
     use crate::{DockState, NodeId, NodePath, SurfaceIndex, TabIndex};
-    use egui::Id;
+    use egui::{Id, Pos2, pos2};
 
     /// A tab identity has no public constructor — it is handed out by the leaf that owns it —
     /// so the one in the field is the one a real dock would carry.
@@ -298,6 +316,12 @@ mod tests {
             node: path.node,
             tab: dock.leaf(path).unwrap().tab_id_at(TabIndex(0)).unwrap(),
         })
+    }
+
+    /// Where the press landed. Nothing here reads it back — it is the gesture's origin, and the
+    /// only consumer is the tab's pull-out delta — so one position serves for every grab.
+    fn grabbed_at() -> Pos2 {
+        pos2(20.0, 20.0)
     }
 
     fn a_junction() -> DragSubject {
@@ -314,9 +338,9 @@ mod tests {
     #[should_panic(expected = "still in flight")]
     fn a_second_gesture_while_one_is_live_is_a_panic() {
         let mut state = State::default();
-        state.begin_drag(Id::new("first"), a_junction(), 7);
+        state.begin_drag(Id::new("first"), a_junction(), grabbed_at(), 7);
         // The pass the live one was last seen in, and the one after it: both are "alive".
-        state.begin_drag(Id::new("second"), a_junction(), 8);
+        state.begin_drag(Id::new("second"), a_junction(), grabbed_at(), 8);
     }
 
     /// A gesture whose subject left the tree never gets its `drag_stopped`, so what it leaves in
@@ -328,9 +352,9 @@ mod tests {
     #[test]
     fn a_leftover_gesture_is_not_a_second_gesture() {
         let mut state = State::default();
-        state.begin_drag(Id::new("first"), a_junction(), 7);
+        state.begin_drag(Id::new("first"), a_junction(), grabbed_at(), 7);
         assert!(state.in_flight_at(9).is_none(), "two passes on: stale");
-        state.begin_drag(Id::new("second"), a_junction(), 9);
+        state.begin_drag(Id::new("second"), a_junction(), grabbed_at(), 9);
         assert_eq!(state.in_flight().unwrap().widget, Id::new("second"));
     }
 
@@ -339,7 +363,7 @@ mod tests {
     #[test]
     fn only_the_widget_that_began_the_gesture_ends_it() {
         let mut state = State::default();
-        state.begin_drag(Id::new("mine"), a_junction(), 1);
+        state.begin_drag(Id::new("mine"), a_junction(), grabbed_at(), 1);
         state.mark_drag_moved();
         assert!(state.end_drag(Id::new("theirs")).is_none());
         assert!(state.in_flight().is_some(), "left alone, not taken");
@@ -358,12 +382,12 @@ mod tests {
     #[test]
     fn a_release_ends_the_carried_tab_and_leaves_a_boundary_alone() {
         let mut state = State::default();
-        state.begin_drag(Id::new("a tab"), a_tab(), 1);
+        state.begin_drag(Id::new("a tab"), a_tab(), grabbed_at(), 1);
         assert!(state.carried_tab().is_some());
         state.reset_drag();
         assert!(state.in_flight().is_none(), "the hand let the tab go");
 
-        state.begin_drag(Id::new("a divider"), a_junction(), 2);
+        state.begin_drag(Id::new("a divider"), a_junction(), grabbed_at(), 2);
         assert!(state.carried_tab().is_none(), "a boundary is not a tab");
         state.reset_drag();
         assert!(

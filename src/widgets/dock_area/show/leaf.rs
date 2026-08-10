@@ -322,8 +322,12 @@ impl<Tab> DockArea<'_, Tab> {
                 let pass = tabs_ui.ctx().cumulative_pass_nr();
                 if state.in_flight().is_some_and(|drag| drag.widget == id) {
                     state.keep_drag_alive(id, pass);
-                } else {
-                    state.begin_drag(id, subject, pass);
+                } else if let Some(started_at) = tabs_ui.ctx().pointer_interact_pos() {
+                    // Named on the first dragged frame that has a pointer position to name it
+                    // *from*, which is what `drag_start`'s `get_or_insert` amounted to: a gesture
+                    // with no origin has no delta to measure, so there is nothing for the frame
+                    // below to do either way. Both halves therefore appear together or not at all.
+                    state.begin_drag(id, subject, started_at, pass);
                 }
             }
 
@@ -367,7 +371,12 @@ impl<Tab> DockArea<'_, Tab> {
                     tabs_ui.interact(response.rect, id.with("dragged"), Sense::click_and_drag());
 
                 if let Some(pointer_pos) = tabs_ui.ctx().pointer_interact_pos() {
-                    let start = *state.drag_start.get_or_insert(pointer_pos);
+                    // The gesture was named above, off this same position — the one branch that
+                    // does not name it is the one this `if let` also skips.
+                    let start = state
+                        .in_flight()
+                        .expect("the tab in the hand was named on the frame it was grabbed")
+                        .started_at;
                     let delta = pointer_pos - start;
                     if delta.x.abs() > 30.0 || delta.y.abs() > 6.0 {
                         // Past the pull-out threshold: the tab now follows the pointer and a drop
@@ -487,7 +496,7 @@ impl<Tab> DockArea<'_, Tab> {
                     // Use response.rect.contains instead of
                     // response.hovered as the dragged tab covers
                     // the underlying tab
-                    if state.drag_start.is_some() && response.rect.contains(pos) {
+                    if state.carried_tab().is_some() && response.rect.contains(pos) {
                         self.tab_hover_rect = Some((response.rect, tab_index));
                     }
                 }
@@ -1363,7 +1372,8 @@ impl<Tab> DockArea<'_, Tab> {
 
             // if the dragged tab isn't allowed in a window,
             // it's unnecessary to change the hover state
-            let is_dragged_valid = match state.carried_tab() {
+            let carried = state.carried_tab();
+            let is_dragged_valid = match carried {
                 Some(src) => match src.resolve(self.dock_state) {
                     Some(src_path) => {
                         let leaf = self.dock_state.leaf_mut(src_path.node_path()).unwrap();
@@ -1379,7 +1389,7 @@ impl<Tab> DockArea<'_, Tab> {
 
             // Use rect.contains instead of response.hovered as the dragged tab covers
             // the underlying responses.
-            if state.drag_start.is_some() && rect.contains(pointer) && is_dragged_valid {
+            if carried.is_some() && rect.contains(pointer) && is_dragged_valid {
                 let on_title_bar = tabbar_rect.contains(pointer);
                 let (dst, tab) = {
                     match self.tab_hover_rect {

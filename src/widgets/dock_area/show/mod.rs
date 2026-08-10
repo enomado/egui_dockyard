@@ -820,7 +820,16 @@ impl<Tab> DockArea<'_, Tab> {
                 // what it is for and why it is a flag rather than the starting
                 // ratio.
                 if response.drag_started() {
-                    state.begin_drag(response.id, DragSubject::Separator { path }, pass);
+                    state.begin_drag(
+                        response.id,
+                        DragSubject::Separator { path },
+                        // egui reports where the press landed on the frame it decides a drag —
+                        // it is what `drag_started()` is derived from.
+                        response
+                            .interact_pointer_pos()
+                            .expect("a drag that started was pressed somewhere"),
+                        pass,
+                    );
                 }
 
                 // `drag_delta()` is zero on any frame the separator is not being dragged, so a

@@ -913,6 +913,9 @@ impl<Tab> DockArea<'_, Tab> {
                         .next()
                         .expect("every junction is made of at least one divider"),
                 },
+                response
+                    .interact_pointer_pos()
+                    .expect("a drag that started was pressed somewhere"),
                 pass,
             );
         }

@@ -1,6 +1,6 @@
 # Plan: one place says what the hand holds
 
-**Status: steps 1–3 landed, steps 4–6 open.** Asked for by Стас on 2026-08-10, immediately after
+**Status: steps 1–4 landed, steps 5–6 open.** Asked for by Стас on 2026-08-10, immediately after
 `JunctionDrag` landed (`f2693f7`) — that struct is one corner of this and is explicitly *not*
 the shape wanted. Entry point for whoever picks it up: this file, then
 [src/widgets/dock_area/state.rs](../src/widgets/dock_area/state.rs), then the hold bookkeeping in
@@ -220,8 +220,29 @@ Smallest blast radius first, and each step is committable on its own:
    the subject at the top of the pass (`carried` forced to `None`) → `drag_complaint` fires at
    seed 2 — "egui says `Some(...)`, the dock's own state resolves to `None`"; `reset_drag`
    forgetting the field entirely → `seeded_scenarios_keep_the_dock_well_formed`.
-4. **`drag_start`**, which is a press that has not become a drag — decide whether that is a
-   `DragInFlight` with `moved: false` or a state before one.
+4. ~~**`drag_start`**, which is a press that has not become a drag~~ — **done**, and the question
+   this step was written to settle turned out to be built on a wrong premise. `drag_start` was
+   *not* a press before a drag: nothing ever wrote it except the tab's own dragged branch, on the
+   first frame egui had already decided a drag — the same frame `begin_drag` runs. So it was
+   neither of the two options offered here; it was this gesture's origin, kept in a field that
+   could not say whose it was. It is `DragInFlight::started_at`, and `State::drag_start` is gone.
+   Three things worth knowing:
+   * **`started_at` is the gesture's, not the tab's**, though the tab is the only subject that
+     reads it. "Where did the hand close" has an answer for every gesture — egui gives it at
+     `drag_started` for a separator and a junction as readily as at the first dragged frame for a
+     tab — and answering it only where it is currently consumed is the "*my* kind of gesture"
+     mistake steps 2 and 3 both had to undo. Both boundary sites take it from
+     `response.interact_pointer_pos()`, which egui guarantees on the frame a drag starts.
+   * **The tab is named on the first dragged frame that has a pointer position to name it from.**
+     `get_or_insert` said exactly that before, and the two halves now appear together or not at
+     all: a gesture with no origin has no delta to measure, so the frame below has nothing to do
+     either way.
+   * **The two `drag_start.is_some()` readers meant "a tab is in flight"** and now ask
+     `carried_tab()`. Measured, and the measurement is the backlog item below: neither of them is
+     witnessed by anything — the real gate is downstream, on `drag_data`.
+   Measured, not assumed: reading the origin as the *current* pointer (delta always zero, so the
+   pull-out never happens) reddens eleven by name, `seeded_scenarios_keep_the_dock_well_formed`
+   and both `ids.rs` doctests among them.
 5. **The window**, if question 1 has an honest answer.
 6. **Publish, and delete the harness's private bookkeeping**: `Sim::hold`, `Sim::junction_hold`
    and the `dragged_id()` exemption go, replaced by asking the dock.
@@ -279,6 +300,18 @@ Smallest blast radius first, and each step is committable on its own:
   path are derivable one way only (`ui.id().with((path.node, "separator"))` mixes in the enclosing
   `Ui`'s), so both are kept: the id names the gesture, the path names what it writes to.
 
+* **The two "is a tab in flight" gates in `leaf.rs` are unwitnessed, and probably redundant**
+  (found while doing step 4). `carried_tab().is_some()` guards setting `tab_hover_rect`
+  (leaf.rs:499) and publishing `hover_data` (leaf.rs:1392) — both were `drag_start.is_some()`
+  before. Measured: removing *either* guard reddens nothing in the whole suite. The reason looks
+  structural rather than a hole in the sweep — what those two write is only ever consumed through
+  `drag_data`, which the top of the pass already gates on `carried.is_some() && pulled_out`
+  (show/mod.rs:121), so a hover destination published with an empty hand is read back and dropped
+  the next frame. If that is right they are a third expression of a fact the field already states,
+  and deleting them is the same collapse step 3 did for the pull-out threshold. It was left in
+  place here because step 4 is a port, not a deletion: check the consumers first, and if they are
+  really redundant, delete them *with* a gate that would have caught it — otherwise the next
+  person measures the same nothing and concludes the same maybe.
 * **The junction handle is painted over everything, including menus** (Стас, 2026-08-10 — a bug,
   not a preference). `draw_one_handle` puts it in `LayerId::new(Order::Foreground, handle_id)`
   (junction.rs:805), which is the order egui's own context menus and popups use, and a fresh layer

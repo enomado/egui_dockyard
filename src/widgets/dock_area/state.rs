@@ -11,10 +11,14 @@ use crate::{NodePath, Style, SurfaceIndex};
 /// happened to move. The two families in it (things that move, boundaries that resize) are not
 /// the same kind of thing, but a consumer asking "is the layout being edited" wants both.
 ///
-/// The boundary gestures live here; the tab, the panels and the window arrive with the steps
-/// that fold them in. See `docs/PLAN_one_place_says_what_the_hand_holds.md`.
+/// Every gesture the dock owns today is a variant; a floating window is moved by
+/// [`egui::Window`]'s own title drag, which the dock never sees, and so is deliberately absent
+/// rather than present and never set. See `docs/PLAN_one_place_says_what_the_hand_holds.md`.
+///
+/// Read from outside a frame with [`drag_in_flight`](crate::drag_in_flight), or at the end of
+/// one from [`DockAreaResponse::dragging`](crate::dock_area::DockAreaResponse::dragging).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) enum DragSubject {
+pub enum DragSubject {
     /// One tab, carried by the hand — addressed by **identity**, never by position.
     ///
     /// The payload is [`DragSource`] itself and not a fresh triple of the same three coordinates:
@@ -31,7 +35,10 @@ pub(super) enum DragSubject {
     /// ([`DragInFlight::widget`]) and is derived from this path: the derivation only runs one
     /// way — the id mixes in the enclosing `Ui`'s — so an id cannot say which split it moves.
     /// What the drag writes to is a node, so a node is what the field remembers.
-    Separator { path: NodePath },
+    Separator {
+        /// The split whose fraction this drag writes.
+        path: NodePath,
+    },
 
     /// A junction corner: the line the drag moves along, and the divider that ends on it.
     ///
@@ -59,8 +66,24 @@ pub(super) enum DragSubject {
 }
 
 /// The gesture around the subject — the part that is the same whatever is being held.
+///
+/// # Why the whole gesture is published, and not the subject alone
+///
+/// Testability is the reason the field exists at all, and an outside oracle asking "what is the
+/// dock dragging" has a second holder to compare the answer against: egui's own
+/// [`Context::dragged_id`]. [`widget`](Self::widget) is what makes that comparison possible by
+/// name — before it was published, this crate's own frame sweep had to *exempt* every drag whose
+/// id it could not build (a junction handle's id is mixed out of the surface's `Ui`, not out of
+/// [`DockArea::id`](crate::DockArea::id)), and an exemption is a hole in exactly the property it
+/// guards.
+///
+/// [`moved`](Self::moved) and [`pass`](Self::pass) come along because they are the same gesture:
+/// a consumer asking "is the layout being edited right now" wants the first, and a reader between
+/// frames wants the second to tell a live gesture from one whose subject left the tree. Note that
+/// an oracle which *judges* a commit must not read `moved` — the dock's own answer cannot witness
+/// the dock's own event.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct DragInFlight {
+pub struct DragInFlight {
     /// What is in the hand. See [`DragSubject`].
     pub subject: DragSubject,
 
@@ -89,7 +112,8 @@ pub(super) struct DragInFlight {
     ///
     /// It tells a real move from "grabbed and released with no effective motion" (a click while
     /// the split is already clamped to its min/max, so the accumulated delta changes nothing),
-    /// and lets [`crate::DockEvent::LayoutCommitted`] be skipped in the latter case — otherwise a
+    /// and lets [`DockEvent::LayoutCommitted`](crate::dock_area::DockEvent::LayoutCommitted) be
+    /// skipped in the latter case — otherwise a
     /// consumer that diffs a layout snapshot gets a commit event with nothing to diff.
     ///
     /// Semantic note, inherited from the separator's own version of this flag: these are
@@ -102,7 +126,7 @@ pub(super) struct DragInFlight {
     /// A flag and not the starting ratio, which is what the separator kept before it folded in
     /// here: a junction moves two fractions at once, so the starting *value* would be a pair
     /// whose shape depends on the subject, while each frame of any drag already answers "did I
-    /// change anything" for itself — [`crate::DockArea::nudge_split`] returns exactly that.
+    /// change anything" for itself — the dock's own `nudge_split` returns exactly that.
     ///
     /// For a [tab](DragSubject::Tab) the same question is asked of the *pointer* rather than of
     /// the tree: a carried tab writes nothing until it is dropped, so what this records is that

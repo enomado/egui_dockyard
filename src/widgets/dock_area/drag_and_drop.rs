@@ -38,16 +38,24 @@ pub(super) struct HoverData {
 /// [`resolve`](Self::resolve) answers "where is it now", and answers `None` exactly when the
 /// tab is gone — which is the one thing the drag has to notice, since a drag of a tab that no
 /// longer exists is over.
+///
+/// Public because a carried tab is published: it is what
+/// [`DragSubject::Tab`](super::DragSubject::Tab) holds, and a reader that got the address but not
+/// the operation over it would have to write [`resolve`](Self::resolve) again at its own call
+/// site — which is the second place this type exists to remove.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct DragSource {
+pub struct DragSource {
+    /// The surface the tab was picked up from.
     pub surface: SurfaceIndex,
+    /// The leaf it came out of. An identity, so an edit of the surface does not rename it.
     pub node: NodeId,
+    /// The tab itself, by the identity its leaf handed out — never by a position in the bar.
     pub tab: TabId,
 }
 
 impl DragSource {
     /// Where the dragged tab sits now, or `None` if it has left the tree.
-    pub(super) fn resolve<Tab>(&self, dock_state: &DockState<Tab>) -> Option<TabPath> {
+    pub fn resolve<Tab>(&self, dock_state: &DockState<Tab>) -> Option<TabPath> {
         let leaf = dock_state
             .leaf(NodePath::new(self.surface, self.node))
             .ok()?;
@@ -55,7 +63,8 @@ impl DragSource {
         Some(TabPath::new(self.surface, self.node, tab))
     }
 
-    pub(super) fn node_path(&self) -> NodePath {
+    /// The leaf the tab was picked up from, as one address.
+    pub fn node_path(&self) -> NodePath {
         NodePath::new(self.surface, self.node)
     }
 }

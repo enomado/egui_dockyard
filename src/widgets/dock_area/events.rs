@@ -7,6 +7,8 @@
 //! [`DockAreaResponse::layout_changed`] / [`DockAreaResponse::layout_committed`]
 //! helpers instead of pattern-matching the enum directly.
 
+use super::state::DragInFlight;
+
 /// A single layout-affecting event observed during one render pass of a
 /// [`DockArea`](super::DockArea).
 ///
@@ -78,6 +80,19 @@ impl DockEvent {
 pub struct DockAreaResponse {
     /// Events emitted during this frame, in the order they occurred.
     pub events: Vec<DockEvent>,
+
+    /// What the dock's hand was holding when the pass ended — one gesture, naming its subject,
+    /// or `None` if nothing is being dragged.
+    ///
+    /// The other half of "what happened this frame", and the half the events cannot answer:
+    /// [`DockEvent::SeparatorDragging`] says a gesture is running but names no subject and is not
+    /// emitted for a carried tab at all, so a consumer that wants "is the layout being edited
+    /// right now, and what by" had to infer it from which fractions moved. This is the dock's own
+    /// answer, from the one field that holds it.
+    ///
+    /// Same value [`drag_in_flight`](crate::drag_in_flight) reads out of `Context` memory between
+    /// frames; this is the form for a consumer that already has the response in hand.
+    pub dragging: Option<DragInFlight>,
 }
 
 impl DockAreaResponse {

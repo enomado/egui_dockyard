@@ -32,7 +32,7 @@
 
 use egui::{Context, Id};
 
-use super::state::State;
+use super::state::{DragInFlight, State};
 use crate::{DockState, NodePath, TabId, TabPath};
 
 /// Id of the widget one tab is drawn as, in the dock area with id `dock_area_id`.
@@ -331,6 +331,29 @@ pub fn drag_hover_node(ctx: &Context, dock_area_id: Id) -> Option<NodePath> {
         .dst
         .node_address();
     Some(NodePath::new(surface, node?))
+}
+
+/// What the dock's hand is holding right now: the one gesture in flight, or `None`.
+///
+/// Reads the same per-frame state the dock keeps in `Context` memory, the way [`dragged_tab`] and
+/// [`drag_hover_node`] do, and it is the general form of the first of them: a carried tab is one
+/// [`DragSubject`](crate::DragSubject), a separator and a junction corner are the others. Where [`dragged_tab`]
+/// resolves an identity against a tree and merges "stale" with "none", this hands back the
+/// gesture as the dock holds it and resolves nothing — the caller decides what to ask of it.
+///
+/// The liveness question is answered here and not left to the caller, unlike
+/// [`drag_hover_node`]: a gesture whose subject stopped existing never gets its `drag_stopped`,
+/// so what it leaves in the field is a leftover the dock itself no longer acts on, and reporting
+/// it would name a gesture nobody is making. See [`DragInFlight::pass`].
+///
+/// Same answer as [`DockAreaResponse::dragging`](crate::dock_area::DockAreaResponse::dragging),
+/// asked between frames rather than at the end of one — the response is the convenient form for a
+/// consumer already reading events; this is the one for an outside driver (automation,
+/// diagnostics, this crate's own frame sweep) that has no response in hand.
+pub fn drag_in_flight(ctx: &Context, dock_area_id: Id) -> Option<DragInFlight> {
+    State::load(ctx, dock_area_id)
+        .in_flight_at(ctx.cumulative_pass_nr())
+        .copied()
 }
 
 #[cfg(test)]

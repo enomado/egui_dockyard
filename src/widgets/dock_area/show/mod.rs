@@ -312,6 +312,11 @@ impl<Tab> DockArea<'_, Tab> {
             }
         }
 
+        // Read before the state is stored away, and read through the liveness filter for the same
+        // reason `drag_in_flight` does: a gesture whose subject left the tree never gets its
+        // `drag_stopped`, and what it leaves behind is a leftover the dock itself no longer acts
+        // on — announcing it would name a gesture nobody is making.
+        let dragging = state.in_flight_at(ui.ctx().cumulative_pass_nr()).copied();
         state.store(ui.ctx(), self.id);
         // Drop geometry of nodes that this pass removed (closed tabs, collapsed splits)
         // before publishing, so out-of-frame readers never see a rectangle for a node
@@ -320,6 +325,7 @@ impl<Tab> DockArea<'_, Tab> {
         std::mem::take(&mut self.layout).store(ui.ctx(), self.id);
         DockAreaResponse {
             events: std::mem::take(&mut self.events),
+            dragging,
         }
     }
 

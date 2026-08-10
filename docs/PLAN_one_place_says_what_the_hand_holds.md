@@ -1,6 +1,6 @@
 # Plan: one place says what the hand holds
 
-**Status: design, not started.** Asked for by Стас on 2026-08-10, immediately after
+**Status: step 1 landed, steps 2–6 open.** Asked for by Стас on 2026-08-10, immediately after
 `JunctionDrag` landed (`f2693f7`) — that struct is one corner of this and is explicitly *not*
 the shape wanted. Entry point for whoever picks it up: this file, then
 [src/widgets/dock_area/state.rs](../src/widgets/dock_area/state.rs), then the hold bookkeeping in
@@ -153,8 +153,22 @@ own order and comments, not in two types.
 
 Smallest blast radius first, and each step is committable on its own:
 
-1. **The type and the chokepoint**, with `junction_drag` as its first inhabitant — it is already
-   an explicit struct, already isolated in one module, and the sweep already exercises it.
+1. ~~**The type and the chokepoint**, with `junction_drag` as its first inhabitant~~ — **done.**
+   `State::drag: Option<DragInFlight>` is private to `state.rs`, and `junction.rs` reaches it only
+   through `begin_drag` / `in_flight` / `in_flight_at` / `keep_drag_alive` / `mark_drag_moved` /
+   `end_drag`. `JunctionDrag` is gone: its `id` became `DragInFlight::widget` (the id egui reports
+   as `dragged_id()`, which is also what the harness's exemption in step 6 needs), its `moved` and
+   `pass` became the gesture's, and the three geometry fields are `DragSubject::Junction`.
+   Two things worth knowing before writing step 2:
+   * **`begin_drag` evicts a stale entry before it asserts.** A gesture whose subject leaves the
+     tree never gets its `drag_stopped`, so a leftover is not a rival — without the eviction the
+     loud failure would fire on an ordinary edit (drag a junction out of existence, grab another).
+     Pinned by `a_leftover_gesture_is_not_a_second_gesture` in `state.rs`.
+   * **Two accessors, deliberately.** `in_flight()` answers "*whose* is this" (an id matches or it
+     does not, and a gesture that is ending answers for its own leftover); `in_flight_at(pass)`
+     answers "is anything being dragged" and is the one the stand-down guard uses.
+   Measured, not assumed: mutating `in_flight()` to `None` reddens
+   `seeded_scenarios_keep_the_dock_well_formed`, so the sweep does reach the new path.
 2. **The separator**, folding `separator_drag_start` in. Its `moved` question becomes
    `DragInFlight::moved`, which is where the duplication between the two gestures disappears.
 3. **The tab**, which is the big one: `dnd` outlives frames, carries the destination and the

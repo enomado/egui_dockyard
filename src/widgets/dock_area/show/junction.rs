@@ -55,7 +55,7 @@ use egui::{
 
 use crate::core::tree::regroup::Regroup;
 use crate::dock_area::events::DockEvent;
-use crate::dock_area::state::{JunctionDrag, State};
+use crate::dock_area::state::{DragSubject, State};
 use crate::{CrossSplitToggleStyle, DockArea, NodeId, NodePath, SeparatorStyle};
 
 /// One side of a split, with the chain of same-orientation splits at its root flattened: `n`
@@ -679,15 +679,26 @@ impl<Tab> DockArea<'_, Tab> {
         match acted {
             // The delta goes to what the *gesture* grabbed, not to the junction that happens to
             // sit at this index now: `index` is a position in a list rebuilt from this frame's
-            // geometry, which the drag has been moving since it started. See [`JunctionDrag`].
+            // geometry, which the drag has been moving since it started. See
+            // [`DragSubject::Junction`].
             Some((_, Grip::Resize(delta))) => {
-                let Some(drag) = state.junction_drag else {
+                let Some(&DragSubject::Junction {
+                    outer,
+                    outer_horizontal,
+                    divider,
+                }) = state.in_flight().map(|drag| &drag.subject)
+                else {
                     return;
                 };
-                if self.drag_junction(pixels_per_point, &drag, style.extra, delta) {
-                    if let Some(drag) = &mut state.junction_drag {
-                        drag.moved = true;
-                    }
+                if self.drag_junction(
+                    pixels_per_point,
+                    outer,
+                    outer_horizontal,
+                    divider,
+                    style.extra,
+                    delta,
+                ) {
+                    state.mark_drag_moved();
                     self.events.push(DockEvent::SeparatorDragging);
                 }
             }
@@ -777,10 +788,8 @@ impl<Tab> DockArea<'_, Tab> {
         // are read off geometry the drag is moving: a neighbour that keeps answering can inherit
         // the gesture the moment the junction under the pointer is re-detected as a different
         // one. `pass` is what keeps a drag whose junction died from holding the rest down for
-        // good — see [`JunctionDrag::pass`].
-        let dragged_elsewhere = state
-            .junction_drag
-            .is_some_and(|drag| drag.pass + 1 >= pass);
+        // good — see [`crate::dock_area::state::DragInFlight::pass`].
+        let dragged_elsewhere = state.in_flight_at(pass).is_some();
 
         // Keyed by the dividers that meet here rather than by their position in the band: an id
         // has to survive a neighbouring divider being dragged past, and an index does not. The
@@ -805,7 +814,9 @@ impl<Tab> DockArea<'_, Tab> {
         // Another handle has the pointer: this one is not on screen and not in the way. Checked
         // after the id is derived — "which handle is being dragged" is a question about ids —
         // and before anything is registered or painted.
-        let owns_the_drag = state.junction_drag.is_some_and(|drag| drag.id == handle_id);
+        let owns_the_drag = state
+            .in_flight()
+            .is_some_and(|drag| drag.widget == handle_id);
         if dragged_elsewhere && !owns_the_drag {
             return Grip::Idle;
         }
@@ -879,36 +890,32 @@ impl<Tab> DockArea<'_, Tab> {
         }
 
         // What the gesture has hold of, named once and kept: the nodes, not an index into a list
-        // that is rebuilt from the geometry this drag is about to move. See [`JunctionDrag`].
+        // that is rebuilt from the geometry this drag is about to move. See
+        // [`DragSubject::Junction`].
         if response.drag_started() {
             let mut dividers = kind.dividers().map(|(band, k)| {
                 NodePath::new(junctions.outer.surface, junctions.bands[band].dividers[k])
             });
-            state.junction_drag = Some(JunctionDrag {
-                id: handle_id,
-                outer: junctions.outer,
-                outer_horizontal: junctions.outer_horizontal,
-                divider: dividers
-                    .next()
-                    .expect("every junction is made of at least one divider"),
-                moved: false,
+            state.begin_drag(
+                handle_id,
+                DragSubject::Junction {
+                    outer: junctions.outer,
+                    outer_horizontal: junctions.outer_horizontal,
+                    divider: dividers
+                        .next()
+                        .expect("every junction is made of at least one divider"),
+                },
                 pass,
-            });
+            );
         }
         if response.drag_stopped() {
-            let moved = state
-                .junction_drag
-                .take_if(|drag| drag.id == handle_id)
-                .is_some_and(|drag| drag.moved);
-            if moved {
+            if state.end_drag(handle_id).is_some_and(|drag| drag.moved) {
                 self.events.push(DockEvent::LayoutCommitted);
             }
         }
         if response.dragged() {
             // Alive this frame, so a stale entry can be told from a live one.
-            if let Some(drag) = state.junction_drag.as_mut().filter(|d| d.id == handle_id) {
-                drag.pass = pass;
-            }
+            state.keep_drag_alive(handle_id, pass);
             return Grip::Resize(response.drag_delta());
         }
 
@@ -930,16 +937,19 @@ impl<Tab> DockArea<'_, Tab> {
     /// component along that axis moves `outer` itself, and the other one moves the divider that
     /// ends on it. Two boundaries, at right angles, from one gesture.
     ///
-    /// It reads [`JunctionDrag`] and not this frame's junctions, and that is the point: the
-    /// gesture keeps hold of what it grabbed even as the detector's answer moves under it.
+    /// It reads what the hand holds ([`DragSubject::Junction`]) and not this frame's junctions,
+    /// and that is the point: the gesture keeps hold of what it grabbed even as the detector's
+    /// answer moves under it.
     fn drag_junction(
         &mut self,
         pixels_per_point: f32,
-        drag: &JunctionDrag,
+        outer: NodePath,
+        outer_horizontal: bool,
+        divider: NodePath,
         extra: f32,
         delta: Vec2,
     ) -> bool {
-        let (along_outer, along_bands) = if drag.outer_horizontal {
+        let (along_outer, along_bands) = if outer_horizontal {
             (delta.x, delta.y)
         } else {
             (delta.y, delta.x)
@@ -947,8 +957,8 @@ impl<Tab> DockArea<'_, Tab> {
 
         // Each is clamped on its own by `nudge_split`: they are cut from intervals at right
         // angles to each other and have nothing to stay in line with.
-        let moved = self.nudge_split(drag.outer, pixels_per_point, extra, along_outer);
-        moved | self.nudge_split(drag.divider, pixels_per_point, extra, along_bands)
+        let moved = self.nudge_split(outer, pixels_per_point, extra, along_outer);
+        moved | self.nudge_split(divider, pixels_per_point, extra, along_bands)
     }
 
     /// Transposes the grouping around crossing `index`, keeping every leaf exactly where it is
@@ -3028,8 +3038,9 @@ mod tests {
 
     /// A drag has hold of one junction, and the ones it travels past are not part of it.
     ///
-    /// The gesture is carried out on the nodes named at `drag_started` (see [`JunctionDrag`]),
-    /// and every other handle stands down for as long as it runs — so a drag that sweeps its
+    /// The gesture is carried out on the nodes named at `drag_started` (see
+    /// [`DragSubject::Junction`]), and every other handle stands down while it runs — so a drag
+    /// that sweeps its
     /// divider across a neighbouring junction cannot pick that neighbour up, and cannot leave a
     /// second handle lit under the pointer either. Both are asserted: the neighbour's boundary
     /// where it was, and never two handles drawn in one frame.
@@ -3038,8 +3049,8 @@ mod tests {
     /// or the sweep never reaches the neighbour and the rest is free.
     ///
     /// Measured, and worth saying plainly: this test is **green on the code that came before
-    /// [`JunctionDrag`] too**, and green with the stand-down guard mutated out. egui hands one
-    /// drag to one widget and suppresses hover on the rest, so neither hole was reachable from
+    /// the explicit drag state too**, and green with the stand-down guard mutated out. egui hands
+    /// one drag to one widget and suppresses hover on the rest, so neither hole was reachable from
     /// the outside — what the explicit state buys is that "what is being dragged" is a thing the
     /// dock says rather than a thing rederived per frame from geometry the drag is moving. This
     /// pins the contract, not the repair.

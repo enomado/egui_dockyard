@@ -359,13 +359,30 @@ Smallest blast radius first, and each step is committable on its own:
   gesture *by subject*, because it is also the release of every other gesture and must not eat
   one. `end_drag(widget)` was no use for it — the tab's end is reached from the top of the pass,
   where there is no `Response` and so no id to speak for.
-* **The `drag_data` temp channel is now a rectangle looking for a home.** It carries geometry
-  only, published by the leaf and read one frame later at the top of the pass, and everything it
-  used to *mean* ("a drag exists", "past the threshold") is the field's answer now. The rectangle
-  itself is `self.layout.rect(src.node_path())` — which the top of the pass can ask for directly,
-  from the same last-frame `DockLayout` the leaf published it out of. Deleting the channel is a
-  step on its own, and it wants checking that the two rectangles really are the same one and not
-  merely equal most frames.
+* ~~**The `drag_data` temp channel is now a rectangle looking for a home.**~~ — **deleted.** The
+  top of the pass asks the geometry map for itself: `carried.filter(pulled_out).and_then(|src|
+  self.layout.rect(src.node_path()))`. The two rectangles are the same one *by construction*, and
+  that is the part worth keeping: `render_nodes` cuts every node's rectangle before any leaf
+  draws, so what the leaf published was read out of this very map on the frame it published it,
+  and the map is stored at the end of that pass for the next one to load. Three things worth
+  knowing:
+  * **The equality was measured before the deletion, not argued.** Both values were computed and
+    `assert_eq!`'d against each other for a full suite run — green — and then the *check itself*
+    was given a positive control: translating the derived rectangle one pixel reddened
+    `seeded_scenarios_keep_the_dock_well_formed` and twelve tests by name. A sameness check
+    nothing reaches proves nothing, and that is what one run of this would otherwise have been.
+  * **What quenched the overlay is not what people thought.** Two comments and a test doc said the
+    middle-click scene survived because "no `drag_data` is published once egui has let go" — that
+    is, an absent rectangle was doing gate duty. It is not: the mutation "`source_rect` always
+    `None`" reddens that very test, so the rectangle *is* read there, and what ends the gesture is
+    the `drag_is_over` gate at the top of the pass (egui not dragging while the primary is still
+    down). Fixed in the comments; the absence never was a gate.
+  * **One honest difference, and it is the field's answer winning.** On a dragged frame with no
+    `pointer_interact_pos` the leaf published nothing, so the *next* frame drew no overlay even
+    though the field said a tab was held and had been pulled out. Now the geometry is there and
+    the field decides alone. Nothing in the suite or the sweep reaches such a frame; recorded
+    rather than gated, because a gate for it needs a scene that can take the pointer position away
+    mid-drag.
 * **The sweep has no gate that a drop ever *lands*.** Measured while looking for one: making every
   drop a no-op (`move_tab` never called) is caught by two hand-written scenes in
   `a_dead_drop_destination_is_not_a_drop.rs` and by `landings_after_a_change`, so the hole is
@@ -381,9 +398,9 @@ Smallest blast radius first, and each step is committable on its own:
   (found while doing step 4). `carried_tab().is_some()` guards setting `tab_hover_rect`
   (leaf.rs:499) and publishing `hover_data` (leaf.rs:1392) — both were `drag_start.is_some()`
   before. Measured: removing *either* guard reddens nothing in the whole suite. The reason looks
-  structural rather than a hole in the sweep — what those two write is only ever consumed through
-  `drag_data`, which the top of the pass already gates on `carried.is_some() && pulled_out`
-  (show/mod.rs:121), so a hover destination published with an empty hand is read back and dropped
+  structural rather than a hole in the sweep — what those two write is only ever consumed
+  alongside the source rectangle, which the top of the pass already gates on `carried` and
+  `pulled_out` (show/mod.rs), so a hover destination published with an empty hand is read back and dropped
   the next frame. If that is right they are a third expression of a fact the field already states,
   and deleting them is the same collapse step 3 did for the pull-out threshold. It was left in
   place here because step 4 is a port, not a deletion: check the consumers first, and if they are

@@ -381,26 +381,14 @@ impl<Tab> DockArea<'_, Tab> {
                     if delta.x.abs() > 30.0 || delta.y.abs() > 6.0 {
                         // Past the pull-out threshold: the tab now follows the pointer and a drop
                         // becomes possible. Recorded in the gesture rather than re-derived by
-                        // whoever needs to know — see `DragInFlight::moved`. The rectangle below
-                        // is published either way, so that this stays the *one* expression of
-                        // "the tab has been pulled out"; a second copy of it in the shape of
-                        // "there is a rect in memory this frame" is what it used to be.
+                        // whoever needs to know — see `DragInFlight::moved`. This is the *one*
+                        // expression of "the tab has been pulled out"; a second copy of it in the
+                        // shape of "there is a rect in memory this frame" is what it used to be.
                         state.mark_drag_moved();
                         tabs_ui
                             .ctx()
                             .transform_layer_shapes(layer_id, TSTransform::new(delta, 1.0));
                     }
-
-                    // Geometry only: *what* is being carried was named in the field above, once,
-                    // and is not repeated here. What the next frame cannot recover for itself is
-                    // this leaf's rectangle as it stood while the tab was still part of it — the
-                    // size a window preview is drawn at.
-                    tabs_ui.memory_mut(|mem| {
-                        mem.data.insert_temp(
-                            self.id.with("drag_data"),
-                            Some(self.layout.rect(path).unwrap()),
-                        );
-                    });
                 }
 
                 (response, title_id)

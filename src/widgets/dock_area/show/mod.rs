@@ -59,12 +59,8 @@ impl<Tab> DockArea<'_, Tab> {
             state.last_hover_pos = ui.input(|i| i.pointer.hover_pos());
         }
 
-        let (drag_data, hover_data) = ui.memory_mut(|mem| {
-            (
-                mem.data.remove_temp(self.id.with("drag_data")).flatten(),
-                mem.data.remove_temp(self.id.with("hover_data")).flatten(),
-            )
-        });
+        let hover_data =
+            ui.memory_mut(|mem| mem.data.remove_temp(self.id.with("hover_data")).flatten());
 
         // A drag carries a tab, and that tab can leave the tree while the hand is still
         // holding it: middle-click closes a tab, and the dragged tab is still a tab in the
@@ -80,15 +76,16 @@ impl<Tab> DockArea<'_, Tab> {
         // A drag ends the other way round as well, and that half was missing. **Any** release
         // ends egui's drag, and only the *primary* one is a drop here — so a middle click,
         // which is how a tab is closed, leaves the hand closed over a dock that still believes
-        // it is carrying a tab. Nothing followed it visually (no `drag_data` is published once
-        // egui has let go, so no overlay is drawn and no drop can resolve), which is precisely
+        // it is carrying a tab. Nothing followed it visually — back then no overlay could be
+        // drawn, because the leaf stops publishing the moment egui lets go — which is precisely
         // why it survived: the only witness was `dragged_tab`, answering with a tab that was
         // going nowhere. The dock's drag exists while egui's does, and that is now stated
-        // rather than assumed.
+        // rather than assumed — by this test, not by a rectangle failing to arrive.
         //
         // Asked of the one place that says what the hand holds, and asked once: the source used
-        // to be carried in two more places besides — this frame's `drag_data`, and the open
-        // `DragDropState` — and each of them had to be checked for the same decay separately.
+        // to be carried in two more places besides — a temp channel the leaf published into,
+        // and the open `DragDropState` — and each of them had to be checked for the same decay
+        // separately.
         let primary_down = ui.input(|i| i.pointer.primary_down());
         let carried = state.carried_tab();
         let drag_is_over = |src: &DragSource| {
@@ -112,18 +109,29 @@ impl<Tab> DockArea<'_, Tab> {
                 true
             }
         });
-        // The rectangle published by the leaf that drew the carried tab last frame — geometry,
-        // and only geometry. Whether a drag exists, whose it is, and whether it has been pulled
-        // far enough out of the bar for a drop to resolve at all are three things the field
-        // answers: the last of them is `DragInFlight::moved`, and it is read here rather than
-        // re-derived from "was a rectangle published this frame".
+        // The carried tab's leaf as it stood last frame, while the tab was still part of it —
+        // the size a "drop into a window" preview is drawn at. Geometry, and only geometry:
+        // whether a drag exists, whose it is, and whether it has been pulled far enough out of
+        // the bar for a drop to resolve at all are three things the field answers, the last of
+        // them `DragInFlight::moved`.
+        //
+        // Asked of the geometry map rather than of a temp channel the leaf published into. The
+        // two are the same rectangle by construction, not by coincidence: `render_nodes` cuts
+        // every node's rectangle before any leaf draws, so what the leaf used to publish was
+        // read out of this very map on the frame it published, and the map is stored at the end
+        // of that pass for this one to load. Measured before the channel was deleted — the
+        // published value and this one were asserted equal across the sweep and every directed
+        // drag scene, and a one-pixel translation of it reddened the sweep and twelve tests by
+        // name.
         let pulled_out = state.in_flight().is_some_and(|drag| drag.moved);
-        let drag_data = drag_data.filter(|_| carried.is_some() && pulled_out);
+        let source_rect = carried
+            .filter(|_| pulled_out)
+            .and_then(|src| self.layout.rect(src.node_path()));
 
         // The hover's destination decays the same way the drag's source does, and for the same
         // reason: it addresses a *node*, and a node can leave the tree while this drag is
         // still open. Two places carry a destination, and both have to be checked, the same
-        // way `drag_data` and `state.dnd.drag` both are above:
+        // way the drag's own source is above:
         //
         // * `hover_data`, just read out of this frame's temp storage, is a full frame stale by
         //   construction — it was published by whichever leaf was under the pointer *last*
@@ -166,7 +174,7 @@ impl<Tab> DockArea<'_, Tab> {
             dnd.drop_stale_hover();
         }
 
-        if let (Some(source_rect), Some(hover)) = (drag_data, hover_data) {
+        if let (Some(source_rect), Some(hover)) = (source_rect, hover_data) {
             let style = self.style.as_ref().unwrap();
             state.set_drag_and_drop(source_rect, hover, ui.ctx(), style);
             let tab_dst = self.show_drag_drop_overlay(ui, &mut state, carried.unwrap(), tab_viewer);

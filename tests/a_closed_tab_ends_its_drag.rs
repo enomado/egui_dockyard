@@ -355,8 +355,8 @@ fn the_neighbour_does_not_inherit_the_drag() {
 /// already dropped the drag, since **any** release ends one and the middle button's is a
 /// release. The hand is still closed over a dock that believes it is carrying a tab.
 ///
-/// Nothing followed it visually, which is exactly why it survived: no `drag_data` is published
-/// once egui has let go, so no overlay is drawn and no drop can resolve. The one witness is
+/// Nothing followed it visually, which is exactly why it survived: the leaf stops drawing a
+/// carried tab the moment egui lets go, so nothing moved on screen. The one witness is
 /// [`dragged_tab`], and it answered with a tab that was going nowhere — a lie to every consumer
 /// that asks the dock what it is doing. Found by the frame sweep on its first run with a
 /// vocabulary that could hold a gesture open across a close.

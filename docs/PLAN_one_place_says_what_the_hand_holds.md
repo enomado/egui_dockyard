@@ -11,8 +11,11 @@ the shape wanted. Entry point for whoever picks it up: this file, then
 > нам нужен энам - все драггаемые вещи должны запоминаться в это место, потому что оно одно.
 > по построению. shares, окна и тд. это будет частью большого рефакторинга.
 
-("shares" is read here as *панели* — the same word as in "можно драгать 4 шары" the message
-before. If that reading is wrong, the enum's first family is wrong with it.)
+("shares" is his word for **the boundary between panels — the thing that divides the space**:
+a separator, and the corner where separators meet. Not the panels themselves. It is the same
+word as in "можно драгать 4 шары" the message before, which reads, correctly, as the four arms
+of separator that radiate from a crossing. The panels come from the message before that:
+«панель или панелИ, или окно».)
 
 Three claims, and the third is the load-bearing one:
 
@@ -110,9 +113,12 @@ pub struct DragInFlight {
 }
 ```
 
-Two families in one enum, deliberately: a tab and a separator are not the same kind of thing, but
-"what is the hand doing" has one answer, and a consumer asking "is the layout being edited right
-now" wants both. The grouping is in the enum's own order and comments, not in two types.
+Two families in one enum, and that is his shape rather than an editorial one: the two asks name
+both sides of it — «панель или панелИ, или окно» in one message, "shares, окна и тд" in the next,
+where *shares* is the boundary that divides the space. A thing that moves and a boundary that
+resizes are not the same kind of thing, but "what is the hand doing" has one answer, and a
+consumer asking "is the layout being edited right now" wants both. The grouping is in the enum's
+own order and comments, not in two types.
 
 **What makes it by construction:**
 

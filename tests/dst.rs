@@ -4866,53 +4866,6 @@ fn reordering_a_tab_in_the_bar_keeps_it_the_same_tab() {
     assert_eq!(sim.state.validate(), Ok(()));
 }
 
-#[test]
-fn dbg_moved_leaf() {
-    for idle_only in [true, false] {
-        let mut sim = Sim::new();
-        for step in [
-            Step::Drag {
-                from: 1,
-                to: 6,
-                aim: Aim::Window,
-            },
-            Step::BuildCross {
-                leaf: 0,
-                deepen: Deepen::None,
-            },
-            Step::BuildCross {
-                leaf: 0,
-                deepen: Deepen::None,
-            },
-        ] {
-            sim.apply(step);
-        }
-        let at = sim.junctions()[0].at;
-        let before = sim.leaf_rects();
-        if idle_only {
-            for _ in 0..4 {
-                sim.run_frame(vec![]);
-            }
-        } else {
-            sim.click(at);
-        }
-        let after = sim.leaf_rects();
-        let moved: Vec<_> = before
-            .iter()
-            .filter_map(|(p, was)| {
-                let (_, now) = after.iter().find(|(o, _)| o == p)?;
-                (was != now).then(|| (format!("{:?}", p.node), *was, *now))
-            })
-            .collect();
-        println!(
-            "idle_only={idle_only}: moved {} of {} -> {:?}",
-            moved.len(),
-            before.len(),
-            moved
-        );
-    }
-}
-
 /// How long the overlay keeps a preference for the leaf the pointer arrived on, in this
 /// harness.
 ///

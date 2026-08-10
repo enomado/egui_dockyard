@@ -128,8 +128,8 @@ Mutation-checked, and the first attempt was the point:
 * **`unrenestable` reads 0.** The sweep never squeezes a band thin enough for a crossing to be
   offered a handle while the transposition is withheld, so the branch that tells the two
   gestures apart is exercised only by `a_cross_whose_parts_are_thinner_than_the_margin_...`.
-* **`dbg_moved_leaf` asserts nothing.** Left over from diagnosing the settle problem: it runs a
-  scene and prints. A test that cannot fail is a line in the suite's runtime and nothing else.
+* ~~**`dbg_moved_leaf` asserts nothing.**~~ Removed — it ran a scene and printed, left over from
+  diagnosing the settle problem, and could not fail.
 * **The handle count grew from crossings to all junctions, and `handle_room` is O(nodes) per
   handle per frame** — it walks the whole surface breadth-first to find the nearest divider. It
   was that before; what changed is how many handles there are. Worth a measure on a real

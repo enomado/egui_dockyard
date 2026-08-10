@@ -7,7 +7,7 @@ use paste::paste;
 
 use super::{
     DockAreaResponse,
-    drag_and_drop::{DragSource, HoverData},
+    drag_and_drop::{DragSource, HoverData, overlay_layer, register_overlay_layer},
     events::DockEvent,
     state::{DragSubject, State},
     tab_removal::TabRemoval,
@@ -47,6 +47,10 @@ impl<Tab> DockArea<'_, Tab> {
         self.style
             .get_or_insert(Style::from_egui(ui.style().as_ref()));
         self.window_bounds.get_or_insert(ui.ctx().content_rect());
+
+        // Before anything is drawn, and every pass: the drop overlay's layer takes its rank among
+        // the foreground areas here rather than when a drag starts. See `register_overlay_layer`.
+        register_overlay_layer(ui, self.id);
 
         let mut state = State::load(ui.ctx(), self.id);
         // Last frame's geometry: the layout pass below overwrites every live node, but
@@ -418,11 +422,17 @@ impl<Tab> DockArea<'_, Tab> {
         }
 
         let window_bounds = self.window_bounds.unwrap();
+        // Named, not registered: the area itself is shown once per pass from
+        // `show_inside_with_response`, whether a drag is in flight or not, so that its rank among
+        // the other foreground areas is taken before any menu the application opens later. See
+        // `register_overlay_layer`.
+        let overlay = overlay_layer(self.id);
         match (style.overlay.overlay_type, hover.tab.is_some()) {
             (OverlayType::HighlightedAreas, _) | (_, true) => drag_state.resolve_traditional(
                 &hover,
                 carried,
                 ui,
+                overlay,
                 style,
                 allowed_splits,
                 allowed_in_window,
@@ -432,6 +442,7 @@ impl<Tab> DockArea<'_, Tab> {
                 &hover,
                 carried,
                 ui,
+                overlay,
                 style,
                 allowed_splits,
                 allowed_in_window,

@@ -123,14 +123,61 @@ impl TreeComponent {
     }
 }
 
-fn make_overlay_painter(ui: &Ui) -> Painter {
-    let id = Id::new("overlay");
-    let layer_id = LayerId::new(Order::Foreground, id);
-    ui.ctx().layer_painter(layer_id)
+/// The layer every drop overlay shape is painted into.
+///
+/// # Why the layer is an area, and why it is registered every pass
+///
+/// This used to be `LayerId::new(Order::Foreground, Id::new("overlay"))` and nothing else, which
+/// is the shape the junction handle had and had fixed for the same reason. egui answers "who is on
+/// top" twice, by two rules: the pointer is ranked by `Areas::compare_order`, which resolves a tie
+/// within a tier through `order_map` — a layer that never joined it compares below every area of
+/// the tier, since `None < Some(i)`; the paint is `GraphicLayers::drain`, which walks a tier's
+/// areas in that order and *then* sweeps up every layer of the tier it has not seen. So a layer
+/// that is not an area is painted **last**, over menus and popups, however the pointer resolved.
+/// Showing an [`egui::Area`] is what calls `Areas::set_state` and so what puts a layer in that
+/// list; nothing short of one does.
+///
+/// **The rank is the order of first appearance, and that is why this is registered on every pass
+/// and not only while a drag is in flight.** `Areas::set_state` appends a layer the first time it
+/// is seen and never re-sorts, and [`egui::Area`] additionally moves itself to the *top* whenever
+/// it was not visible last frame. An overlay area created when a drag starts would therefore be
+/// pushed above every menu already open — the same bug in a new place, and worse for appearing
+/// only sometimes. Registered from the dock's own pass, it takes its rank once, before any menu
+/// the application opens later, and keeps it. The area stays empty: it is here to be *ranked*, and
+/// the shapes go into its layer through the painters below.
+///
+/// Only the *paint* is at stake. The overlay asks egui for no widget at all — the drop buttons are
+/// hit-tested against [`DragDropState::pointer`] arithmetically — so there is no press here for a
+/// menu to win or lose, which is why `sense(Sense::hover())` is enough and why this has one test
+/// scene rather than the junction handle's two.
+pub(super) fn register_overlay_layer(ui: &Ui, dock_id: Id) {
+    egui::Area::new(overlay_id(dock_id))
+        .order(Order::Foreground)
+        .fixed_pos(Pos2::ZERO)
+        .movable(false)
+        .sense(egui::Sense::hover())
+        .constrain(false)
+        .show(ui.ctx(), |_| {});
 }
 
-fn draw_highlight_rect(rect: Rect, ui: &Ui, style: &Style) {
-    let painter = make_overlay_painter(ui);
+/// The overlay's layer, named the same way whether or not anything is being dragged.
+pub(super) fn overlay_layer(dock_id: Id) -> LayerId {
+    LayerId::new(Order::Foreground, overlay_id(dock_id))
+}
+
+/// Scoped to the dock: this was a bare `Id::new("overlay")`, which two [`DockArea`](crate::DockArea)s
+/// in one application shared. Sharing a *painter's* layer was untidy; sharing an **area** id is a
+/// clash egui reports, so the id follows the dock that owns the drag.
+fn overlay_id(dock_id: Id) -> Id {
+    dock_id.with("overlay")
+}
+
+fn make_overlay_painter(ui: &Ui, overlay: LayerId) -> Painter {
+    ui.ctx().layer_painter(overlay)
+}
+
+fn draw_highlight_rect(rect: Rect, ui: &Ui, overlay: LayerId, style: &Style) {
+    let painter = make_overlay_painter(ui, overlay);
     painter.rect(
         rect.expand(style.overlay.hovered_leaf_highlight.expansion),
         style.overlay.hovered_leaf_highlight.corner_radius,
@@ -144,6 +191,7 @@ fn draw_highlight_rect(rect: Rect, ui: &Ui, style: &Style) {
 fn button_ui(
     rect: Rect,
     ui: &Ui,
+    overlay: LayerId,
     lock: &mut bool,
     mouse_pos: Pos2,
     style: &Style,
@@ -151,7 +199,7 @@ fn button_ui(
 ) -> bool {
     let visuals = &style.overlay;
     let button_stroke = Stroke::new(1.0_f32, visuals.button_color);
-    let painter = make_overlay_painter(ui);
+    let painter = make_overlay_painter(ui, overlay);
     painter.rect_stroke(rect, 0.0, visuals.button_border_stroke, StrokeKind::Inside);
     let rect = rect.shrink(rect.width() * 0.1);
     painter.rect_stroke(rect, 0.0, button_stroke, StrokeKind::Inside);
@@ -260,6 +308,7 @@ impl DragDropState {
         hover: &HoverData,
         source: DragSource,
         ui: &Ui,
+        overlay: LayerId,
         style: &Style,
         allowed_splits: AllowedSplits,
         windows_allowed: bool,
@@ -267,7 +316,7 @@ impl DragDropState {
     ) -> Option<TabDestination> {
         assert!(hover.tab.is_none());
 
-        draw_highlight_rect(hover.rect, ui, style);
+        draw_highlight_rect(hover.rect, ui, overlay, style);
         let mut hovering_buttons = false;
         let total_button_spacing = style.overlay.button_spacing * 2.0;
         let (rect, pointer) = (hover.rect, self.pointer);
@@ -283,7 +332,15 @@ impl DragDropState {
         let center = rect.center();
         let rect = Rect::from_center_size(center, Vec2::splat(shortest_side));
 
-        if button_ui(rect, ui, &mut hovering_buttons, pointer, style, None) {
+        if button_ui(
+            rect,
+            ui,
+            overlay,
+            &mut hovering_buttons,
+            pointer,
+            style,
+            None,
+        ) {
             match hover.dst {
                 TreeComponent::Node(path) => {
                     destination = Some(TabDestination::Node(path, TabInsert::Append))
@@ -311,6 +368,7 @@ impl DragDropState {
                     if button_ui(
                         Rect::from_center_size(center + offset_vector, Vec2::splat(shortest_side)),
                         ui,
+                        overlay,
                         &mut hovering_buttons,
                         pointer,
                         style,
@@ -332,7 +390,7 @@ impl DragDropState {
         if let Some(TabDestination::Window(rect)) = destination {
             let rect = self.window_preview_rect(source, rect.into());
             let rect_bounded = constrain_rect_to_area(ui, rect, window_bounds);
-            draw_window_rect(rect_bounded, ui, style);
+            draw_window_rect(rect_bounded, ui, overlay, style);
         }
         destination
     }
@@ -342,6 +400,7 @@ impl DragDropState {
         hover: &HoverData,
         source: DragSource,
         ui: &Ui,
+        overlay: LayerId,
         style: &Style,
         allowed_splits: AllowedSplits,
         windows_allowed: bool,
@@ -351,11 +410,11 @@ impl DragDropState {
         if !windows_allowed && hover.dst.surface_address() != SurfaceIndex::main() {
             return None;
         }
-        draw_highlight_rect(hover.rect, ui, style);
+        draw_highlight_rect(hover.rect, ui, overlay, style);
 
         // Deals with hovers over tab bar and tab titles.
         if let Some(rect) = hover.tab {
-            draw_drop_rect(rect, ui, style);
+            draw_drop_rect(rect, ui, overlay, style);
             let target_lock_state = if rect.contains(self.pointer) {
                 LockState::SoftLock
             } else {
@@ -448,10 +507,10 @@ impl DragDropState {
             Some(TabDestination::Window(rect)) => {
                 let rect = self.window_preview_rect(source, rect.into());
                 let rect_bounded = constrain_rect_to_area(ui, rect, window_bounds);
-                draw_window_rect(rect_bounded, ui, style);
+                draw_window_rect(rect_bounded, ui, overlay, style);
             }
             Some(_) => {
-                draw_drop_rect(hover_rect.intersect(overlay_rect), ui, style);
+                draw_drop_rect(hover_rect.intersect(overlay_rect), ui, overlay, style);
             }
             None => (),
         }
@@ -524,15 +583,15 @@ const fn lerp_vec(split: Split, alpha: f32) -> Vec2 {
 
 // Draws a filled rect describing where a tab will be dropped.
 #[inline(always)]
-fn draw_drop_rect(rect: Rect, ui: &Ui, style: &Style) {
-    let painter = make_overlay_painter(ui);
+fn draw_drop_rect(rect: Rect, ui: &Ui, overlay: LayerId, style: &Style) {
+    let painter = make_overlay_painter(ui, overlay);
     painter.rect_filled(rect, 0.0, style.overlay.selection_color);
 }
 
 // Draws a stroked rect describing where a tab will be dropped.
 #[inline(always)]
-fn draw_window_rect(rect: Rect, ui: &Ui, style: &Style) {
-    let painter = make_overlay_painter(ui);
+fn draw_window_rect(rect: Rect, ui: &Ui, overlay: LayerId, style: &Style) {
+    let painter = make_overlay_painter(ui, overlay);
     painter.rect_stroke(
         rect,
         0.0,

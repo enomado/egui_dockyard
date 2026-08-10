@@ -464,11 +464,48 @@ Smallest blast radius first, and each step is committable on its own:
   `a_menu_over_a_junction_in_a_window_is_painted_last` by its own message while the **panel**
   scene stays green — which is exactly the residue, isolated. Full suite green after the revert
   (`cargo test --all-targets`, 115 unit + every integration file).
-* **The tab drag's overlay has the same shape and has not been looked at.**
-  `drag_and_drop.rs:128` builds `LayerId::new(Order::Foreground, id)` the way the handle used to,
-  so a drop overlay drawn while a menu is open is the same "ranked under, painted over" pair. Not
-  investigated: whether a menu can be open during a tab drag at all is the first question, and if
-  it cannot, this is a non-item.
+* ~~**The tab drag's overlay has the same shape and has not been looked at.**~~ — **it was the same
+  pair, and it is fixed.** The first question this item asked — can a menu be open during a tab
+  drag at all — has a yes with a caveat: egui's own menus close on the press that starts the drag,
+  but `Order::Foreground` is not only menus (`Popup`'s mapping is `Menu | Popup => Foreground`), and
+  an application draws popups it keeps open from its own state. Such a thing coexists with a drag by
+  construction. Measured before any fix: with a foreground area open over the destination leaf,
+  **six** overlay shapes were painted on top of it — the highlight, the centre button and its rim,
+  and the split arrows.
+  The layer is a registered `egui::Area` now, and the drop shapes still go into it through the same
+  painters. Two things the doing of it turned up, and the second **corrects the entry above**:
+  * **The rank is the order of *first appearance*, so the area is registered on every pass** rather
+    than when a drag starts. `Areas::set_state` appends a layer the first time it is seen and never
+    re-sorts, and `Area` moves itself to the top whenever it was not visible last frame — so an
+    area created at `drag_started` is pushed *above* every menu already open. Measured, and this is
+    the one that matters: the on-demand version of exactly this fix is still red on the scene
+    (the same six shapes), the permanent one is green. An intermittent area cannot be below
+    anything older than itself.
+  * **The junction handle's fix inherits that limit and the doc for it claimed more than it holds.**
+    A handle hosted in a *panel* is safe by tier (a panel's `Ui` is `Order::Background`, so
+    `handle_layer` puts the handle at `Middle`, below every menu). A handle in a **floating window**
+    is at `Foreground` alongside menus, where only the order list decides — and a handle area
+    appears and vanishes with the pointer, so it is re-topped on every appearance. The in-window
+    scene is green because the menu and the handle first appear in the *same* pass and the dock
+    draws first; a menu opened a few frames earlier would win the ranking and lose the paint. The
+    remedy is the one the overlay now uses (register the area for the whole pass, always), and it
+    is the backlog item below rather than a claim in that entry.
+  * **The overlay's id was global** — `Id::new("overlay")`, shared by every `DockArea` in the
+    application. Untidy for a painter's layer; a clash for an *area*, so it is `dock_id.with(
+    "overlay")` now, and the layer id is threaded to the four drawing helpers instead of being
+    rebuilt from a constant inside each.
+  Measured, not assumed — `tests/a_menu_is_above_the_tab_drag_overlay.rs`, with a positive control
+  (`the_overlay_reaches_where_the_menu_is`) that the overlay really paints into the menu's rectangle
+  in that scene, without which "nothing was painted over it" is satisfied by an empty frame. Three
+  states run: bare layer → red (6 shapes), area created at drag time → red (the same 6), area
+  registered every pass → green. Full suite green (`cargo test --all-targets`).
+* **A junction handle in a floating window is ranked by when it last appeared** (the correction
+  above). Same fix shape as the overlay's: show the handle's `Area` for the whole pass so it takes
+  its rank once, and paint into it only while the pointer is there — which is a different structure
+  from today's "the area exists exactly while the handle does", and the reason it is an item rather
+  than a line. The scene it needs is `a_menu_is_above_the_junction_handle_in_a_window.rs` with the
+  menu opened several frames *before* the pointer reaches the handle; that scene is currently red by
+  construction and is the gate for this item.
 * ~~**`DragSubject` is `pub(super)` for now.**~~ — published in step 6, together with
   `DragInFlight` and `DragSource` and the two accessors that hand one out.
 * **Two call sites now ask "is anything in flight *now*" the same way** (found while doing step

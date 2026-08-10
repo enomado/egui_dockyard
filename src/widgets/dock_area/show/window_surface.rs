@@ -1,6 +1,6 @@
 use egui::{
-    Align, Color32, CornerRadius, CursorIcon, Frame, Layout, Rect, Response, RichText, Sense,
-    Shape, Stroke, Ui, UiBuilder, Vec2, WidgetText, vec2,
+    Align, Color32, Context, CornerRadius, CursorIcon, Frame, Id, LayerId, Layout, Order, Rect,
+    Response, RichText, Sense, Shape, Stroke, Ui, UiBuilder, Vec2, WidgetText, vec2,
 };
 
 use crate::{
@@ -8,11 +8,25 @@ use crate::{
     dock_area::{
         events::DockEvent,
         show::{border_clearance, collapsed_strip_height},
-        state::{DragSubject, State},
+        state::{DragSubject, State, WindowEdge},
         tab_removal::TabRemoval,
     },
     utils::{fade_visuals, rect_set_size_centered},
 };
+
+/// The side or corner of a window's frame paired with the id salt egui's own
+/// `do_resize_interaction` builds that widget's id with (`window.rs`, `egui`). Order matches
+/// egui's: sides first, then corners.
+const WINDOW_EDGES: [(WindowEdge, &str); 8] = [
+    (WindowEdge::Right, "right"),
+    (WindowEdge::Left, "left"),
+    (WindowEdge::Bottom, "bottom"),
+    (WindowEdge::Top, "top"),
+    (WindowEdge::RightBottom, "right_bottom"),
+    (WindowEdge::RightTop, "right_top"),
+    (WindowEdge::LeftBottom, "left_bottom"),
+    (WindowEdge::LeftTop, "left_top"),
+];
 
 /// Everything between a floating window's outer height and the height the dock gets to draw in.
 ///
@@ -163,7 +177,10 @@ impl<Tab> DockArea<'_, Tab> {
             }
         })
         // `None` only for a window that is closed; this one has no `open` flag to close it with.
-        .map(|inner| self.follow_window_move(&inner.response, surf_index, state));
+        .map(|inner| {
+            self.follow_window_move(&inner.response, surf_index, state);
+            self.follow_window_resize(ui.ctx(), id, surf_index, state);
+        });
 
         if !open {
             self.to_remove.push(TabRemoval::Window(window));
@@ -195,6 +212,7 @@ impl<Tab> DockArea<'_, Tab> {
                 response.id,
                 DragSubject::Window {
                     surface: surf_index,
+                    edge: None,
                 },
                 response
                     .interact_pointer_pos()
@@ -222,6 +240,74 @@ impl<Tab> DockArea<'_, Tab> {
 
         if response.drag_stopped() {
             state.end_drag(response.id);
+        }
+    }
+
+    /// Puts a window edge or corner the hand is resizing into the field that says what the hand
+    /// holds.
+    ///
+    /// Unlike a move, egui hands the dock no response for this: `Window::show`'s return value is
+    /// built solely from the area's own drag-from-anywhere, and the eight resize widgets — one
+    /// per side, one per corner — are created and consumed entirely inside egui's
+    /// `do_resize_interaction`, which never surfaces past `show`. What is read here is not a
+    /// response `show` handed the dock; it is the *same* widget, read back by the id egui itself
+    /// built for it — [`Context::read_response`] against
+    /// `Id::new(LayerId::new(Order::Middle, window_id)).with("edge_drag").with(<side>)`, which is
+    /// exactly how `do_resize_interaction` names them (`window.rs`, `egui`; `WINDOW_EDGES` above
+    /// carries the eight salts). Nothing here takes the drag over or resizes anything; egui has
+    /// already resized the window by the time this runs.
+    ///
+    /// The id derivation is an implementation detail of egui's, not part of its public contract —
+    /// the same honesty risk [`follow_window_move`](Self::follow_window_move) carries for the
+    /// move gesture, and it wants the same canary: a test that fails loud if egui ever stops
+    /// answering at these ids, rather than the field going quietly empty while a window resizes
+    /// under the hand.
+    fn follow_window_resize(
+        &self,
+        ctx: &Context,
+        window_id: Id,
+        surf_index: SurfaceIndex,
+        state: &mut State,
+    ) {
+        let pass = ctx.cumulative_pass_nr();
+        let base = Id::new(LayerId::new(Order::Middle, window_id)).with("edge_drag");
+
+        for (edge, salt) in WINDOW_EDGES {
+            // `None` for a side this window is not resizable along this frame (an axis locked by
+            // `resizable([...])`, or the window simply not resizable) — egui never created the
+            // widget, so there is nothing to read.
+            let Some(response) = ctx.read_response(base.with(salt)) else {
+                continue;
+            };
+
+            if response.drag_started() {
+                state.begin_drag(
+                    response.id,
+                    DragSubject::Window {
+                        surface: surf_index,
+                        edge: Some(edge),
+                    },
+                    response
+                        .interact_pointer_pos()
+                        .expect("a drag that started was pressed somewhere"),
+                    pass,
+                );
+            }
+
+            if response.dragged() {
+                state.keep_drag_alive(response.id, pass);
+                if response.drag_delta() != Vec2::ZERO
+                    && state
+                        .in_flight()
+                        .is_some_and(|drag| drag.widget == response.id)
+                {
+                    state.mark_drag_moved();
+                }
+            }
+
+            if response.drag_stopped() {
+                state.end_drag(response.id);
+            }
         }
     }
 

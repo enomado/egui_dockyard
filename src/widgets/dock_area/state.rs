@@ -28,26 +28,29 @@ pub enum DragSubject {
     /// keep that argument, which is the shape this whole field exists to remove.
     Tab(DragSource),
 
-    /// A floating window surface, being moved by the hand.
+    /// A floating window surface, being moved or resized by the hand.
     ///
     /// The whole surface and nothing inside it: a window is dragged as one thing, and which of
     /// its leaves happens to sit under the pointer is not part of what is being held.
     ///
-    /// The gesture is not the dock's own widget — it is [`egui::Window`]'s, which since it is
-    /// built with no title bar means egui's drag-from-anywhere over the window's body. The dock
-    /// does not take that over; it *reads* it, off the [`Response`](egui::Response) that
-    /// `Window::show` hands back and that the dock used to drop on the floor. So the id in
-    /// [`DragInFlight::widget`] is egui's own (the area's `"move"` widget) and compares equal to
-    /// [`Context::dragged_id`] exactly like every other gesture here.
-    ///
-    /// **A resize is not this.** egui's resize edges are separate widgets with their own ids, and
-    /// the dock is handed no response for them — so a window being resized is a gesture the field
-    /// still cannot see. That is a stated limit rather than a silent one: this variant says
-    /// "the hand is moving this window", not "the hand is doing something to this window".
+    /// Neither gesture is the dock's own widget — both are [`egui::Window`]'s. A move is egui's
+    /// drag-from-anywhere over the window's body (the window is built with no title bar), read
+    /// off the [`Response`](egui::Response) that `Window::show` hands back and that the dock used
+    /// to drop on the floor. A resize is the eight widgets — one per side, one per corner — that
+    /// `Window::show` builds and consumes entirely inside itself, surfacing nothing to the
+    /// caller; the dock reads those back by the id egui itself gave them, through
+    /// [`Context::read_response`]. Neither reading takes the gesture over: egui has already moved
+    /// or resized the window by the time either runs. So the id in [`DragInFlight::widget`] is
+    /// always egui's own and compares equal to [`Context::dragged_id`] exactly like every other
+    /// gesture here.
     Window {
         /// Which floating surface it is. Always [`SurfaceIndex::Window`] — the main surface is
         /// not a window and cannot be dragged.
         surface: SurfaceIndex,
+
+        /// `None` while the whole window is being moved. `Some(edge)` while one side or corner
+        /// of its frame is being dragged to resize it — see [`WindowEdge`].
+        edge: Option<WindowEdge>,
     },
 
     /// One separator: the split whose ratio the drag is writing.
@@ -84,6 +87,32 @@ pub enum DragSubject {
         /// moves, across `outer`'s axis.
         divider: NodePath,
     },
+}
+
+/// Which side or corner of a floating window's frame a resize drag is holding.
+///
+/// Named to match the salts egui's own `do_resize_interaction` builds its widget ids from
+/// (`"right"`, `"left"`, `"bottom"`, `"top"`, `"right_bottom"`, ...) — see `follow_window_resize`
+/// in `window_surface.rs`, which is the one place this is read off egui and the one place that
+/// naming has to be kept in step with egui's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowEdge {
+    /// The left side.
+    Left,
+    /// The right side.
+    Right,
+    /// The top side.
+    Top,
+    /// The bottom side.
+    Bottom,
+    /// The top-left corner.
+    LeftTop,
+    /// The top-right corner.
+    RightTop,
+    /// The bottom-left corner.
+    LeftBottom,
+    /// The bottom-right corner.
+    RightBottom,
 }
 
 /// The gesture around the subject — the part that is the same whatever is being held.

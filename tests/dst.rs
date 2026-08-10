@@ -1679,7 +1679,7 @@ impl Sim {
             // A window's gesture belongs to egui, and egui stops handing out the response the
             // moment the dock stops drawing the surface — which is exactly when the surface is
             // gone. Asked of the tree, like the rest.
-            DragSubject::Window { surface } => !self.state.is_surface_valid(surface),
+            DragSubject::Window { surface, .. } => !self.state.is_surface_valid(surface),
         }
     }
 

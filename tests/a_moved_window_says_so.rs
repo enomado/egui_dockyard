@@ -153,7 +153,10 @@ fn a_window_dragged_by_its_body_is_named_by_the_dock() {
     );
     assert_eq!(
         held.subject,
-        DragSubject::Window { surface: window },
+        DragSubject::Window {
+            surface: window,
+            edge: None
+        },
         "the hand is moving {window:?}, and that is what the field must say"
     );
     assert_eq!(
@@ -205,7 +208,13 @@ fn a_window_pressed_and_released_moved_nothing() {
     // drag — that is its business — but nothing has moved, and the field must not claim otherwise.
     for _ in 0..3 {
         if let Some(held) = frame(&ctx, &mut state, id, moved_to(at)) {
-            assert_eq!(held.subject, DragSubject::Window { surface: window });
+            assert_eq!(
+                held.subject,
+                DragSubject::Window {
+                    surface: window,
+                    edge: None
+                }
+            );
             assert!(!held.moved, "the pointer never left {at:?}");
         }
     }

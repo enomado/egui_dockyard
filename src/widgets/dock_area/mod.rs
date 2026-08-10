@@ -18,7 +18,7 @@ pub use allowed_splits::AllowedSplits;
 pub use drag_and_drop::DragSource;
 use egui::{Id, Modifiers, emath::*};
 pub use events::{DockAreaResponse, DockEvent};
-pub use state::{DragInFlight, DragSubject};
+pub use state::{DragInFlight, DragSubject, WindowEdge};
 use tab_removal::TabRemoval;
 
 use crate::layout::DockLayout;

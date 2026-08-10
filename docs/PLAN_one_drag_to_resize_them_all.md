@@ -130,10 +130,16 @@ Mutation-checked, and the first attempt was the point:
   gestures apart is exercised only by `a_cross_whose_parts_are_thinner_than_the_margin_...`.
 * ~~**`dbg_moved_leaf` asserts nothing.**~~ Removed — it ran a scene and printed, left over from
   diagnosing the settle problem, and could not fail.
-* **The handle count grew from crossings to all junctions, and `handle_room` is O(nodes) per
-  handle per frame** — it walks the whole surface breadth-first to find the nearest divider. It
-  was that before; what changed is how many handles there are. Worth a measure on a real
-  application layout (a few dozen panels) before assuming it is free.
+* ~~**The handle count grew from crossings to all junctions, and `handle_room` is O(nodes) per
+  handle per frame.**~~ Measured: a grid built by halving every leaf, alternating axis (16 to
+  1024 leaves), timed with `show_junction_handles(true)` against `(false)` on the same scene to
+  isolate the cost from the rest of a frame. The delta over "no handles" scales worse than
+  linearly — roughly quadratic, as the O(nodes)-per-handle walk predicts — but at panel counts
+  the crate is actually used at it is nowhere near the frame budget: 64 leaves (a few dozen
+  panels) cost ~163µs/frame, 256 leaves ~2.1ms/frame. It only bites at a scale nobody docks at:
+  1024 leaves cost ~34ms/frame, comparable to a whole 60fps frame budget by itself. Not worth
+  changing the walk for panel counts this crate sees; worth remembering if a consumer ever docks
+  hundreds of tabs on one surface.
 * **At the default 14 pt the icons are cramped.** The arms are 4 px with arrowheads on them, so
   what reads at a glance is "three arms" versus "four arms" rather than "arrows". The shapes are
   distinguishable and mirror correctly; whether they should be bigger is a style question and

@@ -55,8 +55,9 @@ use egui::{
 use egui_dock::dock_area::DockEvent;
 use egui_dock::shape::subtree_shape;
 use egui_dock::{
-    DockArea, DockLayout, DockState, Node, NodeId, NodePath, Split, Style, SurfaceIndex, TabId,
-    TabIndex, TabPath, TabViewer, Tree, drag_hover_node, dragged_tab, tab_widget_id,
+    DockArea, DockLayout, DockState, DragInFlight, DragSubject, Node, NodeId, NodePath, Split,
+    Style, SurfaceIndex, TabId, TabIndex, TabPath, TabViewer, Tree, drag_hover_node,
+    drag_in_flight, dragged_tab, tab_widget_id,
 };
 
 /// Screen the simulated dock starts on. Big enough that a few splits still leave leaves wider
@@ -623,6 +624,47 @@ struct Sim {
     junction_hold: Option<JunctionHold>,
     /// How much the junction gestures got to do — see [`JunctionWatch`].
     junction: JunctionWatch,
+    /// Which subjects the dock was actually seen holding — see [`SubjectWatch`].
+    subjects: SubjectWatch,
+    /// The gesture the dock last named, kept for as long as egui goes on dragging its widget.
+    ///
+    /// Not a second copy of the dock's field — it is what the dock *said*, remembered one step
+    /// longer than the dock keeps it, and it exists for exactly one question: when the two
+    /// holders disagree, was it a gesture the dock had announced and then let go stale (which is
+    /// how a drag whose subject left the tree ends — nothing is left to see the button come up),
+    /// or one it never named at all? Without it the first case has to be *exempted*, which is the
+    /// hole [`drag_complaint`] used to have.
+    named_drag: Option<DragInFlight>,
+}
+
+/// Frames in which the dock's own field held each kind of subject.
+///
+/// The gate the whole "one place says what the hand holds" refactor asks for, and it is a
+/// *coverage* number rather than a property: a zero means either this sweep never makes that
+/// gesture, or the gesture does not go through the chokepoint at all — and both are the failure
+/// the refactor exists to prevent. Nothing here judges what the dock did; it judges that the dock
+/// was asked, and answered with the whole vocabulary.
+///
+/// Counted per frame, off [`DockAreaResponse::dragging`], and not per step: a separator drag is a
+/// complete gesture inside one step, so a sweep that only looked between steps would see the two
+/// gestures a hold keeps open and conclude the third does not exist.
+///
+/// [`DockAreaResponse::dragging`]: egui_dock::dock_area::DockAreaResponse::dragging
+#[derive(Clone, Copy, Default, Debug)]
+struct SubjectWatch {
+    /// Frames spent carrying a tab.
+    tab: usize,
+    /// Frames spent moving one separator.
+    separator: usize,
+    /// Frames spent moving a junction corner — the line and the divider that ends on it.
+    junction: usize,
+    /// Gestures the dock announced and then let go of while egui was still dragging their
+    /// widget — the drag whose subject left the tree, which nothing is left to end.
+    ///
+    /// Counted because it is the branch that replaced [`drag_complaint`]'s exemption: a check
+    /// that tolerates a state nobody ever reaches is indistinguishable from one that tolerates
+    /// everything.
+    abandoned: usize,
 }
 
 /// What the dock announced over a stretch of frames, as the oracles read it.
@@ -1071,6 +1113,8 @@ impl Sim {
             holds: HoldWatch::default(),
             junction_hold: None,
             junction: JunctionWatch::default(),
+            subjects: SubjectWatch::default(),
+            named_drag: None,
         };
         // One frame before anything else: gestures aim with geometry, and geometry does not
         // exist until a pass has run.
@@ -1105,6 +1149,9 @@ impl Sim {
         let state = &mut self.state;
         let style = &self.style;
         let mut commits = Commits::default();
+        // What the dock said it was holding when this pass ended — asked of the dock, once, and
+        // not inferred from what moved. See [`SubjectWatch`].
+        let mut held: Option<DragInFlight> = None;
         let mut output = self.ctx.run_ui(input, |ctx| {
             CentralPanel::default().show(ctx, |ui| {
                 let response = DockArea::new(state)
@@ -1118,6 +1165,7 @@ impl Sim {
                 //
                 // The events are kept beside the count, and only for the report: a failure that
                 // says "3 where 2 were expected" leaves the reader to guess which third one.
+                held = response.dragging;
                 commits.frames += usize::from(response.layout_committed());
                 commits.events.extend(
                     response
@@ -1133,6 +1181,22 @@ impl Sim {
         output.textures_delta.clear();
         self.commits.frames += commits.frames;
         self.commits.events.extend(commits.events);
+        match held.map(|drag| drag.subject) {
+            Some(DragSubject::Tab(_)) => self.subjects.tab += 1,
+            Some(DragSubject::Separator { .. }) => self.subjects.separator += 1,
+            Some(DragSubject::Junction { .. }) => self.subjects.junction += 1,
+            None => (),
+        }
+        // What the dock named, kept one step longer than the dock keeps it — see
+        // [`Sim::named_drag`]. A gesture the dock has let go while egui goes on dragging its
+        // widget stays here, and that pairing is the one divergence `drag_complaint` allows.
+        match (held, self.ctx.dragged_id()) {
+            (Some(drag), _) => self.named_drag = Some(drag),
+            (None, Some(id)) if self.named_drag.is_some_and(|drag| drag.widget == id) => {
+                self.subjects.abandoned += 1;
+            }
+            (None, _) => self.named_drag = None,
+        }
     }
 
     /// How many finalised layout changes the dock reported since this was last called, and resets
@@ -1581,6 +1645,31 @@ impl Sim {
             })
             .flatten()
             .collect()
+    }
+
+    /// Whether what a gesture had hold of has left the screen — asked of the tree and of this
+    /// harness's own walk, never of the dock's reaction to it.
+    ///
+    /// The question [`drag_complaint`] needs to tell "the dock let a dead gesture go" from "the
+    /// dock forgot a live one", and each subject answers it in its own terms:
+    ///
+    /// * a tab, by identity — the same resolution the dock's own cancel does;
+    /// * a separator, by the node whose ratio it writes;
+    /// * a junction corner, by whether a **tee** made of both its splits is still *offered*.
+    ///   Not by whether the two nodes exist: the crate keys a handle by the splits that meet at
+    ///   it, and a close under the hand can leave both alive and no longer meeting — which is a
+    ///   handle that is not drawn and cannot see its own release. Same reading `Step::ReleaseJunction`
+    ///   makes, for the same reason.
+    fn subject_is_gone(&self, subject: DragSubject) -> bool {
+        match subject {
+            DragSubject::Tab(source) => source.resolve(&self.state).is_none(),
+            DragSubject::Separator { path } => self.state.node(path).is_err(),
+            DragSubject::Junction { outer, divider, .. } => !self.junctions().iter().any(|point| {
+                point.kind == Meeting::Tee
+                    && point.moves.contains(&outer)
+                    && point.moves.contains(&divider)
+            }),
+        }
     }
 
     /// The junctions that carry a handle a hand can grab: the **tees**.
@@ -3063,9 +3152,12 @@ impl Sim {
         // The other hold's interleaving, counted the same way and for the same reason: a
         // junction drag holds two or three persisted numbers open across step boundaries, and
         // "a leaf was closed while it was live" is the state that was unreachable while a step
-        // was a whole gesture. Keyed on the hold rather than on what the dock is carrying, since
-        // the dock's own junction drag is not readable from outside the crate — what stands in
-        // for it is `JunctionWatch::moved_together`, which no other gesture can produce.
+        // was a whole gesture. Keyed on the hold — this harness's own belief — and *not* on what
+        // the dock says it is holding, which is now readable ([`drag_in_flight`]) and is exactly
+        // the wrong source for a coverage number: a counter fed by the dock's own answer reports
+        // full coverage of a situation the dock merely believes it is in. Same rule
+        // `HoldWatch::source_died` is written under. The dock's answer is judged instead, by
+        // [`drag_complaint`], against this belief.
         if held_a_junction && !step.is_part_of_the_junction_drag() {
             self.junction.steps += 1;
             if matches!(step, Step::CloseTab { .. } | Step::CloseLeaf { .. }) {
@@ -3637,6 +3729,8 @@ struct Run {
     holds: HoldWatch,
     /// How much the junction gestures got to do — see [`JunctionWatch`].
     junction: JunctionWatch,
+    /// Which subjects the dock was seen holding — see [`SubjectWatch`].
+    subjects: SubjectWatch,
     /// The first step that left the dock invalid, if any.
     failure: Option<Failure>,
 }
@@ -3913,6 +4007,7 @@ fn run(steps: &[Step]) -> Run {
         cross: sim.cross,
         holds: sim.holds,
         junction: sim.junction,
+        subjects: sim.subjects,
         failure,
     }
 }
@@ -3968,22 +4063,29 @@ fn fraction_complaint(sim: &Sim) -> Option<String> {
         })
 }
 
-/// A drag that exists is about a tab that exists — checked on both of its holders.
+/// The two holders of a drag name the same thing — whatever that thing is.
 ///
-/// egui's ([`Context::dragged_id`]) is addressed by widget id, so it is checked directly
-/// against every live tab's [`tab_widget_id`]: an id that answers to none of them is a drag on
-/// a tab that is gone. The dock's own (`State::dnd`) is addressed by identity and only reachable
-/// through [`dragged_tab`], which already resolves a stale source to `None` — so what is left
-/// to check is that the two holders *agree*: both empty, or both naming the same tab. That is
-/// exactly the shape of the bug this harness could not see (see the module docs): a middle
-/// release ends egui's drag on the spot while the dock's own bookkeeping is left behind, or the
-/// other way around.
+/// egui's ([`Context::dragged_id`]) is addressed by widget id. The dock's own is
+/// [`drag_in_flight`], which names both the subject and the widget the gesture was started on —
+/// the id egui itself reports — so the comparison is by name, in one line, for every gesture the
+/// dock owns. That is exactly the shape of the bug this harness could not see (see the module
+/// docs): a middle release ends egui's drag on the spot while the dock's own bookkeeping is left
+/// behind, or the other way around.
 ///
-/// Currently unreachable through this file's alphabet alone — every [`Step::Drag`] is a
-/// complete gesture, so the button is always up by the time a step ends and both holders are
-/// always empty here. It is checked instead by mutation against
-/// `tests/a_closed_tab_ends_its_drag.rs`, and stands ready for Track B, which adds the steps
-/// that hold a drag open across a step boundary.
+/// # What this used to have to let through
+///
+/// Before the dock published what it holds, the only address available here was a *tab's*, built
+/// from [`tab_widget_id`] — and a junction handle's id is mixed out of the surface's `Ui` inside
+/// the crate, so there was nothing to compare it against. The check therefore exempted every drag
+/// it could not name, on the harness's own belief that it was holding a handle
+/// (`sim.junction_hold.is_none()`), which is a hole in precisely the property this exists to
+/// state: a dock that dragged something else entirely, or nothing at all, answered the same way.
+/// The exemption is gone, and with it the need to guess.
+///
+/// The tab half is still asked twice over, and the second question is not the first: the widget
+/// ids agreeing says *a* tab gesture is live under that id, while [`dragged_tab`] answers the
+/// conjunction the public API promises — a subject the tree still has, and a destination half
+/// open enough for a drop to resolve.
 fn drag_complaint(sim: &Sim) -> Option<String> {
     let dock_id = Id::new(DOCK_ID);
 
@@ -4000,29 +4102,67 @@ fn drag_complaint(sim: &Sim) -> Option<String> {
     };
 
     let egui_drag = sim.ctx.dragged_id();
-    let egui_tab = egui_drag.map(live_tab_for_widget);
-    // "A drag that is not a tab's" is a fault only while nothing else in this vocabulary can be
-    // dragging. A junction handle can: it is a widget of the dock's, held across step
-    // boundaries by design, and its id is built inside the crate out of the surface's `Ui` —
-    // not from `DockArea::id` the way a tab's is — so there is nothing here to compare it
-    // against by name. What survives the exemption is the half that matters: both holders must
-    // still agree there is no *tab* in flight, which is checked below and is exactly the
-    // disagreement this function was written for.
-    if let Some(None) = egui_tab
-        && sim.junction_hold.is_none()
-    {
-        return Some(format!(
-            "egui is dragging widget {:?}, which is not the widget of any live tab",
-            egui_drag.unwrap()
-        ));
-    }
-    let egui_tab = egui_tab.flatten();
+    let dock_drag = drag_in_flight(&sim.ctx, dock_id);
 
+    // Both empty, or both naming the same widget. No exemption, no vocabulary of kinds: a
+    // separator, a junction corner and a tab are all one field's answer now.
+    if egui_drag != dock_drag.map(|drag| drag.widget) {
+        // One divergence is not a fault, and it is *checked* rather than exempted. A gesture
+        // whose subject leaves the tree never gets its `drag_stopped` — the widget is not drawn,
+        // so nothing is left to see the button come up — and the dock drops it on its own a pass
+        // later (`DragInFlight::pass`), while egui goes on dragging a widget nobody draws until
+        // the hand opens. What makes it checkable is that the dock *announced* that gesture
+        // first: the harness knows which one was let go, and can ask the tree whether its
+        // subject is really gone.
+        let abandoned = match (dock_drag, egui_drag) {
+            (None, Some(id)) => sim.named_drag.filter(|drag| drag.widget == id),
+            _ => None,
+        };
+        match abandoned {
+            Some(drag) if sim.subject_is_gone(drag.subject) => (),
+            Some(drag) => {
+                return Some(format!(
+                    "the dock let go of {:?} while egui is still dragging {egui_drag:?}, and \
+                     its subject is still in the tree — a live gesture was forgotten, not one \
+                     whose subject died under it",
+                    drag.subject
+                ));
+            }
+            None => {
+                return Some(format!(
+                    "the two holders of a drag disagree: egui is dragging {egui_drag:?}, the \
+                     dock holds {:?}",
+                    dock_drag.map(|drag| (drag.widget, drag.subject))
+                ));
+            }
+        }
+    }
+
+    // ...and a subject that says "a tab" is a tab the tree still has, drawn under the very id
+    // egui is dragging. The dock's two coordinates for one gesture must agree with each other,
+    // not only with egui: an address that resolved elsewhere would move a tab nobody grabbed.
+    if let Some(DragSubject::Tab(source)) = dock_drag.map(|drag| drag.subject) {
+        let Some(path) = source.resolve(&sim.state) else {
+            return Some(format!(
+                "the dock is carrying {source:?}, which is not in the tree — a drag of a tab \
+                 that no longer exists is over"
+            ));
+        };
+        let by_identity = tab_widget_id(dock_id, path.node_path(), source.tab);
+        if egui_drag != Some(by_identity) {
+            return Some(format!(
+                "the dock's carried tab resolves to {path:?}, whose widget is {by_identity:?}, \
+                 but egui is dragging {egui_drag:?}"
+            ));
+        }
+    }
+
+    let egui_tab = egui_drag.and_then(live_tab_for_widget);
     let dock_tab = dragged_tab(&sim.ctx, dock_id, &sim.state);
     (egui_tab != dock_tab).then(|| {
         format!(
-            "the two holders of a drag disagree: egui says {egui_tab:?}, the dock's own \
-             `State::dnd` resolves to {dock_tab:?}"
+            "the two holders of a drag disagree about the tab: egui says {egui_tab:?}, the \
+             dock's own `dragged_tab` resolves to {dock_tab:?}"
         )
     })
 }
@@ -4986,6 +5126,7 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
     let mut cross = CrossWatch::default();
     let mut holds = HoldWatch::default();
     let mut junction = JunctionWatch::default();
+    let mut subjects = SubjectWatch::default();
     let mut aimed = 0usize;
     let mut refused = [0usize; REFUSALS];
 
@@ -5039,6 +5180,10 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         junction.closes += outcome.junction.closes;
         junction.ended_early += outcome.junction.ended_early;
         junction.died += outcome.junction.died;
+        subjects.tab += outcome.subjects.tab;
+        subjects.separator += outcome.subjects.separator;
+        subjects.junction += outcome.subjects.junction;
+        subjects.abandoned += outcome.subjects.abandoned;
 
         if let Some(failure) = outcome.failure {
             let minimal = quietly(|| shrink(&steps, &|candidate| run(candidate).failure.is_some()));
@@ -5072,6 +5217,7 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
     println!("separator watch: {separator:?}");
     println!("hold watch: {holds:?}");
     println!("junction watch: {junction:?}");
+    println!("subject watch: {subjects:?}");
 
     // Asserted before the generic coverage loop below, which would otherwise fire first with
     // "the sweep never produced CrossTransposed" — true, but silent about which of the two very
@@ -5379,6 +5525,40 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
          seeds. **Any** release ends an egui drag and a middle click is one, so closing a tab \
          under the hand ends the resize and pays its commit in that frame — the asymmetry the \
          fork already has a finding about for tab drags, unasked here"
+    );
+
+    // The chokepoint's own coverage: every gesture the dock has a word for was seen *in the
+    // field*, said by the dock itself. The counters above are all inferences from consequences
+    // — which fractions moved, how many at once — and each of them would stay green if a
+    // gesture stopped routing through the one place that says what the hand holds. These would
+    // not: a zero is either a sweep that cannot reach the gesture or a gesture that goes around
+    // the field, and the second is the failure the refactor exists to prevent.
+    assert!(
+        subjects.tab > 0,
+        "the dock never once reported carrying a tab, across {SEEDS} seeds. Either no grab \
+         became a drag — see the hold gates above, which would have fired first — or the tab \
+         gesture writes its subject somewhere other than the field `drag_in_flight` reads"
+    );
+    assert!(
+        subjects.separator > 0,
+        "the dock never once reported holding a separator, across {SEEDS} seeds, though {} \
+         separator drags ran. A gesture that moves a boundary without ever appearing in the \
+         field is exactly the shape this refactor exists to make impossible",
+        separator.drags
+    );
+    assert!(
+        subjects.junction > 0,
+        "the dock never once reported holding a junction corner, across {SEEDS} seeds, though \
+         {} handles were grabbed. `moved_together` above can be satisfied by a drag that moves \
+         two boundaries for any reason; this is the dock naming the gesture",
+        junction.offered
+    );
+    assert!(
+        subjects.abandoned > 0,
+        "the dock never once let go of a gesture while egui was still dragging its widget, \
+         across {SEEDS} seeds. That is the one divergence `drag_complaint` allows, and a check \
+         that tolerates a state nothing reaches has an exemption again — this time an invisible \
+         one"
     );
 }
 

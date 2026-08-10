@@ -229,23 +229,50 @@ impl Step {
     }
 }
 
-/// One "+" the dock is offering a toggle on, as [`Sim::cross_toggles`] reads it off the screen.
+/// Which separators meet at a junction, and with them how many panels it separates.
+///
+/// The crate's own `JunctionKind` without the indices — this side of the fence a junction is
+/// identified by the splits it moves (see [`JunctionPoint::moves`]), and an index into a band
+/// this harness flattened for itself would say nothing the paths do not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Meeting {
+    /// Four panels: both bands are divided here, and the two dividers are one line on screen.
+    Cross,
+    /// Three panels: one band is divided here and the other is not, so the divider ends on the
+    /// line rather than crossing it.
+    Tee,
+}
+
+/// One handle the dock is offering, as [`Sim::junctions`] reads it off the screen.
 ///
 /// Carries what the sweep needs to say *which* shape it pressed, and not one field more: a
 /// coverage counter that cannot name the shape it counted is a number that always looks healthy.
-#[derive(Clone, Copy, Debug)]
-struct CrossPoint {
-    /// The split whose two children the crossing was found between.
+#[derive(Clone, Debug)]
+struct JunctionPoint {
+    /// The split on whose line between its two children the junction was found.
     outer: NodePath,
+    /// Which kind it is, which decides both what a drag has to move and whether a ctrl+click has
+    /// anything to do at all.
+    kind: Meeting,
     /// Where to press.
     at: Pos2,
+    /// Every split a drag here moves, `outer` first: the line that runs through, and the one
+    /// divider (a tee) or two aligned dividers (a cross) that end on it.
+    ///
+    /// The list the drag's [`BoundaryRule`] is stated on, and the reason it is kept rather than
+    /// re-derived at judging time: by then the gesture has moved the very boundaries the walk
+    /// reads, and a junction found afterwards is not necessarily the one that was pressed.
+    moves: Vec<NodePath>,
     /// How many parts each of the two bands has. A `[2, 2]` is a plain 2x2; anything longer
     /// means a chain has to be taken apart and re-nested, and `[3, 3]` means both of them do.
     parts: [usize; 2],
-    /// How many crossings this one's line carries, itself included. More than one means a press
-    /// has to pivot around the crossing pressed rather than around "the crossing".
+    /// How many junctions this one's line carries, itself included.
     on_line: usize,
-    /// How far the two boundaries that meet here are actually out of line, in points.
+    /// ...of which are crossings. More than one means a transposition has to pivot around the
+    /// crossing pressed rather than around "the crossing".
+    crosses_on_line: usize,
+    /// How far the two boundaries that meet here are actually out of line, in points; zero for a
+    /// tee, which is one boundary and cannot be out of line with itself.
     ///
     /// Not a coverage field: the "nothing moved" oracle needs it. A press averages the pair, so
     /// a crossing found `gap` apart is one where the picture is *supposed* to move — by `gap / 2`
@@ -253,6 +280,39 @@ struct CrossPoint {
     /// tolerance instead, the oracle would allow that movement on every press, including the ones
     /// that were already collinear and had nothing to close.
     gap: f32,
+    /// Whether a ctrl+click here would transpose. A fact about that one gesture and not about
+    /// the handle: a band whose parts are too thin to re-nest still gets a handle, and still
+    /// drags — the crate withholds only the transposition (see `Junctions::can_transpose`).
+    can_transpose: bool,
+}
+
+/// One side of a split, flattened the way the crate flattens it — see [`Sim::band`].
+#[derive(Clone, Debug)]
+struct BandView {
+    /// The chain's splits, in screen order: `dividers[k]` is the split whose boundary falls
+    /// between part `k` and part `k + 1`.
+    dividers: Vec<NodePath>,
+    /// The `parts + 1` boundaries along the band's own axis, ascending, outer edges included.
+    bounds: Vec<f32>,
+    /// Whether every part is at least `separator.extra` long — the crate's condition for a
+    /// transposition, and (since the handles arrived at every junction) for that gesture alone.
+    renestable: bool,
+}
+
+impl BandView {
+    fn parts(&self) -> usize {
+        self.bounds.len() - 1
+    }
+
+    /// Where this band's dividers are along its axis, each with the split that draws it.
+    /// Ascending, so two bands' lists merge in one walk.
+    fn dividers(&self) -> Vec<(f32, NodePath)> {
+        self.bounds[1..self.bounds.len() - 1]
+            .iter()
+            .copied()
+            .zip(self.dividers.iter().copied())
+            .collect()
+    }
 }
 
 /// How far past a bare 2x2 [`Step::BuildCross`] builds.
@@ -609,6 +669,13 @@ struct CrossWatch {
     /// cannot tell that apart from pivoting around "the crossing". With two, pressing the wrong
     /// one leaves a different tree behind — and the same picture, so only the tree can say.
     on_a_crowded_line: usize,
+    /// ...of which sat on a line whose bands cannot be re-nested, where the handle is drawn and
+    /// drags but the transposition is withheld.
+    ///
+    /// A number of its own because that refusal used to take the *detection* down with it — no
+    /// handle at all, and so nothing for this step to press. A zero means the sweep never
+    /// squeezed a band that thin, and the branch that tells the two gestures apart went untried.
+    unrenestable: usize,
 }
 
 /// What a step actually did to the dock — measured after the fact, not assumed from its name.
@@ -1118,7 +1185,7 @@ impl Sim {
                 let at = [0.5, 0.25, 0.75]
                     .into_iter()
                     .map(along)
-                    .find(|point| !self.toggle_over(*point))
+                    .find(|point| !self.handle_over(*point))
                     // All three covered: leave the middle, and let the steps refuse it.
                     .unwrap_or_else(|| along(0.5));
                 Some((path, at, split.fraction))
@@ -1165,27 +1232,35 @@ impl Sim {
         self.run_frame(vec![]);
     }
 
-    /// Every cross-split toggle the dock is currently offering, with the point to press.
+    /// Every junction handle the dock is currently offering, with the point to press.
     ///
     /// Re-derived from the published geometry rather than asked of the crate, the same way
     /// [`Sim::separators`] and [`overlay_buttons`] are: the detection lives behind a private
     /// function, and a harness that could only aim at what the crate handed it would be unable
     /// to notice the crate offering a button where it should not.
     ///
-    /// It is a restatement of `DockArea::detect_crossings`, tolerance and margin and all, and
+    /// It is a restatement of `DockArea::detect_junctions`, tolerance and margin and all, and
     /// the two can drift apart. That is not left to chance: a point derived here that the crate
-    /// does not answer to produces a press that flips nothing, and the sweep asserts that
-    /// presses did flip things. Drift shows up as a named failure rather than as a quietly idle
-    /// step.
+    /// does not answer to produces a press that flips nothing and a drag that moves nothing, and
+    /// the sweep asserts that presses flipped things and drags moved them. Drift shows up as a
+    /// named failure rather than as a quietly idle step.
     ///
     /// The law: flatten each child into a **band** — its chain of same-orientation splits, an
-    /// ordered list of parts with the boundaries between them — and a toggle sits wherever the
-    /// two bands have a boundary at the same place. Stated on the bands rather than on the tree
-    /// because the tree can hold one picture several ways: which divider of a three-part band is
-    /// the "root" one is decided by the order the splits were made in, not by anything on
+    /// ordered list of parts with the boundaries between them — and walk the two boundary lists
+    /// together. A boundary both bands have at the same place is a **cross**; one that has no
+    /// partner across the line is a **tee**, and not a skip. Stated on the bands rather than on
+    /// the tree because the tree can hold one picture several ways: which divider of a three-part
+    /// band is the "root" one is decided by the order the splits were made in, not by anything on
     /// screen, and a rule that looks one level down therefore answers differently for the same
     /// pixels.
-    fn cross_toggles(&self) -> Vec<CrossPoint> {
+    ///
+    /// Emitting the tees is not a widening for its own sake. **Every** band divider ends on the
+    /// line, so a layout with one cross and three unmatched dividers has one "+" and three "T"s
+    /// — and while this walk stopped at the shorter list, three quarters of the handles on screen
+    /// were invisible to the harness. That is not only lost coverage: [`Sim::handle_over`] is
+    /// what keeps the separator gestures off a handle, and it could not keep them off a handle it
+    /// did not know about.
+    fn junctions(&self) -> Vec<JunctionPoint> {
         // How far out of line two boundaries may be and still carry a button: the style's own
         // magnet, floored the way the crate floors it (`Crossings::tolerance`) — this harness
         // runs at one device pixel per point, so the floor is 1.0 here.
@@ -1206,8 +1281,11 @@ impl Sim {
                 let at = |id: NodeId| NodePath::new(path.surface, id);
 
                 let [c0, c1] = self.state[path.surface].children(path.node)?;
-                let band0 = self.band(path.surface, c0, inner_horizontal, &layout)?;
-                let band1 = self.band(path.surface, c1, inner_horizontal, &layout)?;
+                let bands = [
+                    self.band(path.surface, c0, inner_horizontal, &layout)?,
+                    self.band(path.surface, c1, inner_horizontal, &layout)?,
+                ];
+                let can_transpose = bands.iter().all(|band| band.renestable);
 
                 let rect = |id: NodeId| layout.get(at(id)).map(|geometry| geometry.rect);
                 let (c0_rect, c1_rect) = (rect(c0)?, rect(c1)?);
@@ -1216,39 +1294,73 @@ impl Sim {
                 } else {
                     (c0_rect.max.y + c1_rect.min.y) * 0.5
                 };
+                let at_line = |line: f32| {
+                    if outer_horizontal {
+                        Pos2::new(outer, line)
+                    } else {
+                        Pos2::new(line, outer)
+                    }
+                };
+                // Every junction moves `outer` — that is the line it sits on — plus the one or
+                // two dividers that meet it there.
+                let point = |kind: Meeting, line: f32, gap: f32, dividers: &[NodePath]| {
+                    JunctionPoint {
+                        outer: path,
+                        kind,
+                        at: at_line(line),
+                        moves: std::iter::once(path)
+                            .chain(dividers.iter().copied())
+                            .collect(),
+                        parts: [bands[0].parts(), bands[1].parts()],
+                        // Both filled in once the walk knows what it found.
+                        on_line: 0,
+                        crosses_on_line: 0,
+                        gap,
+                        can_transpose,
+                    }
+                };
 
                 // Both boundary lists ascend, so one merge walk pairs them up and cannot hand
-                // one boundary two partners.
-                let (first, second) = (&band0[1..band0.len() - 1], &band1[1..band1.len() - 1]);
+                // one boundary two partners. Walked to *exhaustion* rather than to the shorter
+                // of the two: what the pairing leaves over is not a skip but a tee, and a walk
+                // that stopped early would miss every one of them in the tail.
+                let (first, second) = (bands[0].dividers(), bands[1].dividers());
                 let (mut i, mut j) = (0, 0);
                 let mut points = Vec::new();
-                while i < first.len() && j < second.len() {
-                    let gap = first[i] - second[j];
-                    if gap.abs() <= tolerance {
-                        let inner = (first[i] + second[j]) * 0.5;
-                        points.push(CrossPoint {
-                            outer: path,
-                            at: if outer_horizontal {
-                                Pos2::new(outer, inner)
-                            } else {
-                                Pos2::new(inner, outer)
-                            },
-                            parts: [band0.len() - 1, band1.len() - 1],
-                            // Filled in once the walk knows how many it found.
-                            on_line: 0,
-                            gap: gap.abs(),
-                        });
+                while i < first.len() || j < second.len() {
+                    let pair = first.get(i).zip(second.get(j));
+                    if let Some((&(a, one), &(b, two))) = pair
+                        && (a - b).abs() <= tolerance
+                    {
+                        points.push(point(
+                            Meeting::Cross,
+                            0.5 * (a + b),
+                            (a - b).abs(),
+                            &[one, two],
+                        ));
                         i += 1;
                         j += 1;
-                    } else if gap < 0.0 {
+                        continue;
+                    }
+                    // Screen order: whichever of the two heads comes first along the line is the
+                    // next junction, and the list that ran out has no head at all.
+                    let take_first = pair.is_none_or(|(a, b)| a.0 < b.0) && i < first.len();
+                    if take_first {
+                        points.push(point(Meeting::Tee, first[i].0, 0.0, &[first[i].1]));
                         i += 1;
                     } else {
+                        points.push(point(Meeting::Tee, second[j].0, 0.0, &[second[j].1]));
                         j += 1;
                     }
                 }
                 let on_line = points.len();
+                let crosses_on_line = points
+                    .iter()
+                    .filter(|point| point.kind == Meeting::Cross)
+                    .count();
                 for point in &mut points {
                     point.on_line = on_line;
+                    point.crosses_on_line = crosses_on_line;
                 }
                 Some(points)
             })
@@ -1256,36 +1368,51 @@ impl Sim {
             .collect()
     }
 
-    /// The band one side of a split flattens into: the boundaries along its own axis, outer
-    /// edges included, ascending. `None` if the crate would not offer a toggle on it at all.
+    /// The band one side of a split flattens into. `None` only when the geometry map does not
+    /// describe every part of it, or one of them is degenerate — the two cases in which there is
+    /// nothing to say rather than something to refuse.
     ///
-    /// The harness's own flattening — see [`Sim::cross_toggles`] for why it is restated rather
-    /// than asked for.
+    /// The harness's own flattening — see [`Sim::junctions`] for why it is restated rather than
+    /// asked for.
     fn band(
         &self,
         surface: SurfaceIndex,
         root: NodeId,
         horizontal: bool,
         layout: &DockLayout,
-    ) -> Option<Vec<f32>> {
-        // In-order, so the parts come out in screen order: everything under a chain node's
-        // first child lies before its own boundary.
-        fn parts_of<T>(tree: &Tree<T>, node: NodeId, horizontal: bool, out: &mut Vec<NodeId>) {
+    ) -> Option<BandView> {
+        // In-order, so both lists come out in screen order: everything under a chain node's
+        // first child lies before that node's own boundary, and everything under its second
+        // lies after it, at every level of the chain.
+        fn walk<T>(
+            tree: &Tree<T>,
+            node: NodeId,
+            horizontal: bool,
+            parts: &mut Vec<NodeId>,
+            dividers: &mut Vec<NodeId>,
+        ) {
             let in_chain = match &tree[node] {
                 Node::Horizontal(_) => horizontal,
                 Node::Vertical(_) => !horizontal,
                 _ => false,
             };
             let Some([first, second]) = (if in_chain { tree.children(node) } else { None }) else {
-                out.push(node);
+                parts.push(node);
                 return;
             };
-            parts_of(tree, first, horizontal, out);
-            parts_of(tree, second, horizontal, out);
+            walk(tree, first, horizontal, parts, dividers);
+            dividers.push(node);
+            walk(tree, second, horizontal, parts, dividers);
         }
 
-        let mut parts = Vec::new();
-        parts_of(&self.state[surface], root, horizontal, &mut parts);
+        let (mut parts, mut dividers) = (Vec::new(), Vec::new());
+        walk(
+            &self.state[surface],
+            root,
+            horizontal,
+            &mut parts,
+            &mut dividers,
+        );
 
         let rects: Vec<Rect> = parts
             .iter()
@@ -1303,29 +1430,40 @@ impl Sim {
         }
         bounds.push(hi(*rects.last().unwrap()));
 
-        // The crate refuses a band it could not re-cut without a boundary moving: the separator
-        // margin is a floor on how close a boundary may come to either end of the interval it
-        // is cut from, so a part thinner than the margin cannot be put back where it was.
-        if bounds
+        // A part thinner than the separator margin cannot be put back where it was after a
+        // re-cut, so a band carrying one cannot be re-nested without the picture jumping. That
+        // used to end the detection here; it now answers one gesture only — see
+        // [`JunctionPoint::can_transpose`].
+        let renestable = bounds
             .windows(2)
-            .any(|pair| pair[1] - pair[0] < self.style.separator.extra)
-        {
-            return None;
-        }
-        Some(bounds)
+            .all(|pair| pair[1] - pair[0] >= self.style.separator.extra);
+
+        Some(BandView {
+            dividers: dividers
+                .into_iter()
+                .map(|id| NodePath::new(surface, id))
+                .collect(),
+            bounds,
+            renestable,
+        })
     }
 
-    /// Whether a cross-split toggle button covers `point`.
+    /// Whether a junction handle covers `point`.
     ///
-    /// It sits *on* the crossing of the two dividers, in an `Order::Foreground` layer, so it
-    /// wins the pointer over the separators underneath it. That matters here because the point
-    /// [`Sim::separators`] aims at is the middle of a divider — and on the symmetric crosses
-    /// this harness builds, the middle of the outer divider *is* the crossing. Found by the
-    /// sweep: a `CentreSeparator` there double-clicked the button instead, transposed the
-    /// grouping twice, and was reported for announcing two commits where a centring announces
-    /// one. The separator gestures refuse such a point, the same way they refuse one under a
-    /// floating window, and for the same reason: it no longer means what the step says.
-    fn toggle_over(&self, point: Pos2) -> bool {
+    /// It sits *on* the separators that meet there, in an `Order::Foreground` layer, so it wins
+    /// the pointer over them. That matters here because the point [`Sim::separators`] aims at is
+    /// the middle of a divider — and on the symmetric crosses this harness builds, the middle of
+    /// the outer divider *is* the crossing. Found by the sweep: a `CentreSeparator` there
+    /// double-clicked the button instead, transposed the grouping twice, and was reported for
+    /// announcing two commits where a centring announces one. The separator gestures refuse such
+    /// a point, the same way they refuse one under a floating window, and for the same reason: it
+    /// no longer means what the step says.
+    ///
+    /// Every junction, not only the crossings. The handle used to be a crossing's alone, and this
+    /// read stayed narrow after it stopped being one: while it did, a separator step could land
+    /// on a tee's handle, press it, and be judged as a divider grab — the same confusion the
+    /// crossing case was written for, on the shape that outnumbers it.
+    fn handle_over(&self, point: Pos2) -> bool {
         // The button at its widest, asked of the crate rather than worked out here. The crate
         // shrinks it to fit a cramped crossing, so the zone avoided is never smaller than the
         // zone that answers — and it is the *answering* zone that matters, since a separator
@@ -1337,7 +1475,7 @@ impl Sim {
         // that used to live here had already gone stale once, still reading
         // `(width + extra_interact_width).max(14.0)` after the magnet landed.
         let side = self.style.cross_split_toggle.widest();
-        self.cross_toggles()
+        self.junctions()
             .into_iter()
             .any(|cross| Rect::from_center_size(cross.at, Vec2::splat(side)).contains(point))
     }
@@ -2075,7 +2213,7 @@ impl Sim {
                     return None;
                 }
                 let (path, at, fraction) = separators[node % separators.len()];
-                if self.window_over(at, path.surface) || self.toggle_over(at) {
+                if self.window_over(at, path.surface) || self.handle_over(at) {
                     // A separator under a floating window — or under the cross-split toggle —
                     // is not the thing the pointer would reach; the same refusal the tab aims
                     // make, for the same reason.
@@ -2137,7 +2275,7 @@ impl Sim {
                     return None;
                 }
                 let (path, at, fraction) = separators[node % separators.len()];
-                if self.window_over(at, path.surface) || self.toggle_over(at) {
+                if self.window_over(at, path.surface) || self.handle_over(at) {
                     self.refused[refused_index(Refused::Contested)] += 1;
                     return None;
                 }
@@ -2181,7 +2319,7 @@ impl Sim {
                     return None;
                 }
                 let (path, at, fraction) = separators[node % separators.len()];
-                if self.window_over(at, path.surface) || self.toggle_over(at) {
+                if self.window_over(at, path.surface) || self.handle_over(at) {
                     self.refused[refused_index(Refused::Contested)] += 1;
                     return None;
                 }
@@ -2256,18 +2394,28 @@ impl Sim {
                     self.refused[refused_index(Refused::Unsettled)] += 1;
                     return None;
                 }
-                let crosses = self.cross_toggles();
+                // Crossings only. A tee has no grouping to swap and the crate ignores a ctrl+click
+                // on one, so a step that picked one would be a press this vocabulary has no word
+                // for — judged under the name of a transposition, and reported as a drift between
+                // the harness's detection and the crate's when nothing flipped.
+                let crosses: Vec<JunctionPoint> = self
+                    .junctions()
+                    .into_iter()
+                    .filter(|junction| junction.kind == Meeting::Cross)
+                    .collect();
                 if crosses.is_empty() {
                     return None;
                 }
-                let CrossPoint {
+                let JunctionPoint {
                     outer: path,
                     at,
                     parts,
-                    on_line,
+                    crosses_on_line,
                     gap,
+                    can_transpose,
+                    ..
                 } = crosses[cross % crosses.len()];
-                // Only the window guard here: `toggle_over` is what the *separator* steps use to
+                // Only the window guard here: `handle_over` is what the *separator* steps use to
                 // stay off this button, and `at` is the button, so applying it here would make
                 // the step refuse itself. It did, silently, for a whole run — every press was
                 // skipped and the sweep reported no cross was ever offered.
@@ -2285,8 +2433,11 @@ impl Sim {
                 if parts.iter().all(|n| *n > 2) {
                     self.cross.in_two_long_bands += 1;
                 }
-                if on_line > 1 {
+                if crosses_on_line > 1 {
                     self.cross.on_a_crowded_line += 1;
+                }
+                if !can_transpose {
+                    self.cross.unrenestable += 1;
                 }
                 // A transposition rewrites the fractions of all three splits of the cross by
                 // construction — that is what regrouping the same four rectangles takes.
@@ -2297,6 +2448,16 @@ impl Sim {
                 self.click_holding(at, Modifiers::COMMAND);
 
                 let flipped = matches!(self.state[path], Node::Horizontal(_)) != horizontal_before;
+                if flipped && !can_transpose {
+                    forbidden = Some(format!(
+                        "a ctrl+click transposed the cross at {path:?}, whose bands carry a part \
+                         thinner than the {}pt separator margin. A rebuilt chain cannot put such \
+                         a part back where it was, so the promise the press is made on — no pixel \
+                         moves — cannot hold, and the crate withholds the transposition there \
+                         while still offering the handle to drag",
+                        self.style.separator.extra
+                    ));
+                }
                 if flipped {
                     self.cross.flipped += 1;
                     // One press, one undo entry — the transposition self-classifies as a
@@ -4071,8 +4232,7 @@ fn dbg_moved_leaf() {
         ] {
             sim.apply(step);
         }
-        let crosses = sim.cross_toggles();
-        let at = crosses[0].at;
+        let at = sim.junctions()[0].at;
         let before = sim.leaf_rects();
         if idle_only {
             for _ in 0..4 {

@@ -69,7 +69,7 @@ fn frame(ctx: &Context, state: &mut DockState<String>, id: Id, pointer: Option<P
                 .show_close_buttons(true)
                 .show_leaf_close_all_buttons(true)
                 .show_leaf_collapse_buttons(true)
-                .show_cross_split_toggle(true)
+                .show_junction_handles(true)
                 .show_tab_name_on_hover(true)
                 .show_secondary_button_hint(true)
                 .show_inside(ui, &mut Viewer);

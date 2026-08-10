@@ -37,7 +37,7 @@ pub struct DockArea<'tree, Tab> {
     show_window_collapse_buttons: bool,
     show_leaf_close_all_buttons: bool,
     show_leaf_collapse_buttons: bool,
-    show_cross_split_toggle: bool,
+    show_junction_handles: bool,
     show_secondary_button_hint: bool,
     secondary_button_modifiers: Modifiers,
     secondary_button_on_modifier: bool,
@@ -88,7 +88,7 @@ impl<'tree, Tab> DockArea<'tree, Tab> {
             show_window_collapse_buttons: true,
             show_leaf_close_all_buttons: true,
             show_leaf_collapse_buttons: true,
-            show_cross_split_toggle: true,
+            show_junction_handles: true,
             show_secondary_button_hint: true,
             secondary_button_modifiers: Modifiers::SHIFT,
             secondary_button_on_modifier: true,
@@ -159,17 +159,21 @@ impl<'tree, Tab> DockArea<'tree, Tab> {
         self
     }
 
-    /// Whether a small toggle button is shown wherever two dividers cross in a "+", letting the
-    /// user transpose the row/column grouping there without moving a pixel on screen.
+    /// Whether a small handle is shown wherever separators meet — a "+" where two dividers
+    /// cross (four panels), a "T" where one ends on another (three panels).
     ///
-    /// Not only on a 2x2: a crossing is any position that both of a split's two children are
-    /// divided at, however many parts each of them has. See
-    /// [`DockEvent::CrossSplitTransposed`], which also states what the gesture does *not*
-    /// promise about split ids.
+    /// Dragging a handle moves every separator that meets there at once, so the panels around
+    /// it are resized in both directions by one gesture. Ctrl+clicking a "+" transposes the
+    /// row/column grouping there without moving a pixel on screen — see
+    /// [`DockEvent::CrossSplitTransposed`](crate::DockEvent::CrossSplitTransposed), which also
+    /// states what that gesture does *not* promise about split ids.
+    ///
+    /// Not only on a 2x2: a junction is any position one of a split's two children is divided
+    /// at, however many parts each of them has.
     ///
     /// By default it's `true`.
-    pub fn show_cross_split_toggle(mut self, show_cross_split_toggle: bool) -> Self {
-        self.show_cross_split_toggle = show_cross_split_toggle;
+    pub fn show_junction_handles(mut self, show_junction_handles: bool) -> Self {
+        self.show_junction_handles = show_junction_handles;
         self
     }
 

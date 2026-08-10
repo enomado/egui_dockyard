@@ -1,11 +1,23 @@
-//! Cross-split transposition.
+//! Where separators meet: the handle drawn there, the drag that moves all of them at once, and
+//! the transposition offered where four panels meet.
 //!
-//! Where the two children of a split are themselves cut by dividers that line up, the dock
-//! shows a "+": one divider line running the full extent of both children, crossing the line
-//! between them. A "+" is ambiguous — the exact same rectangles are produced by either grouping
-//! (rows of columns, or columns of rows) and nothing on screen says which one the tree holds —
-//! so at every crossing point we draw a small toggle button that swaps the two representations
-//! without moving a single pixel.
+//! A split's two children are divided by a line running their full extent. Every divider *of*
+//! those children ends on that line, and where it does, separators meet:
+//!
+//! * a **tee** — three panels, two separators: the line that runs through, and the one that
+//!   stops on it;
+//! * a **cross** — four panels, three separators: the line, and a divider on each side of it
+//!   that are one and the same line on screen.
+//!
+//! Both get a small square handle, and **dragging it moves every separator that meets there**:
+//! the panels around the junction are resized in both directions by one gesture, which is what
+//! a hand wants at the corner of four panels and could only be done in two drags before.
+//!
+//! A cross is offered one thing more. It is ambiguous — the exact same rectangles are produced
+//! by either grouping (rows of columns, or columns of rows) and nothing on screen says which one
+//! the tree holds — so **ctrl+clicking** it swaps the two representations without moving a single
+//! pixel. A plain click does nothing: a press that was meant as a drag and did not travel far
+//! enough must not rewrite the tree.
 //!
 //! # Why the law is stated on bands
 //!
@@ -19,18 +31,19 @@
 //!
 //! Flattened into a [`Band`] — an ordered list of `n` parts with `n - 1` dividers between them,
 //! however the tree happens to have nested them — the model is the picture, and the law reads
-//! off it in one line: **a crossing is a position that both neighbouring bands have a divider
-//! at**. Neither `n` nor `m` appears in it, and neither does depth.
+//! off it in one line: **a junction is a position either neighbouring band has a divider at, and
+//! a crossing is one they both do**. Neither `n` nor `m` appears in it, and neither does depth.
 
 use std::collections::VecDeque;
 
 use egui::{
-    CursorIcon, LayerId, Order, Pos2, Rect, Sense, StrokeKind, Ui, UiBuilder, Vec2,
-    epaint::CornerRadius, pos2, vec2,
+    CursorIcon, LayerId, Order, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder,
+    Vec2, epaint::CornerRadius, pos2, vec2,
 };
 
 use crate::core::tree::regroup::Regroup;
 use crate::dock_area::events::DockEvent;
+use crate::dock_area::state::State;
 use crate::{CrossSplitToggleStyle, DockArea, NodeId, NodePath, SeparatorStyle};
 
 /// One side of a split, with the chain of same-orientation splits at its root flattened: `n`
@@ -95,9 +108,51 @@ impl Band {
     }
 }
 
-/// Every "+" on the line between one split's two children, together with the two bands they
-/// were found in — which the transposition needs, so they are kept rather than re-derived.
-struct Crossings {
+/// Which separators meet at a junction — and with them, how many panels it separates.
+///
+/// Two kinds of one thing: both are dragged by the same code, through the same clamp. What the
+/// kind decides is what is drawn on the handle and whether a ctrl+click has anything to do, and
+/// both of those follow from the shape rather than being attached to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JunctionKind {
+    /// Four panels. Both bands are divided here and the two dividers are one line on screen;
+    /// `[i, j]` name which divider of each band, as an index into that band's own list.
+    Cross([usize; 2]),
+
+    /// Three panels. Only the band `side` is divided here, at its divider `divider`; the line
+    /// between `outer`'s two children runs through, and this one ends on it.
+    Tee { side: usize, divider: usize },
+}
+
+impl JunctionKind {
+    /// The dividers this junction is made of, as `(band, divider index in that band)`.
+    ///
+    /// The one place the two kinds differ in arity, and everything that has to visit "every
+    /// divider of this junction" — the room the handle may take, the ids it is keyed by, the
+    /// boundaries a drag moves — goes through it rather than matching on the kind again.
+    fn dividers(self) -> impl Iterator<Item = (usize, usize)> {
+        match self {
+            Self::Cross([i, j]) => [Some((0, i)), Some((1, j))],
+            Self::Tee { side, divider } => [Some((side, divider)), None],
+        }
+        .into_iter()
+        .flatten()
+    }
+}
+
+/// One point where separators meet, on the line between a split's two children.
+#[derive(Clone, Copy, Debug)]
+struct Junction {
+    kind: JunctionKind,
+
+    /// Where it is on screen.
+    center: Pos2,
+}
+
+/// Every junction on the line between one split's two children, together with the two bands they
+/// were found in — which the drag and the transposition both need, so they are kept rather than
+/// re-derived.
+struct Junctions {
     outer: NodePath,
 
     /// Orientation of `outer` itself: `true` if [`crate::Node::Horizontal`].
@@ -111,12 +166,20 @@ struct Crossings {
     /// line between the two, and the far edge of the second.
     outer_bounds: [f32; 3],
 
-    /// One entry per crossing: which divider of each band meets here (`k` meaning "between part
-    /// `k` and part `k + 1`"), and the point on screen where they cross.
-    at: Vec<([usize; 2], Pos2)>,
+    /// Whether a transposition may be offered on the crossings of this line at all.
+    ///
+    /// A fact about that one gesture, and no longer about whether the junctions exist. A
+    /// transposition rebuilds both chains and can only promise "no pixel moves" if both can be
+    /// re-nested (see [`Band::parts_can_be_renested`]); a *drag* is meaningful either way, so
+    /// suppressing the whole detection here — which is what this used to do — would have taken
+    /// the handle away from layouts that have every use for it.
+    can_transpose: bool,
+
+    /// The junctions, in screen order along the line.
+    at: Vec<Junction>,
 }
 
-impl Crossings {
+impl Junctions {
     /// The floor under [`CrossSplitToggleStyle::align_tolerance`]: **one device pixel**.
     ///
     /// A floor, not the policy — the policy is the style's, in points, and it is normally the
@@ -145,27 +208,28 @@ impl Crossings {
             + 1e-3
     }
 
-    /// The widest square the button at crossing `index` may occupy.
+    /// The widest square the handle at junction `index` may occupy.
     ///
-    /// The button sits on two dividers at once and answers to presses over its whole reach, so
-    /// every point it covers is a point that can no longer be grabbed to drag either of them.
-    /// That is the trade the magnet buys, and it is a good one only while the button stays
-    /// small next to what it sits on. The bound is the distance to the nearest thing that has
-    /// to stay reachable: across the line, the far edges of the two bands (`outer`'s own two
-    /// children); along it, the ends of the two parts the crossing divider separates, in
-    /// whichever of the two bands is the tighter.
+    /// The handle sits on two or three dividers at once and answers to presses over its whole
+    /// reach, so every point it covers is a point that can no longer be grabbed to drag one of
+    /// them on its own. That is the trade the magnet buys, and it is a good one only while the
+    /// handle stays small next to what it sits on. The bound is the distance to the nearest
+    /// thing that has to stay reachable: across the line, the far edges of the two bands
+    /// (`outer`'s own two children); along it, the ends of the two parts each of the junction's
+    /// dividers separates.
     ///
     /// Nothing in the default style comes near it — `separator.extra` keeps every part at least
-    /// 175 px long, against a 38 px button at its widest. It binds where the style is loosened
-    /// or the window squeezed, and there the answer is a button that shrinks with the layout
+    /// 175 px long, against a 38 px handle at its widest. It binds where the style is loosened
+    /// or the window squeezed, and there the answer is a handle that shrinks with the layout
     /// rather than one that swallows it.
     fn room_at(&self, index: usize) -> f32 {
-        let [i, j] = self.at[index].0;
         // Across the line: `outer`'s two children, measured along `outer`'s own axis.
         let mut room = (self.outer_bounds[1] - self.outer_bounds[0])
             .min(self.outer_bounds[2] - self.outer_bounds[1]);
-        // Along the line: the two parts each band's divider separates.
-        for (band, k) in [(&self.bands[0], i), (&self.bands[1], j)] {
+        // Along the line: the two parts each of this junction's dividers separates. A tee has
+        // one such divider and a cross has two, which is the only difference.
+        for (band, k) in self.at[index].kind.dividers() {
+            let band = &self.bands[band];
             room = room
                 .min(band.bounds[k + 1] - band.bounds[k])
                 .min(band.bounds[k + 2] - band.bounds[k + 1]);
@@ -208,6 +272,64 @@ fn square_gap(rect: Rect, point: Pos2) -> f32 {
     let x = (rect.min.x - point.x).max(point.x - rect.max.x).max(0.0);
     let y = (rect.min.y - point.y).max(point.y - rect.max.y).max(0.0);
     x.max(y)
+}
+
+/// What the pointer asked of a junction handle this frame.
+///
+/// The handle answers rather than acts, because acting rewrites the geometry every handle on the
+/// line was read off — including the ones not drawn yet.
+#[derive(Clone, Copy, Debug)]
+enum Grip {
+    /// Nothing, which is also what a plain click amounts to.
+    Idle,
+
+    /// Held and moved this much since the last frame: every separator meeting here follows.
+    Resize(Vec2),
+
+    /// Ctrl+clicked on a crossing: swap the grouping around it.
+    Transpose,
+}
+
+/// The arms of a handle's icon, as unit directions.
+///
+/// The cross keeps the four diagonals it has always had: the pinwheel reads as "swap the
+/// grouping", which is what a ctrl+click there still does. A tee has no transposition to offer,
+/// and gets three arms drawn along the separators that actually meet at it — two for the line
+/// that runs through, one for the one that stops. So the icon says which junction this is, and
+/// says it out of the geometry rather than out of a name: count the arms and you have counted
+/// the panels.
+fn icon_arms(kind: JunctionKind, outer_horizontal: bool) -> Vec<Vec2> {
+    match kind {
+        JunctionKind::Cross(_) => [45.0_f32, 135.0, 225.0, 315.0]
+            .into_iter()
+            .map(|degrees| {
+                let angle = degrees.to_radians();
+                vec2(angle.cos(), angle.sin())
+            })
+            .collect(),
+        JunctionKind::Tee { side, .. } => {
+            // The line between `outer`'s children runs across `outer`'s own axis; the stem is
+            // the divider that ends on it, reaching back into the band it belongs to — the
+            // first band lies on the near side of the line, the second on the far side.
+            let (through, stem) = if outer_horizontal {
+                ([vec2(0.0, -1.0), vec2(0.0, 1.0)], vec2(-1.0, 0.0))
+            } else {
+                ([vec2(-1.0, 0.0), vec2(1.0, 0.0)], vec2(0.0, -1.0))
+            };
+            let stem = if side == 0 { stem } else { -stem };
+            vec![through[0], through[1], stem]
+        }
+    }
+}
+
+/// One arrow of a handle's icon: a stem from near the centre outwards, and two barbs at its tip.
+fn draw_arrow(painter: &Painter, center: Pos2, dir: Vec2, arm: f32, stroke: Stroke) {
+    let tip = center + dir * arm;
+    let base = center + dir * (arm * 0.3);
+    painter.line_segment([base, tip], stroke);
+    let perp = vec2(-dir.y, dir.x) * (arm * 0.25);
+    painter.line_segment([tip, tip - dir * (arm * 0.35) + perp], stroke);
+    painter.line_segment([tip, tip - dir * (arm * 0.35) - perp], stroke);
 }
 
 /// One edge of a rectangle along an axis: `x` for a horizontal one, `y` for a vertical one.
@@ -353,21 +475,21 @@ impl<Tab> DockArea<'_, Tab> {
         self.collect_band(second, horizontal, parts, dividers);
     }
 
-    /// Every "+" on the line between `outer`'s two children.
+    /// Every junction on the line between `outer`'s two children, in screen order.
     ///
     /// `outer` must already be known to be a split (parent) node; callers of `show_separator`
     /// establish that before this runs.
     ///
-    /// How far out of line the two dividers may be and still be one crossing comes from
-    /// `toggle`; `pixels_per_point` is what puts the floor under it in the points this geometry
-    /// is measured in — see [`Crossings::tolerance`].
-    fn detect_crossings(
+    /// How far out of line two dividers may be and still be one crossing rather than two tees
+    /// comes from `toggle`; `pixels_per_point` is what puts the floor under it in the points
+    /// this geometry is measured in — see [`Junctions::tolerance`].
+    fn detect_junctions(
         &self,
         outer: NodePath,
         extra: f32,
         toggle: &CrossSplitToggleStyle,
         pixels_per_point: f32,
-    ) -> Option<Crossings> {
+    ) -> Option<Junctions> {
         let outer_horizontal = self.dock_state[outer].is_horizontal();
         let [c0, c1] = self.child_paths(outer);
 
@@ -377,9 +499,8 @@ impl<Tab> DockArea<'_, Tab> {
         let inner_horizontal = !outer_horizontal;
         let band0 = self.band(c0, inner_horizontal)?;
         let band1 = self.band(c1, inner_horizontal)?;
-        if !band0.parts_can_be_renested(extra) || !band1.parts_can_be_renested(extra) {
-            return None;
-        }
+        let can_transpose =
+            band0.parts_can_be_renested(extra) && band1.parts_can_be_renested(extra);
 
         let (c0_rect, c1_rect) = (self.layout.rect(c0)?, self.layout.rect(c1)?);
         let outer_bounds = [
@@ -387,79 +508,110 @@ impl<Tab> DockArea<'_, Tab> {
             0.5 * (edge(c0_rect, outer_horizontal, true) + edge(c1_rect, outer_horizontal, false)),
             edge(c1_rect, outer_horizontal, true),
         ];
+        let at_line = |line: f32| {
+            if outer_horizontal {
+                pos2(outer_bounds[1], line)
+            } else {
+                pos2(line, outer_bounds[1])
+            }
+        };
 
-        // Both lists ascend, so one merge walk pairs them up: it finds every pair that is the
+        // Both lists ascend, so one merge walk consumes them: it finds every pair that is the
         // same line and, unlike a nested scan, cannot hand one divider two partners — which
-        // would put two buttons on one point the moment two dividers ever sat a pixel apart.
+        // would put two handles on one point the moment two dividers ever sat a pixel apart.
+        // Whatever it does not pair is not skipped but emitted as a tee: a divider that has no
+        // partner across the line still *ends* on it, and that is a junction of two separators.
+        // Walking both lists to exhaustion, rather than stopping at the shorter one, is what
+        // makes that true of the tail as well as of the middle.
         let (first, second) = (band0.divider_positions(), band1.divider_positions());
-        let tolerance = Crossings::tolerance(toggle, pixels_per_point);
+        let tolerance = Junctions::tolerance(toggle, pixels_per_point);
         let (mut i, mut j) = (0, 0);
         let mut at = Vec::new();
-        while i < first.len() && j < second.len() {
-            let gap = first[i] - second[j];
-            if gap.abs() <= tolerance {
-                let line = 0.5 * (first[i] + second[j]);
-                let center = if outer_horizontal {
-                    pos2(outer_bounds[1], line)
-                } else {
-                    pos2(line, outer_bounds[1])
-                };
-                at.push(([i, j], center));
+        while i < first.len() || j < second.len() {
+            let pair = first.get(i).zip(second.get(j));
+            if let Some((&a, &b)) = pair
+                && (a - b).abs() <= tolerance
+            {
+                at.push(Junction {
+                    kind: JunctionKind::Cross([i, j]),
+                    center: at_line(0.5 * (a + b)),
+                });
                 i += 1;
                 j += 1;
-            } else if gap < 0.0 {
+                continue;
+            }
+            // Screen order: whichever of the two heads comes first along the line is the next
+            // junction, and the list that ran out has no head at all.
+            let take_first = pair.is_none_or(|(a, b)| a < b) && i < first.len();
+            if take_first {
+                at.push(Junction {
+                    kind: JunctionKind::Tee {
+                        side: 0,
+                        divider: i,
+                    },
+                    center: at_line(first[i]),
+                });
                 i += 1;
             } else {
+                at.push(Junction {
+                    kind: JunctionKind::Tee {
+                        side: 1,
+                        divider: j,
+                    },
+                    center: at_line(second[j]),
+                });
                 j += 1;
             }
         }
 
-        Some(Crossings {
+        Some(Junctions {
             outer,
             outer_horizontal,
             bands: [band0, band1],
             outer_bounds,
+            can_transpose,
             at,
         })
     }
 
-    /// The room the button at crossing `index` may take: what the two bands leave it, bounded
+    /// The room the handle at junction `index` may take: what the two bands leave it, bounded
     /// once more by every *other* divider actually drawn in this surface.
     ///
-    /// [`Crossings::room_at`] reads the bands, and a band is a list of parts — each of which is a
+    /// [`Junctions::room_at`] reads the bands, and a band is a list of parts — each of which is a
     /// whole subtree, opaque to it. A part two columns wide may carry a divider of its own a
-    /// level down, sitting a few pixels from the crossing, and a bound that only knows "the
-    /// nearest boundary in *this* band" cheerfully lets the button cover it. Covering it is not
-    /// cosmetic: the button answers to presses over its whole reach and sits in a
+    /// level down, sitting a few pixels from the junction, and a bound that only knows "the
+    /// nearest boundary in *this* band" cheerfully lets the handle cover it. Covering it is not
+    /// cosmetic: the handle answers to presses over its whole reach and sits in a
     /// [`Order::Foreground`] layer, so every point it takes is a point where that divider can no
-    /// longer be grabbed.
+    /// longer be grabbed on its own.
     ///
     /// The honest bound is the distance to the nearest divider on screen, and the layout pass
     /// knows exactly where those are — `separator_rect` is the same derivation the dividers are
-    /// drawn from, so this cannot answer about a line that is not there. The three dividers the
-    /// crossing is *made of* are skipped: the button is meant to sit on them, and they run
+    /// drawn from, so this cannot answer about a line that is not there. The dividers the
+    /// junction is *made of* are skipped: the handle is meant to sit on them, and they run
     /// through its centre.
     ///
-    /// Same convention as `room_at`: `room` is the button's full width and is bounded by a
-    /// one-sided distance, so at the limit the button reaches half way to what it must not
+    /// Same convention as `room_at`: `room` is the handle's full width and is bounded by a
+    /// one-sided distance, so at the limit the handle reaches half way to what it must not
     /// cover. Nothing in the default style comes near either bound — `separator.extra` keeps
-    /// every part 175 px long, against a 38 px button at its widest.
-    fn toggle_room(
+    /// every part 175 px long, against a 38 px handle at its widest.
+    fn handle_room(
         &self,
-        crossings: &Crossings,
+        junctions: &Junctions,
         index: usize,
         separator: &SeparatorStyle,
         pixels_per_point: f32,
     ) -> f32 {
-        let ([i, j], center) = crossings.at[index];
-        let surface = crossings.outer.surface;
-        let own = [
-            crossings.outer.node,
-            crossings.bands[0].dividers[i],
-            crossings.bands[1].dividers[j],
-        ];
+        let Junction { kind, center } = junctions.at[index];
+        let surface = junctions.outer.surface;
+        let own: Vec<NodeId> = std::iter::once(junctions.outer.node)
+            .chain(
+                kind.dividers()
+                    .map(|(band, k)| junctions.bands[band].dividers[k]),
+            )
+            .collect();
 
-        let mut room = crossings.room_at(index);
+        let mut room = junctions.room_at(index);
         for node in self.dock_state[surface].breadth_first() {
             if own.contains(&node) {
                 continue;
@@ -473,58 +625,74 @@ impl<Tab> DockArea<'_, Tab> {
         room
     }
 
-    /// Draws a toggle button at every crossing on `outer`'s line and, on click, transposes the
-    /// grouping around the one that was pressed.
+    /// Draws a handle at every junction on `outer`'s line and carries out whatever the pointer
+    /// asked of one of them: a drag resizes, a ctrl+click on a crossing transposes.
     ///
-    /// Each button is drawn in its own [`Order::Foreground`] layer, on top of the surrounding
+    /// Each handle is drawn in its own [`Order::Foreground`] layer, on top of the surrounding
     /// separators' default layer. Layer order is how egui resolves overlapping widgets — a
     /// widget in a higher-order layer wins hover/click over anything underneath regardless of
     /// screen position or `interact()` call order — so this is what stops the resize cursor and
-    /// the separator's own hover highlight from "bubbling" through the button on top of it, with
+    /// the separator's own hover highlight from "bubbling" through the handle on top of it, with
     /// no need to carve a hole out of the separator's interact rect.
-    pub(super) fn draw_cross_split_toggle(
+    pub(super) fn draw_junction_handles(
         &mut self,
         ui: &mut Ui,
         outer: NodePath,
         style: &SeparatorStyle,
         toggle: &CrossSplitToggleStyle,
+        state: &mut State,
     ) {
-        if !self.show_cross_split_toggle {
+        if !self.show_junction_handles {
             return;
         }
         let pixels_per_point = ui.ctx().pixels_per_point();
-        let Some(crossings) = self.detect_crossings(outer, style.extra, toggle, pixels_per_point)
+        let Some(junctions) = self.detect_junctions(outer, style.extra, toggle, pixels_per_point)
         else {
             return;
         };
 
-        // Every button is drawn, but at most one may be acted on: a transposition rewrites the
-        // tree these crossings were read off, so the rest of them stop describing anything the
-        // moment the first one fires.
-        let mut pressed = None;
-        for index in 0..crossings.at.len() {
-            if self.draw_one_toggle(ui, &crossings, index, style, toggle) {
-                pressed = Some(index);
+        // Every handle is drawn, but at most one may be acted on: both gestures move the
+        // geometry these junctions were read off, so the rest of them stop describing anything
+        // the moment the first one fires. Only one handle can hold the pointer, so this is
+        // bookkeeping rather than a policy — what it buys is that the loop below draws every
+        // handle against one consistent picture.
+        let mut acted = None;
+        for index in 0..junctions.at.len() {
+            match self.draw_one_handle(ui, &junctions, index, style, toggle, state) {
+                Grip::Idle => {}
+                grip => acted = Some((index, grip)),
             }
         }
 
-        if let Some(index) = pressed {
-            self.transpose_cross_split(ui.ctx().pixels_per_point(), &crossings, index);
-            self.events.push(DockEvent::CrossSplitTransposed);
+        match acted {
+            Some((index, Grip::Resize(delta))) => {
+                if self.drag_junction(pixels_per_point, &junctions, index, style.extra, delta) {
+                    if let Some((_, moved)) = &mut state.junction_drag {
+                        *moved = true;
+                    }
+                    self.events.push(DockEvent::SeparatorDragging);
+                }
+            }
+            Some((index, Grip::Transpose)) => {
+                self.transpose_cross_split(pixels_per_point, &junctions, index);
+                self.events.push(DockEvent::CrossSplitTransposed);
+            }
+            Some((_, Grip::Idle)) | None => {}
         }
     }
 
-    /// One toggle button. Returns whether it was clicked this frame.
+    /// One handle. Answers what the pointer asked of it this frame; the caller does it, because
+    /// doing it invalidates the junctions this was read from.
     ///
     /// # It claims no space
     ///
-    /// The button is drawn into a child [`Ui`] made with [`Ui::new_child`], and that is not a
+    /// The handle is drawn into a child [`Ui`] made with [`Ui::new_child`], and that is not a
     /// stylistic choice over `ui.scope_builder`: a *scope* ends by folding the child's
     /// `min_rect` into the parent and advancing its cursor past it. The parent here is the `Ui`
     /// the entire dock is drawn into, and in a floating window that `Ui`'s `min_rect` is the
-    /// size the window asks for — so each button drawn grew the window by one item spacing,
+    /// size the window asks for — so each handle drawn grew the window by one item spacing,
     /// every frame, and `constrain_to` turned that into a slide up the screen once it reached
-    /// the bottom. See `a_cross_in_a_window_does_not_make_the_window_creep`. A button sitting
+    /// the bottom. See `a_cross_in_a_window_does_not_make_the_window_creep`. A handle sitting
     /// on a separator occupies a place the layout has already accounted for; it must take none
     /// of its own.
     ///
@@ -532,42 +700,45 @@ impl<Tab> DockArea<'_, Tab> {
     ///
     /// Two radii, and what they are for is in [`CrossSplitToggleStyle`]: the pointer is caught
     /// from `catch_extra` outside the drawn square, and held until it leaves a zone
-    /// `hold_extra` wider than that. Which of the two applies is state — "is this button
-    /// currently holding the pointer" — so it is remembered per button between frames.
-    fn draw_one_toggle(
-        &self,
+    /// `hold_extra` wider than that. Which of the two applies is state — "is this handle
+    /// currently holding the pointer" — so it is remembered per handle between frames.
+    fn draw_one_handle(
+        &mut self,
         ui: &mut Ui,
-        crossings: &Crossings,
+        junctions: &Junctions,
         index: usize,
         style: &SeparatorStyle,
         toggle: &CrossSplitToggleStyle,
-    ) -> bool {
-        let (at, center) = crossings.at[index];
-        // Keyed by the two dividers that meet here rather than by their position in the band:
-        // an id has to survive a neighbouring divider being dragged past, and an index does
-        // not.
-        let button_id = ui.id().with((
-            crossings.bands[0].dividers[at[0]],
-            crossings.bands[1].dividers[at[1]],
-            "cross_split_toggle",
-        ));
-        let layer_id = LayerId::new(Order::Foreground, button_id);
+        state: &mut State,
+    ) -> Grip {
+        let Junction { kind, center } = junctions.at[index];
+        // Keyed by the dividers that meet here rather than by their position in the band: an id
+        // has to survive a neighbouring divider being dragged past, and an index does not. The
+        // side a tee's divider is on is already in the id it contributes; `outer` is in there
+        // because a junction is a fact about *that* line, and two of them are told apart by it.
+        let key: Vec<NodeId> = std::iter::once(junctions.outer.node)
+            .chain(
+                kind.dividers()
+                    .map(|(band, k)| junctions.bands[band].dividers[k]),
+            )
+            .collect();
+        let handle_id = ui.id().with((key, "junction_handle"));
+        let layer_id = LayerId::new(Order::Foreground, handle_id);
 
-        // Never wider than the crossing has room for — see `toggle_metrics` for how the three
-        // lengths are cut down, and `toggle_room` for what "room" answers to.
-        let room = self.toggle_room(crossings, index, style, ui.ctx().pixels_per_point());
+        // Never wider than the junction has room for — see `toggle_metrics` for how the three
+        // lengths are cut down, and `handle_room` for what "room" answers to.
+        let room = self.handle_room(junctions, index, style, ui.ctx().pixels_per_point());
         let (size, catch_extra, hold_extra) = toggle_metrics(toggle, room);
         let drawn_idle = Rect::from_center_size(center, Vec2::splat(size));
         let catch_rect = drawn_idle.expand(catch_extra);
 
-        // The grip is remembered as *when* it was last held, not as a flag. A crossing can stop
+        // The grip is remembered as *when* it was last held, not as a flag. A junction can stop
         // existing while it holds the pointer — the layout changes under it — and a bare `true`
-        // left in memory would arm the button the moment the same two dividers line up again,
-        // widening its reach for a frame at a point the pointer merely happens to be near. A
-        // pass number cannot go stale: it either names the frame before this one, or it does
-        // not.
+        // left in memory would arm the handle the moment the same dividers meet again, widening
+        // its reach for a frame at a point the pointer merely happens to be near. A pass number
+        // cannot go stale: it either names the frame before this one, or it does not.
         let pass = ui.ctx().cumulative_pass_nr();
-        let held_on: Option<u64> = ui.data(|data| data.get_temp(button_id));
+        let held_on: Option<u64> = ui.data(|data| data.get_temp(handle_id));
         let holding = held_on.is_some_and(|last| last + 1 >= pass);
         let hit_rect = if holding {
             catch_rect.expand(hold_extra)
@@ -577,57 +748,129 @@ impl<Tab> DockArea<'_, Tab> {
 
         let ui = &mut ui.new_child(UiBuilder::new().layer_id(layer_id).max_rect(hit_rect));
 
+        // Both gestures live on one widget, and the cursor names the one that needs no
+        // modifier: this is a thing you drag, in either direction at once.
         let response = ui
-            .interact(hit_rect, button_id, Sense::click())
-            .on_hover_cursor(CursorIcon::PointingHand);
+            .interact(hit_rect, handle_id, Sense::click_and_drag())
+            .on_hover_and_drag_cursor(CursorIcon::Move);
 
         // A press keeps its grip even if the pointer slides off, the same way any button does;
         // without it, releasing a hair outside would both cancel the click and disarm.
         let holds_now = response.hovered() || response.is_pointer_button_down_on();
         ui.data_mut(|data| {
             if holds_now {
-                data.insert_temp(button_id, pass);
+                data.insert_temp(handle_id, pass);
             } else {
-                data.remove_temp::<u64>(button_id);
+                data.remove_temp::<u64>(handle_id);
             }
         });
 
         // One rectangle, held or not. The margins widen what answers to the pointer; they do
         // not widen what is painted. Growing the square to the catch zone was tried — it made
-        // the button more than double under the cursor at the default style, which reads as the
+        // the handle more than double under the cursor at the default style, which reads as the
         // thing being dragged rather than offered. Colour carries the "you have it" instead.
-        let button_rect = drawn_idle;
-        let button_size = button_rect.width();
-
+        let handle_size = drawn_idle.width();
         let color = if holds_now {
             style.color_hovered
         } else {
             style.color_idle
         };
         ui.painter().rect(
-            button_rect,
-            CornerRadius::from(button_size * 0.25),
+            drawn_idle,
+            CornerRadius::from(handle_size * 0.25),
             color,
-            egui::Stroke::NONE,
+            Stroke::NONE,
             StrokeKind::Inside,
         );
-        // A small pinwheel of four arrows pointing outward, hinting at "swap the grouping":
-        let stroke = egui::Stroke::new(1.5, style.color_dragged);
-        let arm = button_size * 0.28;
-        for angle_deg in [45.0_f32, 135.0, 225.0, 315.0] {
-            let angle = angle_deg.to_radians();
-            let dir_vec = vec2(angle.cos(), angle.sin());
-            let tip = center + dir_vec * arm;
-            let base = center + dir_vec * (arm * 0.3);
-            ui.painter().line_segment([base, tip], stroke);
-            let perp = vec2(-dir_vec.y, dir_vec.x) * (arm * 0.25);
-            ui.painter()
-                .line_segment([tip, tip - dir_vec * (arm * 0.35) + perp], stroke);
-            ui.painter()
-                .line_segment([tip, tip - dir_vec * (arm * 0.35) - perp], stroke);
+        let stroke = Stroke::new(1.5, style.color_dragged);
+        for dir in icon_arms(kind, junctions.outer_horizontal) {
+            draw_arrow(ui.painter(), center, dir, handle_size * 0.28, stroke);
         }
 
-        response.clicked()
+        // Whether this drag has moved anything is what tells a gesture that changed the layout
+        // from one that was swallowed by the clamp — the same question `separator_drag_start`
+        // answers for a single divider, asked of two or three at once.
+        if response.drag_started() {
+            state.junction_drag = Some((handle_id, false));
+        }
+        if response.drag_stopped() {
+            let moved = state
+                .junction_drag
+                .take_if(|(id, _)| *id == handle_id)
+                .is_some_and(|(_, moved)| moved);
+            if moved {
+                self.events.push(DockEvent::LayoutCommitted);
+            }
+        }
+        if response.dragged() {
+            return Grip::Resize(response.drag_delta());
+        }
+
+        // Ctrl, because a plain click is what a drag that did not travel far enough comes out
+        // as, and a gesture aimed at moving a line must not rewrite the tree when it falls
+        // short. `can_transpose` and the kind are both real refusals rather than guards against
+        // the impossible: a tee has nothing to transpose, and a line whose parts cannot be
+        // re-nested cannot be transposed without the picture jumping.
+        let transposable = junctions.can_transpose && matches!(kind, JunctionKind::Cross(_));
+        if response.clicked() && transposable && ui.input(|i| i.modifiers.command) {
+            return Grip::Transpose;
+        }
+
+        Grip::Idle
+    }
+
+    /// Moves every separator that meets at junction `index` by `delta`. Answers whether any of
+    /// them actually moved.
+    ///
+    /// The delta is split by axis, and which component goes where is the whole geometry of the
+    /// gesture: the line between `outer`'s children runs *across* `outer`'s own axis, so the
+    /// component along that axis moves `outer` itself, and the other one moves the divider — or
+    /// the two aligned dividers — that end on it.
+    fn drag_junction(
+        &mut self,
+        pixels_per_point: f32,
+        junctions: &Junctions,
+        index: usize,
+        extra: f32,
+        delta: Vec2,
+    ) -> bool {
+        let (along_outer, along_bands) = if junctions.outer_horizontal {
+            (delta.x, delta.y)
+        } else {
+            (delta.y, delta.x)
+        };
+
+        let dividers: Vec<NodePath> = junctions.at[index]
+            .kind
+            .dividers()
+            .map(|(band, k)| {
+                NodePath::new(junctions.outer.surface, junctions.bands[band].dividers[k])
+            })
+            .collect();
+
+        // The tightest of what the dividers can each take, applied to all of them: a cross is
+        // two dividers cut from *different* intervals, so the same delta in points is a
+        // different fraction for each and one of them can hit its limit while the other still
+        // has room. Moving them by what each can take on its own would leave the "+" a jog —
+        // the very thing the magnet exists to close — so the pair moves together or not at all.
+        let common = dividers
+            .iter()
+            .map(|path| self.admissible_delta(*path, pixels_per_point, extra, along_bands))
+            .fold(along_bands, |tightest, allowed| {
+                if allowed.abs() < tightest.abs() {
+                    allowed
+                } else {
+                    tightest
+                }
+            });
+
+        // `outer` is not part of that: it is one boundary along the other axis, with nothing to
+        // stay in line with.
+        let mut moved = self.nudge_split(junctions.outer, pixels_per_point, extra, along_outer);
+        for path in dividers {
+            moved |= self.nudge_split(path, pixels_per_point, extra, common);
+        }
+        moved
     }
 
     /// Transposes the grouping around crossing `index`, keeping every leaf exactly where it is
@@ -671,18 +914,20 @@ impl<Tab> DockArea<'_, Tab> {
     fn transpose_cross_split(
         &mut self,
         pixels_per_point: f32,
-        crossings: &Crossings,
+        junctions: &Junctions,
         index: usize,
     ) {
-        let Crossings {
+        let Junctions {
             outer,
             outer_horizontal,
             bands,
             outer_bounds,
             ..
-        } = crossings;
+        } = junctions;
         let [band0, band1] = bands;
-        let [i, j] = crossings.at[index].0;
+        let JunctionKind::Cross([i, j]) = junctions.at[index].kind else {
+            unreachable!("only a crossing is offered a transposition")
+        };
 
         // The crossing line, along the bands' axis. Averaged: the two dividers are allowed to
         // differ by up to `TOLERANCE`, that being the point of the tolerance.
@@ -844,33 +1089,42 @@ mod tests {
         run_frame(ctx, state, style, id, vec![]);
     }
 
-    /// Runs one real headless frame with the given input `events` fed to it.
+    /// Runs one real headless frame with the given input `events` fed to it, and answers what
+    /// the dock reported during it.
+    ///
+    /// Most callers here are asking about geometry and drop the report on the floor; the ones
+    /// that are not are asking whether a gesture announced itself, which is a separate question
+    /// from whether it moved anything.
     fn run_frame(
         ctx: &Context,
         state: &mut DockState<u32>,
         style: &Style,
         id: Id,
         events: Vec<egui::Event>,
-    ) {
+    ) -> Vec<DockEvent> {
         let input = RawInput {
             screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, SCREEN)),
             events,
             ..Default::default()
         };
+        let mut reported = Vec::new();
         let mut output = ctx.run_ui(input, |ctx| {
             CentralPanel::default().show(ctx, |ui| {
-                DockArea::new(state)
+                reported = DockArea::new(state)
                     .id(id)
                     .style(style.clone())
-                    .show_inside_with_response(ui, &mut Viewer);
+                    .show_inside_with_response(ui, &mut Viewer)
+                    .events;
             });
         });
         // Headless harness, no GPU backend to hand the delta to.
         output.textures_delta.clear();
+        reported
     }
 
     /// Drags from `from` to `to` over several frames, the way a hand would — egui only calls
-    /// a press a *drag* once the pointer has travelled past a threshold.
+    /// a press a *drag* once the pointer has travelled past a threshold. Answers everything the
+    /// dock reported over the whole gesture.
     fn drag(
         ctx: &Context,
         state: &mut DockState<u32>,
@@ -878,11 +1132,11 @@ mod tests {
         id: Id,
         from: Pos2,
         to: Pos2,
-    ) {
+    ) -> Vec<DockEvent> {
         use egui::{Event, Modifiers, PointerButton};
 
-        run_frame(ctx, state, style, id, vec![Event::PointerMoved(from)]);
-        run_frame(
+        let mut reported = run_frame(ctx, state, style, id, vec![Event::PointerMoved(from)]);
+        reported.extend(run_frame(
             ctx,
             state,
             style,
@@ -893,18 +1147,18 @@ mod tests {
                 pressed: true,
                 modifiers: Modifiers::NONE,
             }],
-        );
+        ));
         for step in 1..=4u8 {
             let t = f32::from(step) / 4.0;
-            run_frame(
+            reported.extend(run_frame(
                 ctx,
                 state,
                 style,
                 id,
                 vec![Event::PointerMoved(from + (to - from) * t)],
-            );
+            ));
         }
-        run_frame(
+        reported.extend(run_frame(
             ctx,
             state,
             style,
@@ -915,8 +1169,15 @@ mod tests {
                 pressed: false,
                 modifiers: Modifiers::NONE,
             }],
-        );
-        run_frame(ctx, state, style, id, vec![Event::PointerMoved(to)]);
+        ));
+        reported.extend(run_frame(
+            ctx,
+            state,
+            style,
+            id,
+            vec![Event::PointerMoved(to)],
+        ));
+        reported
     }
 
     fn fraction_of(state: &DockState<u32>, id: NodeId) -> f32 {
@@ -1106,7 +1367,7 @@ mod tests {
         };
         assert!(
             (bottom_divider_x - top_divider_x).abs()
-                <= Crossings::tolerance(&strict, ctx.pixels_per_point()),
+                <= Junctions::tolerance(&strict, ctx.pixels_per_point()),
             "the scene was not built as intended: the two dividers are at {top_divider_x} and \
              {bottom_divider_x}, so there is no crossing for the detector to miss"
         );
@@ -1275,34 +1536,60 @@ mod tests {
 
     /// Clicks once at `at`, over several frames (press + release + settle).
     fn click(ctx: &Context, state: &mut DockState<u32>, style: &Style, id: Id, at: Pos2) {
+        click_holding(ctx, state, style, id, at, egui::Modifiers::NONE);
+    }
+
+    /// [`click`] with ctrl held — the gesture that transposes a crossing.
+    fn ctrl_click(ctx: &Context, state: &mut DockState<u32>, style: &Style, id: Id, at: Pos2) {
+        click_holding(ctx, state, style, id, at, egui::Modifiers::COMMAND);
+    }
+
+    /// One click at `at` with `modifiers` held down for the whole gesture.
+    ///
+    /// The modifiers arrive as their own [`egui::Event::ModifiersChanged`] and are taken back
+    /// afterwards, because that is the only thing egui updates `InputState::modifiers` from —
+    /// what a widget reads through `ui.input(|i| i.modifiers)`. Putting them on the
+    /// `PointerButton` events alone leaves that state untouched, and a ctrl+click assembled that
+    /// way arrives as a plain one; releasing them afterwards keeps a test's ctrl out of the
+    /// frames that follow, which live in the same [`Context`].
+    fn click_holding(
+        ctx: &Context,
+        state: &mut DockState<u32>,
+        style: &Style,
+        id: Id,
+        at: Pos2,
+        modifiers: egui::Modifiers,
+    ) {
         use egui::{Event, Modifiers, PointerButton};
 
-        run_frame(ctx, state, style, id, vec![Event::PointerMoved(at)]);
         run_frame(
             ctx,
             state,
             style,
             id,
-            vec![Event::PointerButton {
-                pos: at,
-                button: PointerButton::Primary,
-                pressed: true,
-                modifiers: Modifiers::NONE,
-            }],
+            vec![Event::ModifiersChanged(modifiers), Event::PointerMoved(at)],
         );
+        for pressed in [true, false] {
+            run_frame(
+                ctx,
+                state,
+                style,
+                id,
+                vec![Event::PointerButton {
+                    pos: at,
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers,
+                }],
+            );
+        }
         run_frame(
             ctx,
             state,
             style,
             id,
-            vec![Event::PointerButton {
-                pos: at,
-                button: PointerButton::Primary,
-                pressed: false,
-                modifiers: Modifiers::NONE,
-            }],
+            vec![Event::ModifiersChanged(Modifiers::NONE)],
         );
-        run_frame(ctx, state, style, id, vec![]);
     }
 
     /// How far out of line two dividers may be and still be offered a button is the style's
@@ -1371,13 +1658,22 @@ mod tests {
             };
             let mut area = DockArea::new(&mut state).id(Id::new(DOCK_ID));
             area.layout = scene(gap);
-            area.detect_crossings(
+            area.detect_junctions(
                 outer,
                 band_style().separator.extra,
                 &toggle,
                 pixels_per_point,
             )
-            .is_some_and(|crossings| !crossings.at.is_empty())
+            // A *crossing*, not a junction: outside the magnet's reach the same two dividers are
+            // still there, each ending on the line as a tee of its own. What the tolerance
+            // decides is whether they are one line or two, and asking "is there anything here"
+            // would answer yes either way.
+            .is_some_and(|junctions| {
+                junctions
+                    .at
+                    .iter()
+                    .any(|junction| matches!(junction.kind, JunctionKind::Cross(_)))
+            })
         };
 
         // The knob: what is offered is what the style asked for, in points, at any density.
@@ -1545,8 +1841,8 @@ mod tests {
         }
     }
 
-    /// Clicks at `at` and reports whether the grouping flipped — that is, whether the press
-    /// reached the toggle rather than the separator underneath it.
+    /// Ctrl+clicks at `at` and reports whether the grouping flipped — that is, whether the press
+    /// reached the handle rather than the separator underneath it.
     fn click_flips(
         ctx: &Context,
         state: &mut DockState<u32>,
@@ -1556,7 +1852,7 @@ mod tests {
         at: Pos2,
     ) -> bool {
         let was_horizontal = state[outer].is_horizontal();
-        click(ctx, state, style, id, at);
+        ctrl_click(ctx, state, style, id, at);
         state[outer].is_horizontal() != was_horizontal
     }
 
@@ -1635,10 +1931,12 @@ mod tests {
             "splitting a part removed the crossing, so this scene tests nothing"
         );
 
-        // Press the hidden divider at its closest point to the crossing. A click is the probe,
-        // not a drag: egui hands a drag to the topmost widget that *senses* drag, and the button
-        // senses only clicks — so a drag reaches the separator underneath whatever the button
-        // covers, and would report this bug as fixed while it was still there.
+        // Press the hidden divider at its closest point to the crossing. A ctrl+click is the
+        // probe because a transposition is the thing that leaves a mark on the tree; what the
+        // press is really asking is which widget the point belongs to. It used also to be the
+        // only probe available — the handle senses drags now, so a drag no longer falls through
+        // to the separator underneath, which is the feature and is exactly why this bound has to
+        // hold.
         let press = Pos2::new(divider, center.y - 5.0);
         assert!(
             !click_flips(&ctx, &mut state, &style, id, outer, press),
@@ -1725,8 +2023,39 @@ mod tests {
         );
     }
 
-    /// Where the toggle buttons on `outer`'s line currently sit, in screen order along it.
-    /// Empty if no crossing is detected and no button is on screen at all.
+    /// Every junction on `outer`'s line, in screen order along it: what kind it is, and where.
+    /// Empty where the detector answers nothing at all.
+    fn junctions_on(
+        ctx: &Context,
+        state: &mut DockState<u32>,
+        style: &Style,
+        id: Id,
+        outer: NodePath,
+    ) -> Vec<(JunctionKind, Pos2)> {
+        let mut area = DockArea::new(state).id(id);
+        area.layout = DockLayout::load(ctx, id);
+        area.detect_junctions(
+            outer,
+            style.separator.extra,
+            &style.cross_split_toggle,
+            ctx.pixels_per_point(),
+        )
+        .map(|junctions| {
+            junctions
+                .at
+                .iter()
+                .map(|junction| (junction.kind, junction.center))
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Where the handles a ctrl+click can *transpose* sit, in screen order along `outer`'s line.
+    ///
+    /// Crossings only, and only where the two chains can be re-nested: that is exactly the set
+    /// the toggle acts on, which is what the suite below is about. Tees carry a handle too — see
+    /// [`junctions_on`] — but there is nothing to transpose at one, so counting them here would
+    /// make every "how many buttons are offered" assertion mean something else.
     fn toggle_centers(
         ctx: &Context,
         state: &mut DockState<u32>,
@@ -1736,13 +2065,21 @@ mod tests {
     ) -> Vec<Pos2> {
         let mut area = DockArea::new(state).id(id);
         area.layout = DockLayout::load(ctx, id);
-        area.detect_crossings(
+        area.detect_junctions(
             outer,
             style.separator.extra,
             &style.cross_split_toggle,
             ctx.pixels_per_point(),
         )
-        .map(|crossings| crossings.at.iter().map(|&(_, center)| center).collect())
+        .filter(|junctions| junctions.can_transpose)
+        .map(|junctions| {
+            junctions
+                .at
+                .iter()
+                .filter(|junction| matches!(junction.kind, JunctionKind::Cross(_)))
+                .map(|junction| junction.center)
+                .collect()
+        })
         .unwrap_or_default()
     }
 
@@ -1787,11 +2124,11 @@ mod tests {
         center: Pos2,
     ) {
         let was_horizontal = state[outer].is_horizontal();
-        click(ctx, state, style, id, center);
+        ctrl_click(ctx, state, style, id, center);
         assert_eq!(
             state[outer].is_horizontal(),
             !was_horizontal,
-            "clicking the toggle did not flip the grouping"
+            "ctrl+clicking the handle did not flip the grouping"
         );
         // The rectangles are only half of what a regrouping has to get right: two of the four
         // grandchildren change parent, and a `Node` carries neither the child's back-pointer to
@@ -1905,7 +2242,7 @@ mod tests {
                 pos: center,
                 button: PointerButton::Primary,
                 pressed,
-                modifiers: Modifiers::NONE,
+                modifiers: Modifiers::COMMAND,
             }]
         };
         run_frame(
@@ -1913,7 +2250,10 @@ mod tests {
             &mut state,
             &style,
             id,
-            vec![Event::PointerMoved(center)],
+            vec![
+                Event::ModifiersChanged(Modifiers::COMMAND),
+                Event::PointerMoved(center),
+            ],
         );
         run_frame(&ctx, &mut state, &style, id, button(true));
         // The release frame is the one that transposes, mid-pass. No quiet frame after it.
@@ -2281,7 +2621,7 @@ mod tests {
         }
     }
 
-    /// A "+" whose picture cannot be rebuilt is not offered.
+    /// A "+" whose picture cannot be rebuilt is not offered a *transposition*.
     ///
     /// The separator margin is a floor on how close a boundary may come to either end of the
     /// interval it is cut from, so on an interval shorter than twice the margin the boundary is
@@ -2290,9 +2630,13 @@ mod tests {
     /// outside the new interval's band is drawn clamped: the picture would jump.
     ///
     /// So the same scene is built twice and the margin is the only thing that differs. With a
-    /// small one the button is there; with the default 175 px it is not, and the second half is
-    /// what this test is for. The first half is what keeps it honest — without it, "no button"
-    /// would also be the answer for a scene that never had a crossing.
+    /// small one the toggle is there; with the default 175 px it is not, and the second half is
+    /// what this test is for. The first half is what keeps it honest — without it, "nothing
+    /// offered" would also be the answer for a scene that never had a crossing.
+    ///
+    /// What is *not* withdrawn is the handle: the junction is still a junction and a drag on it
+    /// is meaningful — see [`Junctions::can_transpose`], which is why this gate stopped
+    /// suppressing the detection and now only refuses the one gesture it is about.
     #[test]
     fn a_cross_whose_parts_are_thinner_than_the_margin_is_not_offered() {
         let ctx = Context::default();
@@ -2417,6 +2761,371 @@ mod tests {
         // miscounts the chain shows up.
         press_toggle_at(&ctx, &mut state, &style, id, outer, centers[1]);
         assert_rects_close(&before, &leaf_rects(&DockLayout::load(&ctx, id), &leaves));
+    }
+
+    // ------------------------------------------------------------------------
+    // The tee, and the drag that moves every separator meeting at a junction
+    // ------------------------------------------------------------------------
+
+    /// Where band `root`'s dividers sit on screen, ascending — the test's own reading of the
+    /// boundaries [`Band::bounds`] names, taken off the rectangles rather than off the tree.
+    fn divider_positions_of(
+        ctx: &Context,
+        state: &DockState<u32>,
+        id: Id,
+        root: NodeId,
+        horizontal: bool,
+    ) -> Vec<f32> {
+        let layout = DockLayout::load(ctx, id);
+        let rect = |n: NodeId| {
+            layout
+                .rect(NodePath::new(SurfaceIndex::main(), n))
+                .expect("laid out this frame")
+        };
+        band_parts_of(state, root, horizontal)
+            .windows(2)
+            .map(|pair| {
+                0.5 * (edge(rect(pair[0]), horizontal, true)
+                    + edge(rect(pair[1]), horizontal, false))
+            })
+            .collect()
+    }
+
+    /// A column beside a stack — `H(A, V(B, C))`. The stack's divider ends on the line between
+    /// the two children: three panels meet there, and nothing crosses.
+    ///
+    /// Returns the state, `outer`'s path, and the leaves as `[left, top_right, bottom_right]`.
+    fn tee_scene(style: &Style, id: Id) -> (Context, DockState<u32>, NodePath, [NodeId; 3]) {
+        let ctx = Context::default();
+        let mut state = DockState::new(vec![0u32]);
+        let left = state.main_surface().root().unwrap();
+        let [_, top_right] = state.split(
+            NodePath::new(SurfaceIndex::main(), left),
+            Split::Right,
+            0.5,
+            Node::leaf(1u32),
+        );
+        let outer = NodePath::new(
+            SurfaceIndex::main(),
+            state.main_surface().root().expect("the dock has a root"),
+        );
+        let [_, bottom_right] = state.split(
+            NodePath::new(SurfaceIndex::main(), top_right),
+            Split::Below,
+            0.5,
+            Node::leaf(2u32),
+        );
+        render(&ctx, &mut state, style, id);
+        (ctx, state, outer, [left, top_right, bottom_right])
+    }
+
+    /// Three panels meet where one band's divider ends on the line, and that is a junction with
+    /// a handle on it — the shape the detector used to walk straight past.
+    ///
+    /// The kind is asserted and not only the count, because "one junction here" is also true of
+    /// a detector that called this a crossing: what a crossing claims is that *both* sides are
+    /// divided, and this scene's left side is one undivided panel. And the point is checked
+    /// against the two separators as drawn, so the handle cannot sit where they do not meet.
+    #[test]
+    fn a_tee_is_offered_where_only_one_band_is_divided() {
+        let id = Id::new(DOCK_ID);
+        let style = Style::default();
+        let (ctx, mut state, outer, [left, top_right, bottom_right]) = tee_scene(&style, id);
+
+        let junctions = junctions_on(&ctx, &mut state, &style, id, outer);
+        assert_eq!(
+            junctions.len(),
+            1,
+            "exactly one point in this scene has separators meeting at it: {junctions:?}"
+        );
+        assert_eq!(
+            junctions[0].0,
+            JunctionKind::Tee {
+                side: 1,
+                divider: 0
+            },
+            "the divider that ends on the line is the second band's first one"
+        );
+        assert!(
+            toggle_centers(&ctx, &mut state, &style, id, outer).is_empty(),
+            "nothing crosses here, so there is no grouping to transpose"
+        );
+
+        let layout = DockLayout::load(&ctx, id);
+        let rect = |n: NodeId| {
+            layout
+                .rect(NodePath::new(SurfaceIndex::main(), n))
+                .expect("laid out this frame")
+        };
+        let meeting = pos2(
+            0.5 * (rect(left).right() + rect(top_right).left()),
+            0.5 * (rect(top_right).bottom() + rect(bottom_right).top()),
+        );
+        assert!(
+            (junctions[0].1 - meeting).length() < 1.0,
+            "the handle is at {:?}, the separators meet at {meeting:?}",
+            junctions[0].1
+        );
+    }
+
+    /// The staggered "L" — two bands divided at *different* places. It has no crossing, and it
+    /// never had; what it does have is two tees, one per divider ending on the line.
+    ///
+    /// This scene used to be the whole "the detector must not invent a cross" case and was
+    /// asserted as "no button at all". Both halves are here now, because they are two different
+    /// claims and only one of them was ever true of the picture.
+    #[test]
+    fn the_staggered_l_shape_has_two_tees_and_no_crossing() {
+        let mut state = DockState::new(vec![0u32]);
+        let a = state.main_surface().root().unwrap();
+        let [_, node_c] = state.split(
+            NodePath::new(SurfaceIndex::main(), a),
+            Split::Right,
+            0.5,
+            Node::leaf(2u32),
+        );
+        let outer = NodePath::new(SurfaceIndex::main(), state.main_surface().root().unwrap());
+        state.split(
+            NodePath::new(SurfaceIndex::main(), a),
+            Split::Below,
+            0.2,
+            Node::leaf(1u32),
+        );
+        state.split(
+            NodePath::new(SurfaceIndex::main(), node_c),
+            Split::Below,
+            0.8,
+            Node::leaf(3u32),
+        );
+
+        let ctx = Context::default();
+        let id = Id::new(DOCK_ID);
+        let style = Style::default();
+        render(&ctx, &mut state, &style, id);
+
+        let junctions = junctions_on(&ctx, &mut state, &style, id, outer);
+        let kinds: Vec<JunctionKind> = junctions.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                JunctionKind::Tee {
+                    side: 0,
+                    divider: 0
+                },
+                JunctionKind::Tee {
+                    side: 1,
+                    divider: 0
+                },
+            ],
+            "two dividers end on this line, at different heights, and neither meets the other"
+        );
+        assert!(
+            junctions[0].1.y < junctions[1].1.y,
+            "junctions come out in screen order: {junctions:?}"
+        );
+    }
+
+    /// The gesture: one drag on a tee moves **both** separators that meet at it — the line that
+    /// runs through it, and the one that stops on it.
+    ///
+    /// Judged on the screen rather than on fractions: the two boundaries are cut from different
+    /// intervals, so "the fraction changed" says nothing about how far anything went, and how far
+    /// it went is the whole promise. The third assertion is what keeps the first two from passing
+    /// on a gesture that moved the entire layout: the panel the stem does not touch keeps its
+    /// height.
+    #[test]
+    fn dragging_a_tee_moves_both_of_its_separators() {
+        const BY: Vec2 = Vec2::new(70.0, 45.0);
+
+        let id = Id::new(DOCK_ID);
+        let style = Style::default();
+        let (ctx, mut state, outer, leaves) = tee_scene(&style, id);
+
+        let at = junctions_on(&ctx, &mut state, &style, id, outer)[0].1;
+        let before = leaf_rects(&DockLayout::load(&ctx, id), &leaves);
+        drag(&ctx, &mut state, &style, id, at, at + BY);
+        let after = leaf_rects(&DockLayout::load(&ctx, id), &leaves);
+
+        assert!(
+            (after[0].right() - before[0].right() - BY.x).abs() < 1.5,
+            "the line between the two children was to move {}pt sideways, and went from {} to {}",
+            BY.x,
+            before[0].right(),
+            after[0].right()
+        );
+        assert!(
+            (after[1].bottom() - before[1].bottom() - BY.y).abs() < 1.5,
+            "the divider ending on it was to move {}pt down, and went from {} to {}",
+            BY.y,
+            before[1].bottom(),
+            after[1].bottom()
+        );
+        assert!(
+            (after[0].height() - before[0].height()).abs() < 0.5,
+            "the panel on the other side of the line is not divided and must keep its height"
+        );
+    }
+
+    /// A cross is three separators, and a drag moves all three: the line, and the two dividers
+    /// that make it a "+" — which come out of the gesture still on one line.
+    #[test]
+    fn dragging_a_cross_moves_all_three_of_its_separators() {
+        const BY: Vec2 = Vec2::new(-60.0, 55.0);
+
+        let ctx = Context::default();
+        let id = Id::new(DOCK_ID);
+        let style = Style::default();
+        let (mut state, outer_id, leaves) = build_cross(true, 0.5, 0.5);
+        let outer = NodePath::new(SurfaceIndex::main(), outer_id);
+        render(&ctx, &mut state, &style, id);
+
+        let at = toggle_center(&ctx, &mut state, &style, id, outer).expect("a 2x2 is a cross");
+        let before = leaf_rects(&DockLayout::load(&ctx, id), &leaves);
+        drag(&ctx, &mut state, &style, id, at, at + BY);
+        let after = leaf_rects(&DockLayout::load(&ctx, id), &leaves);
+
+        // `leaves` is `[top_left, bottom_left, top_right, bottom_right]`.
+        assert!(
+            (after[0].right() - before[0].right() - BY.x).abs() < 1.5,
+            "the line between the two columns did not follow the drag"
+        );
+        for (name, k) in [("left", 0), ("right", 2)] {
+            assert!(
+                (after[k].bottom() - before[k].bottom() - BY.y).abs() < 1.5,
+                "the {name} column's divider was to move {}pt down, and went from {} to {}",
+                BY.y,
+                before[k].bottom(),
+                after[k].bottom()
+            );
+        }
+        assert_eq!(
+            toggle_centers(&ctx, &mut state, &style, id, outer).len(),
+            1,
+            "the drag broke the crossing apart into two tees"
+        );
+    }
+
+    /// Pushed past what one of its dividers can give, a cross still comes out as one line.
+    ///
+    /// The two dividers are cut from *different* intervals, so the same drag in points is a
+    /// different fraction for each and the tighter one runs out first. Moving each by what it can
+    /// take on its own would leave the "+" a jog of exactly the overshoot — which is the shape the
+    /// magnet exists to close, produced by the gesture that is supposed to preserve it.
+    ///
+    /// The scene: a 2-part band beside a 3-part one, sharing the divider at 0.4 of the height.
+    /// Left-leaning, so the shared divider of the second band is nested inside the chain covering
+    /// its first two parts and cannot pass 0.75 of the band, while the first band's may go all the
+    /// way down.
+    #[test]
+    fn a_cross_dragged_past_one_dividers_limit_stays_one_line() {
+        /// Far enough past the tighter divider's limit that a per-divider clamp would show.
+        const DOWN: f32 = 400.0;
+
+        let ctx = Context::default();
+        let id = Id::new(DOCK_ID);
+        let style = band_style();
+        let (mut state, outer_id, _) = build_bands(
+            &ctx,
+            &style,
+            id,
+            true,
+            [&[0.4], &[0.4, 0.75]],
+            [Leaning::Left, Leaning::Left],
+        );
+        let outer = NodePath::new(SurfaceIndex::main(), outer_id);
+        let [b0, b1] = state.main_surface().children(outer_id).unwrap();
+        let positions = |state: &DockState<u32>| {
+            (
+                divider_positions_of(&ctx, state, id, b0, false),
+                divider_positions_of(&ctx, state, id, b1, false),
+            )
+        };
+
+        let at = toggle_center(&ctx, &mut state, &style, id, outer).expect("the bands share 0.4");
+        let (before0, before1) = positions(&state);
+        drag(&ctx, &mut state, &style, id, at, at + Vec2::new(0.0, DOWN));
+        let (after0, after1) = positions(&state);
+
+        assert!(
+            (after0[0] - after1[0]).abs() < 1.0,
+            "the two dividers of the crossing came apart: {} and {}",
+            after0[0],
+            after1[0]
+        );
+        assert!(
+            after0[0] - before0[0] > 100.0,
+            "the drag moved the crossing by {}pt, so there is no clamp to speak of",
+            after0[0] - before0[0]
+        );
+        assert!(
+            after0[0] - before0[0] < DOWN - 50.0,
+            "the drag was not clamped at all ({}pt of {DOWN}pt), so this scene proves nothing",
+            after0[0] - before0[0]
+        );
+        assert!(
+            (after1[1] - before1[1]).abs() < 1.0,
+            "the second band's other divider is not part of this junction and moved anyway: {} \
+             to {}",
+            before1[1],
+            after1[1]
+        );
+    }
+
+    /// A plain click transposes nothing.
+    ///
+    /// That is the price of the drag sharing the handle with the toggle: a press that was meant
+    /// to move a line and did not travel far enough arrives as a click, and a click that rewrote
+    /// the tree would turn every short drag into a regrouping. The control is the same press with
+    /// ctrl held, which must still flip — otherwise "nothing happened" would also be the answer
+    /// for a handle that had stopped working.
+    #[test]
+    fn a_plain_click_on_a_crossing_transposes_nothing() {
+        let id = Id::new(DOCK_ID);
+        let style = band_style();
+        let (ctx, mut state, outer, center) = cross_scene(&style, id);
+
+        let was_horizontal = state[outer].is_horizontal();
+        click(&ctx, &mut state, &style, id, center);
+        assert_eq!(
+            state[outer].is_horizontal(),
+            was_horizontal,
+            "a click with no modifier transposed the grouping"
+        );
+        assert!(
+            click_flips(&ctx, &mut state, &style, id, outer, center),
+            "ctrl+clicking the same point did nothing either, so the assertion above is free"
+        );
+    }
+
+    /// One junction drag, one commit.
+    ///
+    /// A single-separator drag reports a stream of [`DockEvent::SeparatorDragging`] while it runs
+    /// and exactly one [`DockEvent::LayoutCommitted`] when it ends, and a consumer that persists
+    /// the layout or drives undo is written against that shape. A gesture that moves two
+    /// separators has to report itself the same way — the alternative is a layout change that no
+    /// consumer hears about, or one they hear about twice.
+    #[test]
+    fn a_junction_drag_reports_itself_like_a_separator_drag() {
+        let id = Id::new(DOCK_ID);
+        let style = Style::default();
+        let (ctx, mut state, outer, _) = tee_scene(&style, id);
+
+        let at = junctions_on(&ctx, &mut state, &style, id, outer)[0].1;
+        let reported = drag(&ctx, &mut state, &style, id, at, at + Vec2::new(40.0, 30.0));
+
+        let dragging = reported
+            .iter()
+            .filter(|event| matches!(event, DockEvent::SeparatorDragging))
+            .count();
+        let committed = reported.iter().filter(|event| event.is_committed()).count();
+        assert!(
+            dragging > 0,
+            "the drag moved the layout without saying so: {reported:?}"
+        );
+        assert_eq!(
+            committed, 1,
+            "one finished gesture is one commit, and this reported {committed}: {reported:?}"
+        );
     }
 
     /// Every node of the main surface, split by kind.

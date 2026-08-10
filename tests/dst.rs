@@ -1584,20 +1584,31 @@ impl Sim {
     }
 
     fn click(&mut self, at: Pos2) {
-        self.run_frame(vec![Event::PointerMoved(at)]);
-        self.run_frame(vec![Event::PointerButton {
-            pos: at,
-            button: PointerButton::Primary,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-        }]);
-        self.run_frame(vec![Event::PointerButton {
-            pos: at,
-            button: PointerButton::Primary,
-            pressed: false,
-            modifiers: Modifiers::NONE,
-        }]);
-        self.run_frame(vec![]);
+        self.click_holding(at, Modifiers::NONE);
+    }
+
+    /// A click with `modifiers` held down for the whole gesture.
+    ///
+    /// The modifiers arrive as their own [`Event::ModifiersChanged`] and are taken back
+    /// afterwards, because that is the only thing egui updates `InputState::modifiers` from —
+    /// what a widget reads through `ui.input(|i| i.modifiers)`. Putting them on the
+    /// `PointerButton` events alone leaves that state untouched, and the ctrl+click the junction
+    /// handles ask for would arrive as a plain one; taking them back keeps one step's ctrl out
+    /// of the steps that follow it in the same run.
+    fn click_holding(&mut self, at: Pos2, modifiers: Modifiers) {
+        self.run_frame(vec![
+            Event::ModifiersChanged(modifiers),
+            Event::PointerMoved(at),
+        ]);
+        for pressed in [true, false] {
+            self.run_frame(vec![Event::PointerButton {
+                pos: at,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers,
+            }]);
+        }
+        self.run_frame(vec![Event::ModifiersChanged(Modifiers::NONE)]);
     }
 
     /// A middle click: press and release, in two frames, exactly as a mouse delivers it.
@@ -2281,7 +2292,9 @@ impl Sim {
                 // construction — that is what regrouping the same four rectangles takes.
                 boundaries = BoundaryRule::Any;
 
-                self.click(at);
+                // Ctrl, because that is the gesture: a plain click on a junction handle does
+                // nothing, so that the press a drag falls short of cannot rewrite the tree.
+                self.click_holding(at, Modifiers::COMMAND);
 
                 let flipped = matches!(self.state[path], Node::Horizontal(_)) != horizontal_before;
                 if flipped {

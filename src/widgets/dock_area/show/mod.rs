@@ -22,7 +22,7 @@ use crate::{
     utils::{expand_to_pixel, fade_dock_style, map_to_pixel},
 };
 
-mod cross_split;
+mod junction;
 mod leaf;
 mod main_surface;
 mod window_surface;
@@ -703,46 +703,40 @@ impl<Tab> DockArea<'_, Tab> {
             return;
         }
 
+        // Cloned out of `style` up front, and not where they are used: `style` may be borrowed
+        // from `self.style`, while everything below that *writes* — `nudge_split`, the junction
+        // handles — takes `&mut self`. Holding the borrow across those calls is what used to
+        // force the write to be inlined here, in a `&mut` match on the node, where no second
+        // caller could reach it.
         let style = fade_style.unwrap_or_else(|| self.style.as_ref().unwrap());
+        let separator_style = style.separator.clone();
+        let toggle_style = style.cross_split_toggle.clone();
         let pixels_per_point = ui.ctx().pixels_per_point();
-
-        // Separators are drawn after the layout pass has run over every parent of this
-        // surface, so the geometry map is guaranteed to know this node.
-        let node_rect = self
-            .layout
-            .rect(path)
-            .expect("a separator is only drawn for a node that was just laid out");
 
         // Where the divider is *this frame* — one derivation, shared with everything else that
         // needs to know (see `separator_rect`). The collapsed cases it answers `None` for have
         // already returned above.
         let drawn = self
-            .separator_rect(path, &style.separator, pixels_per_point)
+            .separator_rect(path, &separator_style, pixels_per_point)
             .expect("a separator is only drawn for a split the layout pass just cut");
 
         duplicate! {
             [
-                orientation   dim_point  dim_size;
-                [Horizontal]  [x]        [width];
-                [Vertical]    [y]        [height];
+                orientation   dim_point;
+                [Horizontal]  [x];
+                [Vertical]    [y];
             ]
-            if let Node::orientation(split) = &mut self.dock_state[path.surface][path.node] {
-                // The same rectangle `compute_rect_sizes` cut the children out of, derived the
-                // same way — see `split_rect`, which is why that is a function and not two
-                // lines inlined twice.
-                let rect = split_rect(node_rect, pixels_per_point);
+            if let Node::orientation(split) = &self.dock_state[path.surface][path.node] {
+                // The one thing read off the node here, and the borrow of the tree ends with it:
+                // every write below goes through `nudge_split`, which takes `&mut self`. What
+                // the gesture answers to — the band this frame's geometry can honour — lives
+                // there too, so the divider drawn, the rectangle it is grabbed by and the ratio
+                // a drag writes all still name one line (see `SeparatorBand`).
+                let fraction_at_entry = split.fraction;
                 let separator = drawn;
 
-                // The band the *gesture* answers to: a ratio the current geometry cannot honour
-                // is shown clamped without being written back — see `SeparatorBand`. Where that
-                // clamped ratio puts the line on screen is `separator` above, so the divider
-                // drawn, the rectangle it is grabbed by and the cut `compute_rect_sizes` made
-                // all name one line.
-                let range = rect.dim_size();
-                let band = SeparatorBand::new(split.fraction, range, style.separator.extra);
-
                 let mut expand = Vec2::ZERO;
-                expand.dim_point += style.separator.extra_interact_width / 2.0;
+                expand.dim_point += separator_style.extra_interact_width / 2.0;
                 let interact_rect = separator.expand2(expand);
 
                 let resize_id = ui.id().with((path.node, "separator"));
@@ -779,11 +773,11 @@ impl<Tab> DockArea<'_, Tab> {
                 };
 
                 let color = if response.dragged() {
-                    style.separator.color_dragged
+                    separator_style.color_dragged
                 } else if response.hovered() || response.has_focus() {
-                    style.separator.color_hovered
+                    separator_style.color_hovered
                 } else {
-                    style.separator.color_idle
+                    separator_style.color_idle
                 };
 
                 ui.painter().rect_filled(separator, CornerRadius::ZERO, color);
@@ -812,41 +806,21 @@ impl<Tab> DockArea<'_, Tab> {
                 // consumers that diff a layout snapshot receive a commit event
                 // with no mutation behind it.
                 if response.drag_started() {
-                    state.separator_drag_start = Some((response.id, split.fraction));
+                    state.separator_drag_start = Some((response.id, fraction_at_entry));
                 }
 
-                // The stored ratio is *state*, and only a gesture may write it. The band is
-                // geometry — it is derived from this frame's `range`, so pushing
-                // `split.fraction` into it unconditionally would make every window resize a
-                // silent edit of the layout, and on a node shorter than `2 * separator.extra`
-                // an outright loss: the band is the single point 0.5 there, so the stored ratio
-                // would be replaced by "dead centre" and growing the window back would not
-                // bring it home. What the band does here is give the gesture its starting point
-                // (`effective`, i.e. the line the user actually grabbed) and its limits.
-                //
                 // `drag_delta()` is zero on any frame the separator is not being dragged, so a
-                // non-zero delta *is* the gesture; arrow nudges are never zero either.
-                //
-                // `band.min < band.max` is the third condition and it is not cosmetic. On a node
-                // too short to leave the margin on both sides the band is the single point `0.5`,
-                // and then `clamp` answers `0.5` whatever the delta was: the gesture cannot move
-                // the boundary anywhere, and writing its "answer" replaces the stored ratio with
-                // dead centre. That is the same loss the band was separated from the tree to
-                // prevent — nothing moves on screen, and what is gone is where the panel returns
-                // to when the window grows again. Found by the frame sweep, on a divider a tab
-                // drag grabbed by accident: 0.75 became 0.5 during a step that never named it.
+                // non-zero delta *is* the gesture; arrow nudges are never zero either. What the
+                // delta is allowed to do to the stored ratio — and when it is allowed to do
+                // nothing at all — is `nudge_split`'s business, shared with the junction
+                // handles, which move two or three of these at once.
                 let is_arrow = arrow_key_offset.is_some();
                 let delta = arrow_key_offset.unwrap_or(response.drag_delta()).dim_point;
-                if range > 0.0 && delta != 0.0 && band.min < band.max {
-                    let new_fraction =
-                        (band.effective + delta / range).clamp(band.min, band.max);
-                    if split.fraction != new_fraction {
-                        split.fraction = new_fraction;
-                        if is_arrow {
-                            self.events.push(DockEvent::LayoutCommitted);
-                        } else {
-                            self.events.push(DockEvent::SeparatorDragging);
-                        }
+                if self.nudge_split(path, pixels_per_point, separator_style.extra, delta) {
+                    if is_arrow {
+                        self.events.push(DockEvent::LayoutCommitted);
+                    } else {
+                        self.events.push(DockEvent::SeparatorDragging);
                     }
                 }
 
@@ -861,24 +835,127 @@ impl<Tab> DockArea<'_, Tab> {
                         .separator_drag_start
                         .take_if(|(id, _)| *id == response.id)
                         .map(|(_, f)| f);
-                    let moved = start.is_none_or(|f| f != split.fraction);
+                    let moved = start.is_none_or(|f| f != self.split_fraction(path));
                     if moved {
                         self.events.push(DockEvent::LayoutCommitted);
                     }
                 }
 
-                if response.double_clicked() && split.fraction != 0.5 {
-                    split.fraction = 0.5;
+                if response.double_clicked() && self.split_fraction(path) != 0.5 {
+                    self.dock_state[path.surface][path.node]
+                        .get_split_mut()
+                        .expect("a separator is only drawn for a split")
+                        .fraction = 0.5;
                     self.events.push(DockEvent::LayoutCommitted);
                 }
             }
         }
 
-        // Clone out of `style` first: it may be borrowed from `self.style`, and
-        // `draw_cross_split_toggle` needs `&mut self`.
-        let separator_style = style.separator.clone();
-        let toggle_style = style.cross_split_toggle.clone();
-        self.draw_cross_split_toggle(ui, path, &separator_style, &toggle_style);
+        self.draw_junction_handles(ui, path, &separator_style, &toggle_style, state);
+    }
+
+    /// The ratio stored on the split at `path`.
+    ///
+    /// # Panics
+    ///
+    /// If `path` does not name a split.
+    #[track_caller]
+    fn split_fraction(&self, path: NodePath) -> f32 {
+        self.dock_state[path]
+            .get_split()
+            .expect("only a split has a fraction")
+            .fraction
+    }
+
+    /// The interval the split at `path` is cut from this frame, and the band its boundary may
+    /// be moved in — `None` wherever a gesture cannot move it at all.
+    ///
+    /// The `None` cases are the three guards a write has to pass, stated once rather than at
+    /// each of the two call sites. A node with no rectangle or no split has no boundary;
+    /// `range > 0.0` because `delta / range` is not finite otherwise; and `band.min < band.max`
+    /// because on a node too short to leave the margin on both sides the band is the single
+    /// point `0.5`, so the clamp answers `0.5` whatever the delta was — writing that "answer"
+    /// replaces the stored ratio with dead centre, which is the loss [`SeparatorBand`] exists to
+    /// prevent. Found by the frame sweep, on a divider a tab drag grabbed by accident: 0.75
+    /// became 0.5 during a step that never named it.
+    fn split_gesture(
+        &self,
+        path: NodePath,
+        pixels_per_point: f32,
+        extra: f32,
+    ) -> Option<(f32, SeparatorBand)> {
+        let node = &self.dock_state[path];
+        let split = node.get_split()?;
+        let rect = split_rect(self.layout.rect(path)?, pixels_per_point);
+        let range = if node.is_horizontal() {
+            rect.width()
+        } else {
+            rect.height()
+        };
+        let band = SeparatorBand::new(split.fraction, range, extra);
+        // Negated on purpose, and clippy's rewrite is not equivalent — see `SeparatorBand::new`.
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        if !(range > 0.0) || band.min >= band.max {
+            return None;
+        }
+        Some((range, band))
+    }
+
+    /// How much of `delta` the boundary of the split at `path` may actually take, in points
+    /// along its own axis, and `0.0` where it may take none.
+    ///
+    /// Separate from [`Self::nudge_split`] because a junction moves two boundaries as one line
+    /// and they are cut from *different* intervals: the same delta in points is a different
+    /// fraction for each, so one can run out of room while the other still has plenty. Ask both
+    /// first, move both by the tightest answer, and the line stays a line.
+    fn admissible_delta(
+        &self,
+        path: NodePath,
+        pixels_per_point: f32,
+        extra: f32,
+        delta: f32,
+    ) -> f32 {
+        let Some((range, band)) = self.split_gesture(path, pixels_per_point, extra) else {
+            return 0.0;
+        };
+        let reached = (band.effective + delta / range).clamp(band.min, band.max);
+        (reached - band.effective) * range
+    }
+
+    /// Moves the boundary of the split at `path` by `delta` points along its own axis. Answers
+    /// whether the stored ratio changed.
+    ///
+    /// **The only place a gesture writes a `fraction`** — see the note on [`SeparatorBand`]
+    /// listing every writer there is and why that list is worth keeping short. `show_separator`
+    /// calls it for the divider under the pointer, the junction handles for the two or three
+    /// that meet at one point; both get the same clamp because it is the same function, not the
+    /// same idea written twice.
+    ///
+    /// The delta is in **points**, not in fractions, and that is what makes a junction possible:
+    /// the boundary is drawn at `near + range * effective`, so `delta / range` moves it by
+    /// exactly `delta` points whatever interval it was cut from.
+    fn nudge_split(
+        &mut self,
+        path: NodePath,
+        pixels_per_point: f32,
+        extra: f32,
+        delta: f32,
+    ) -> bool {
+        if delta == 0.0 {
+            return false;
+        }
+        let Some((range, band)) = self.split_gesture(path, pixels_per_point, extra) else {
+            return false;
+        };
+        let new_fraction = (band.effective + delta / range).clamp(band.min, band.max);
+        let split = self.dock_state[path.surface][path.node]
+            .get_split_mut()
+            .expect("`split_gesture` answered, so the node is a split");
+        if split.fraction == new_fraction {
+            return false;
+        }
+        split.fraction = new_fraction;
+        true
     }
 }
 
@@ -977,7 +1054,10 @@ fn split_rect(node_rect: Rect, pixels_per_point: f32) -> Rect {
 /// That makes every writer a place where the tree and the screen can quietly part company, and
 /// there are only four of them:
 ///
-/// * the drag in [`DockArea::show_separator`] — clamps into `min..max`, so it asks;
+/// * [`DockArea::nudge_split`] — every gesture that moves a boundary, whether the drag and the
+///   arrow keys in [`DockArea::show_separator`] or a drag on a junction handle, which moves two
+///   or three of them at once. It clamps into `min..max`, so it asks. One function and not one
+///   per gesture: a second copy of this arithmetic is a second answer to "how far may this go";
 /// * the double-click in the same place — writes `0.5`, which is in every band there is, since
 ///   `min = (extra / range).min(0.5)` and `max = 1.0 - min`;
 /// * [`DockArea::transpose_cross_split`], the one writer that derives a fraction from measured

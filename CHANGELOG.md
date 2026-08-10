@@ -2,7 +2,30 @@
 
 ## Unreleased
 
+### Added
+
+- **One drag resizes every panel around a junction.** Where separators meet — a "+" of four
+  panels, or a "T" of three — the dock draws a small handle, and dragging it moves *all* the
+  separators that meet there at once: the line that runs through, and the divider (or the two
+  aligned dividers) that end on it. Resizing the corner of four panels was two drags before,
+  one per axis, and a tee had nothing there at all. Carries the idea of upstream PR
+  [#155](https://github.com/anhosh/egui_dock/pull/155), which was never merged.
+
+  The handle a cross carries is the one that was already there, and its icon still says what it
+  is: four arms for a cross, three for a tee, drawn along the separators that actually meet.
+
 ### Changed
+
+- **The cross-split toggle is a ctrl+click.** A plain click on the handle used to transpose the
+  grouping; the same handle now takes a drag, and a press that was meant as a drag and did not
+  travel far enough arrives as a click. Ctrl+clicking a "+" still transposes, and still moves no
+  pixel. A tee has no grouping to swap and answers to drags only.
+
+- **`DockArea::show_cross_split_toggle` is now `show_junction_handles`.** It gates the handles at
+  both kinds of junction, and the transposition along with them. Same default (`true`).
+
+- **A crossing whose parts are too thin to re-nest still gets its handle.** Only the
+  transposition is withheld there — the drag is meaningful whatever the margin allows.
 
 - **A leaf's focus history is a stack, and the application can overrule it.** Closing the
   active tab walks back through the tabs that were open before it — the tab you came from,

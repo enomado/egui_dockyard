@@ -24,6 +24,15 @@ pub(super) struct State {
     /// to diff otherwise. If level (1) is ever needed (telemetry, focus-on-grab),
     /// split it into a separate event rather than removing the guard.
     pub separator_drag_start: Option<(Id, f32)>,
+    /// `(junction handle id, whether the drag has moved anything yet)`, kept for as long as one
+    /// of the handles at a separator crossing is held.
+    ///
+    /// The same question `separator_drag_start` answers — did this gesture change the layout,
+    /// or was it a grab and a release — asked of a gesture that moves *two or three* fractions
+    /// at once. Remembering their starting values would mean remembering a list whose length
+    /// depends on the junction; what the commit event needs is only whether any of them ever
+    /// moved, and each frame of the drag already answers that for itself.
+    pub junction_drag: Option<(Id, bool)>,
 }
 
 impl State {
@@ -35,6 +44,7 @@ impl State {
             dnd: None,
             window_fade: None,
             separator_drag_start: None,
+            junction_drag: None,
         })
     }
 

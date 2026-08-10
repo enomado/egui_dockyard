@@ -83,10 +83,45 @@ pub enum DragSubject {
         /// of the drag goes to `outer` and which to `divider` is read off it.
         outer_horizontal: bool,
 
-        /// The divider that ends on that line — the tee's stem. The other boundary the drag
-        /// moves, across `outer`'s axis.
-        divider: NodePath,
+        /// The divider — or the two of them — that end on that line. The other boundary the drag
+        /// moves, across `outer`'s axis, and the one place the two shapes of a junction differ.
+        arms: JunctionArms,
     },
+}
+
+/// The dividers a junction is made of: one at a tee, two at a crossing.
+///
+/// A sum and not a `Vec` or a `[NodePath; 2]` with one slot unused, because *which shape was
+/// grabbed* is the thing a gesture must not change its mind about: "начали тягать T — продолжаем
+/// тянуть T" (Стас, 2026-08-10) is a statement about the subject, so the subject has to be able to
+/// say it. A crossing dragged as a crossing moves both of its dividers; a tee that later happens to
+/// line up with a neighbour is still a tee, and the extra divider is not part of what the hand
+/// holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JunctionArms {
+    /// Three panels: the line runs through, and one divider ends on it.
+    Tee(NodePath),
+
+    /// Four panels: a divider on each side of the line, which are one line on screen — to within
+    /// [`crate::CrossSplitToggleStyle::align_tolerance`], the slack that makes them one junction at
+    /// all. Dragging moves both, so they stay one line.
+    Cross([NodePath; 2]),
+}
+
+impl JunctionArms {
+    /// Every divider the gesture moves across `outer`'s axis: one, or two.
+    pub fn dividers(&self) -> &[NodePath] {
+        match self {
+            Self::Tee(divider) => std::slice::from_ref(divider),
+            Self::Cross(pair) => pair,
+        }
+    }
+
+    /// The one whose position on the line the junction *is* — the first of them, and at a crossing
+    /// the two are the same line to within the tolerance that paired them.
+    pub fn first(&self) -> NodePath {
+        self.dividers()[0]
+    }
 }
 
 /// Which side or corner of a floating window's frame a resize drag is holding.
@@ -375,7 +410,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::super::drag_and_drop::DragSource;
-    use super::{DragSubject, State};
+    use super::{DragSubject, JunctionArms, State};
     use crate::{DockState, NodeId, NodePath, SurfaceIndex, TabIndex};
     use egui::{Id, Pos2, pos2};
 
@@ -403,7 +438,7 @@ mod tests {
         DragSubject::Junction {
             outer: path(0),
             outer_horizontal: true,
-            divider: path(1),
+            arms: JunctionArms::Tee(path(1)),
         }
     }
 

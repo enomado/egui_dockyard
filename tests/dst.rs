@@ -55,9 +55,9 @@ use egui::{
 use egui_dock::dock_area::DockEvent;
 use egui_dock::shape::subtree_shape;
 use egui_dock::{
-    DockArea, DockLayout, DockState, DragInFlight, DragSubject, Node, NodeId, NodePath, Split,
-    Style, SurfaceIndex, TabId, TabIndex, TabPath, TabViewer, Tree, drag_hover_node,
-    drag_in_flight, dragged_tab, tab_widget_id,
+    DockArea, DockLayout, DockState, DragInFlight, DragSubject, JunctionArms, Node, NodeId,
+    NodePath, Split, Style, SurfaceIndex, TabId, TabIndex, TabPath, TabViewer, Tree,
+    drag_hover_node, drag_in_flight, dragged_tab, tab_widget_id,
 };
 
 /// Screen the simulated dock starts on. Big enough that a few splits still leave leaves wider
@@ -724,14 +724,16 @@ struct JunctionHold {
 struct JunctionWatch {
     /// Grabs that found a handle to press at all.
     offered: usize,
-    /// Junctions passed over while looking for one: crossings, which carry no drag handle.
+    /// Drags on a **crossing** that actually moved *both* of its dividers — the shape whose
+    /// gesture is newest, and its whole promise: the two stay one line because both take the same
+    /// component of the delta.
     ///
-    /// A crossing is two dividers that *happen* to be aligned, and the crate stopped resizing
-    /// four panels off that coincidence — a press there is a press on the separator underneath.
-    /// So this is not a filter for convenience but the shape of the feature, and it is counted
-    /// rather than dropped quietly: a zero means the sweep never once had to tell the two kinds
-    /// apart, and "a crossing is not a handle" went unasked across every seed.
-    crossings_passed_over: usize,
+    /// Counted at the outcome and not at the aim, which is the difference between a gate and a
+    /// tally. The first version of this counted grabs that *landed* on a crossing, and it was
+    /// measured to be useless: with the crossing's handle mutated back to `Sense::click()` — no
+    /// drag at all — the count stayed positive and the sweep stayed green, because a press still
+    /// landed there. A zero here means no seed ever dragged a crossing anywhere.
+    crossings_moved_both: usize,
     /// Grabs egui called a drag.
     live: usize,
     /// ...and grabs whose travel fell short of egui's threshold, so the gesture is a click. A
@@ -1662,20 +1664,31 @@ impl Sim {
     ///
     /// * a tab, by identity — the same resolution the dock's own cancel does;
     /// * a separator, by the node whose ratio it writes;
-    /// * a junction corner, by whether a **tee** made of both its splits is still *offered*.
-    ///   Not by whether the two nodes exist: the crate keys a handle by the splits that meet at
-    ///   it, and a close under the hand can leave both alive and no longer meeting — which is a
-    ///   handle that is not drawn and cannot see its own release. Same reading `Step::ReleaseJunction`
-    ///   makes, for the same reason.
+    /// * a junction corner, by whether a junction **of the shape the gesture grabbed** — made of
+    ///   the same splits — is still *offered*. Not by whether the nodes exist: the crate keys a
+    ///   handle by the splits that meet at it, and a close under the hand can leave them all alive
+    ///   and no longer meeting — which is a handle that is not drawn and cannot see its own
+    ///   release. The shape is part of it because the subject carries it (`JunctionArms`): a
+    ///   crossing dragged as a crossing is a different hold from a tee, and the dock keeps that
+    ///   distinction for the whole gesture. Same reading `Step::ReleaseJunction` makes.
     fn subject_is_gone(&self, subject: DragSubject) -> bool {
         match subject {
             DragSubject::Tab(source) => source.resolve(&self.state).is_none(),
             DragSubject::Separator { path } => self.state.node(path).is_err(),
-            DragSubject::Junction { outer, divider, .. } => !self.junctions().iter().any(|point| {
-                point.kind == Meeting::Tee
-                    && point.moves.contains(&outer)
-                    && point.moves.contains(&divider)
-            }),
+            DragSubject::Junction { outer, arms, .. } => {
+                let shape = match arms {
+                    JunctionArms::Tee(_) => Meeting::Tee,
+                    JunctionArms::Cross(_) => Meeting::Cross,
+                };
+                !self.junctions().iter().any(|point| {
+                    point.kind == shape
+                        && point.moves.contains(&outer)
+                        && arms
+                            .dividers()
+                            .iter()
+                            .all(|divider| point.moves.contains(divider))
+                })
+            }
             // A window's gesture belongs to egui, and egui stops handing out the response the
             // moment the dock stops drawing the surface — which is exactly when the surface is
             // gone. Asked of the tree, like the rest.
@@ -1683,24 +1696,19 @@ impl Sim {
         }
     }
 
-    /// The junctions that carry a handle a hand can grab: the **tees**.
+    /// The junctions that carry a handle a hand can grab: **all** of them.
     ///
-    /// A crossing carries no drag handle. Its two dividers are aligned by coincidence, and the
-    /// crate stopped resizing four panels off one — a press at a crossing is a press on the
-    /// separator underneath, which is a gesture [`Step::GrabSeparator`] already sweeps. What is
-    /// left there is the ctrl+click, and [`Step::ToggleCrossSplit`] is the step that presses it.
+    /// This used to be the tees alone, on the crate's own rule that a crossing is a coincidence of
+    /// alignment and not a corner — a press there was a press on the separator underneath. That
+    /// rule was overruled on 2026-08-10 («в целом её таскать можно»): a crossing is dragged like a
+    /// tee, and moves *both* of its dividers so they stay one line. A harness that kept filtering
+    /// them out would be blind to the shape whose gesture is newer, which is the shape most likely
+    /// to be wrong.
     ///
-    /// The crossings passed over are counted rather than dropped in silence: a run in which this
-    /// filter never fired is one where "a crossing is not a handle" was never asked.
+    /// The crossings actually grabbed are counted, and the count is gated: a run that never picked
+    /// one is a run in which nothing about dragging a crossing was asked.
     fn draggable_junctions(&mut self) -> Vec<JunctionPoint> {
-        let all = self.junctions();
-        let handles: Vec<JunctionPoint> = all
-            .iter()
-            .filter(|point| point.kind == Meeting::Tee)
-            .cloned()
-            .collect();
-        self.junction.crossings_passed_over += all.len() - handles.len();
-        handles
+        self.junctions()
     }
 
     /// The band one side of a split flattens into. `None` only when the geometry map does not
@@ -2268,6 +2276,12 @@ impl Sim {
             // Measured — zeroing `outer`'s delta in `drag_junction` left the count gate green.
             if line && dividers.iter().any(|it| *it) {
                 self.junction.moved_line_and_divider += 1;
+            }
+            // A crossing's own promise, judged where the outcome is: three splits meet there (see
+            // `JunctionHold::moves`, whose length *is* the shape), and both dividers take the same
+            // component of the delta, so both move or the two lines have come apart.
+            if dividers.len() == 2 && dividers.iter().all(|it| *it) {
+                self.junction.crossings_moved_both += 1;
             }
         } else {
             self.junction.clamped += 1;
@@ -5178,7 +5192,7 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         holds.landings_after_a_change += outcome.holds.landings_after_a_change;
         holds.destination_died += outcome.holds.destination_died;
         junction.offered += outcome.junction.offered;
-        junction.crossings_passed_over += outcome.junction.crossings_passed_over;
+        junction.crossings_moved_both += outcome.junction.crossings_moved_both;
         junction.live += outcome.junction.live;
         junction.short += outcome.junction.short;
         junction.moves += outcome.junction.moves;
@@ -5460,10 +5474,10 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
          splits of opposite orientation, so every gate below is vacuous"
     );
     assert!(
-        junction.crossings_passed_over > 0,
-        "the {} grabs never once passed over a crossing, so the sweep never had to tell a handle \
-         from a coincidence of alignment. \"A crossing carries no drag handle — a press there is \
-         a press on the separator\" went unasked across {SEEDS} seeds",
+        junction.crossings_moved_both > 0,
+        "not one of the {} grabs dragged a crossing so that both of its dividers moved, so \"a \
+         crossing is dragged like a tee and carries both of its dividers, together\" — the newest \
+         of the junction gestures — went unasked across {SEEDS} seeds",
         junction.offered
     );
     assert!(

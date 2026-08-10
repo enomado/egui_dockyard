@@ -13,23 +13,28 @@
 //! junction of every line, and painted cold they are a grid of squares laid over the panels for
 //! nobody.
 //!
-//! What the handle offers is not the same at the two, and the difference is the difference
-//! between the shapes. A tee is structural: a divider genuinely ends on the line, so the corner
-//! is a thing, and **dragging its handle moves both separators at once** — the panels around it
-//! are resized in both directions by one gesture, which could only be done in two drags before.
-//! A crossing is a *coincidence*: two dividers on either side of the line happen to be aligned,
-//! to within [`CrossSplitToggleStyle::align_tolerance`], and nothing holds them there. Resizing
-//! four panels because of that is a gesture nobody asked for, so **a crossing is not dragged**:
-//! a press there means what it means anywhere else on that separator, and moves that separator
-//! alone.
+//! **Both are dragged, and the drag moves every separator that meets there at once** — the panels
+//! around the point are resized in both directions by one gesture, which could only be done in two
+//! or three drags before. At a tee that is the line plus the divider ending on it; at a crossing it
+//! is the line plus the divider on *each* side of it, moved together so they stay one line.
 //!
-//! A cross is offered one thing instead. It is ambiguous — the exact same rectangles are produced
-//! by either grouping (rows of columns, or columns of rows) and nothing on screen says which one
-//! the tree holds — so **ctrl+clicking** it swaps the two representations without moving a single
-//! pixel. That modifier is also when its handle exists at all: a handle sitting at a crossing
-//! takes the point away from the separators under it whatever it senses (egui drops the layers
-//! behind a widget covering the pointer), so the rule is **a handle exists exactly while it has
-//! a gesture to offer** — see `draw_one_handle`.
+//! A crossing was not dragged at all until 2026-08-10, on the argument that two dividers aligned to
+//! within [`CrossSplitToggleStyle::align_tolerance`] are a coincidence rather than a corner, so
+//! resizing four panels off one is a gesture nobody asked for. Overruled from the screen («в целом
+//! её таскать можно»), and what the argument leaves behind is the *shape* being part of what the
+//! hand holds: a crossing dragged as a crossing keeps moving both dividers for the whole gesture,
+//! and a tee that happens to line up with a neighbour halfway through is still a tee. That is
+//! [`crate::JunctionArms`], recorded at `drag_started`.
+//!
+//! A cross is offered one thing on top of the drag. It is ambiguous — the exact same rectangles are
+//! produced by either grouping (rows of columns, or columns of rows) and nothing on screen says
+//! which one the tree holds — so **ctrl+clicking** it swaps the two representations without moving
+//! a single pixel. The modifier is what tells that click from the short press a drag comes out as.
+//!
+//! A handle is on screen only under the pointer, whatever its shape: a handle takes the point away
+//! from the separators under it (egui drops the layers behind a widget covering the pointer), so one
+//! at every junction, painted cold, would be a grid of squares that also made every line hard to
+//! grab — see `draw_one_handle`.
 //!
 //! # Why the law is stated on bands
 //!
@@ -55,7 +60,7 @@ use egui::{
 
 use crate::core::tree::regroup::Regroup;
 use crate::dock_area::events::DockEvent;
-use crate::dock_area::state::{DragSubject, State};
+use crate::dock_area::state::{DragSubject, JunctionArms, State};
 use crate::{CrossSplitToggleStyle, DockArea, NodeId, NodePath, SeparatorStyle};
 
 /// One side of a split, with the chain of same-orientation splits at its root flattened: `n`
@@ -687,7 +692,7 @@ impl<Tab> DockArea<'_, Tab> {
             && let DragSubject::Junction {
                 outer: held,
                 outer_horizontal,
-                divider,
+                arms,
             } = drag.subject
         {
             // Another line's gesture: this line stands its handles down entirely. Same statement
@@ -702,7 +707,7 @@ impl<Tab> DockArea<'_, Tab> {
                 widget,
                 held,
                 outer_horizontal,
-                divider,
+                arms,
                 style,
                 toggle,
                 state,
@@ -710,7 +715,7 @@ impl<Tab> DockArea<'_, Tab> {
                 pixels_per_point,
                 held,
                 outer_horizontal,
-                divider,
+                arms,
                 style.extra,
                 delta,
             ) {
@@ -746,7 +751,7 @@ impl<Tab> DockArea<'_, Tab> {
                 let Some(&DragSubject::Junction {
                     outer,
                     outer_horizontal,
-                    divider,
+                    arms,
                 }) = state.in_flight().map(|drag| &drag.subject)
                 else {
                     return;
@@ -755,7 +760,7 @@ impl<Tab> DockArea<'_, Tab> {
                     pixels_per_point,
                     outer,
                     outer_horizontal,
-                    divider,
+                    arms,
                     style.extra,
                     delta,
                 ) {
@@ -794,7 +799,7 @@ impl<Tab> DockArea<'_, Tab> {
         widget: Id,
         outer: NodePath,
         outer_horizontal: bool,
-        divider: NodePath,
+        arms: JunctionArms,
         style: &SeparatorStyle,
         toggle: &CrossSplitToggleStyle,
         state: &mut State,
@@ -809,7 +814,13 @@ impl<Tab> DockArea<'_, Tab> {
         // reported this at seed 1, step 16). Nothing is drawn and nothing is reported; the field's
         // own liveness filter drops the gesture a pass later, which is the one divergence the
         // harness checks rather than exempts.
-        if self.dock_state.node(outer).is_err() || self.dock_state.node(divider).is_err() {
+        let divider = arms.first();
+        if self.dock_state.node(outer).is_err()
+            || arms
+                .dividers()
+                .iter()
+                .any(|path| self.dock_state.node(*path).is_err())
+        {
             return Grip::Idle;
         }
         let Some(outer_rect) = self.separator_rect(outer, style, pixels_per_point) else {
@@ -875,7 +886,11 @@ impl<Tab> DockArea<'_, Tab> {
                     StrokeKind::Inside,
                 );
                 let stroke = Stroke::new(1.5, icon);
-                for dir in icon_arms(JunctionKind::Tee { side, divider: 0 }, outer_horizontal) {
+                let held_kind = match arms {
+                    JunctionArms::Tee(_) => JunctionKind::Tee { side, divider: 0 },
+                    JunctionArms::Cross(_) => JunctionKind::Cross([0, 0]),
+                };
+                for dir in icon_arms(held_kind, outer_horizontal) {
                     draw_arrow(ui.painter(), center, dir, toggle.size * 0.28, stroke);
                 }
 
@@ -929,25 +944,22 @@ impl<Tab> DockArea<'_, Tab> {
     /// The widget is still registered every frame, hovered or not: that registration is what the
     /// hit test answers "is the pointer here" *from*. Only the painting is conditional.
     ///
-    /// # What a cross offers is not a drag
+    /// # A crossing is dragged too, and that is newer than the rest of this
     ///
-    /// A tee is structural — a divider genuinely ends on the line, and the two move as one
-    /// corner. A crossing is a *coincidence*: two dividers on either side of the line happen to
-    /// be aligned, to within [`CrossSplitToggleStyle::align_tolerance`], and nothing keeps them
-    /// that way. Resizing four panels at once because two independent dividers happened to line
-    /// up is a gesture nobody asked for on a layout that merely looks like a "+", so a crossing
-    /// is not dragged at all: a press there means what it means anywhere else on that separator.
+    /// It was not, until 2026-08-10: a crossing is two dividers aligned by coincidence, and
+    /// resizing four panels off that was refused on the grounds that nobody asked for it. What the
+    /// refusal cost was a handle that existed *only while ctrl was held* — because a handle with no
+    /// gesture is worse than useless. egui drops every layer behind a widget that covers the
+    /// pointer's search area (`hit_test.rs`, "nothing behind this layer could ever be interacted
+    /// with"), and handles live in their own layer one tier above the dock's content (see
+    /// [`handle_layer`]), so a click-only handle takes the point away from the separators under it
+    /// just as surely as a draggable one.
     ///
-    /// "Not dragged" has to be **no widget**, not a widget that senses no drags. egui drops
-    /// every layer behind a widget that covers the pointer's search area
-    /// (`hit_test.rs`, "nothing behind this layer could ever be interacted with"), and the
-    /// handles live in their own layer — one tier above the dock's own content (see
-    /// [`handle_layer`]) — so a click-only handle at the crossing takes the point away from the
-    /// separators under it just as surely as a draggable one, and a drag there moves nothing
-    /// whatsoever. Hence the rule this follows: **a handle exists exactly while it has a
-    /// gesture to offer.** A crossing's one gesture is the ctrl+click, so its handle is there
-    /// while ctrl is held and not otherwise, and the plain drag it used to swallow is plain
-    /// again by construction rather than by careful sense flags.
+    /// Both halves are now the ordinary case: the handle senses `click_and_drag` whatever the shape,
+    /// a drag at a crossing moves the line and both dividers (see `drag_junction`), and ctrl is what
+    /// tells the transposing *click* from the short press a drag comes out as. The rule the old
+    /// design was built around still holds and is still what keeps this honest: **a handle exists
+    /// exactly while it has a gesture to offer** — which, now, is wherever the pointer is.
     fn draw_one_handle(
         &mut self,
         ui: &mut Ui,
@@ -960,15 +972,20 @@ impl<Tab> DockArea<'_, Tab> {
         let Junction { kind, center } = junctions.at[index];
         let pass = ui.ctx().cumulative_pass_nr();
 
-        // A crossing offers the transposition and nothing else: not where it is withheld (see
-        // `Junctions::can_transpose`), and not while the modifier that names it is up. Either
-        // way there is no gesture to be had, and a handle with no gesture is a handle that takes
-        // the point away from the separators under it — see the note above.
+        // A crossing is dragged like a tee, and offers the transposition on top of it. It used to
+        // exist only while ctrl was held, on the argument that resizing four panels off two
+        // dividers that merely happen to be aligned is a gesture nobody asked for — and that
+        // argument was overruled from the screen: «+ не появляется. мы же условились что в целом
+        // её таскать можно» (Стас, 2026-08-10). So the handle is there whenever the pointer is,
+        // whatever shape the junction has, and what ctrl adds at a crossing is the *click* that
+        // swaps the grouping.
+        //
+        // What the drag then moves is both of its dividers, together, so they stay one line — see
+        // `JunctionArms::Cross` and `drag_junction`. The shape is recorded at `drag_started`, which
+        // is what makes "a crossing dragged as a crossing" a fact for the whole gesture rather than
+        // a re-reading of geometry the gesture is moving.
         let is_cross = matches!(kind, JunctionKind::Cross(_));
         let transposable = is_cross && junctions.can_transpose;
-        if is_cross && !(transposable && ui.input(|i| i.modifiers.command)) {
-            return Grip::Idle;
-        }
 
         // While one handle is being dragged, every other one stands down — not drawn, not
         // registered, not interacted. egui would not hand two widgets one drag, but the handles
@@ -1065,15 +1082,11 @@ impl<Tab> DockArea<'_, Tab> {
             .show(ui.ctx(), |ui| {
                 ui.set_min_size(hit_rect.size());
 
-                // A tee is a thing you drag, in either direction at once, and the cursor says
-                // so. A crossing is a thing you ctrl+click, and it only exists while ctrl is
-                // down.
-                let response = if is_cross {
-                    ui.interact(hit_rect, handle_id, Sense::click())
-                } else {
-                    ui.interact(hit_rect, handle_id, Sense::click_and_drag())
-                        .on_hover_and_drag_cursor(CursorIcon::Move)
-                };
+                // Both shapes are dragged now, in either direction at once, and the cursor says
+                // so; a crossing also answers a ctrl+click, which is a click and not a drag.
+                let response = ui
+                    .interact(hit_rect, handle_id, Sense::click_and_drag())
+                    .on_hover_and_drag_cursor(CursorIcon::Move);
 
                 // A press keeps its grip even if the pointer slides off, the same way any
                 // button does; without it, releasing a hair outside would both cancel the click
@@ -1129,14 +1142,22 @@ impl<Tab> DockArea<'_, Tab> {
                     let mut dividers = kind.dividers().map(|(band, k)| {
                         NodePath::new(junctions.outer.surface, junctions.bands[band].dividers[k])
                     });
+                    let first = dividers
+                        .next()
+                        .expect("every junction is made of at least one divider");
+                    // The shape is part of what is grabbed: a crossing dragged as a crossing moves
+                    // both of its dividers for the whole gesture, whatever the detector says next
+                    // frame. See `JunctionArms`.
+                    let arms = match dividers.next() {
+                        Some(second) => JunctionArms::Cross([first, second]),
+                        None => JunctionArms::Tee(first),
+                    };
                     state.begin_drag(
                         handle_id,
                         DragSubject::Junction {
                             outer: junctions.outer,
                             outer_horizontal: junctions.outer_horizontal,
-                            divider: dividers
-                                .next()
-                                .expect("every junction is made of at least one divider"),
+                            arms,
                         },
                         response
                             .interact_pointer_pos()
@@ -1183,7 +1204,7 @@ impl<Tab> DockArea<'_, Tab> {
         pixels_per_point: f32,
         outer: NodePath,
         outer_horizontal: bool,
-        divider: NodePath,
+        arms: JunctionArms,
         extra: f32,
         delta: Vec2,
     ) -> bool {
@@ -1194,9 +1215,14 @@ impl<Tab> DockArea<'_, Tab> {
         };
 
         // Each is clamped on its own by `nudge_split`: they are cut from intervals at right
-        // angles to each other and have nothing to stay in line with.
-        let moved = self.nudge_split(outer, pixels_per_point, extra, along_outer);
-        moved | self.nudge_split(divider, pixels_per_point, extra, along_bands)
+        // angles to each other and have nothing to stay in line with. A crossing has two of them,
+        // one on each side of the line, and both take the same component — which is what keeps
+        // them one line on screen while the gesture runs.
+        let mut moved = self.nudge_split(outer, pixels_per_point, extra, along_outer);
+        for divider in arms.dividers() {
+            moved |= self.nudge_split(*divider, pixels_per_point, extra, along_bands);
+        }
+        moved
     }
 
     /// Transposes the grouping around crossing `index`, keeping every leaf exactly where it is
@@ -3231,26 +3257,43 @@ mod tests {
         );
     }
 
-    /// A crossing's handle appears while ctrl is held, and not before.
+    /// A crossing's handle is there under the pointer, ctrl or no ctrl.
     ///
-    /// It is the modifier the crossing's one gesture is named by, and a handle with no gesture to
-    /// offer is not merely idle — it takes the point away from the separators under it, because
-    /// egui drops the layers behind a widget covering the pointer (see `draw_one_handle`). This
-    /// is the *visible* half of that rule; the half it is there for is
-    /// `a_crossing_drags_like_any_other_point_on_the_separator`.
+    /// It used to appear only while ctrl was held, because the only gesture it had was the
+    /// ctrl+click and a handle with no gesture takes the point away from the separators under it
+    /// (egui drops the layers behind a widget covering the pointer — see `draw_one_handle`). A
+    /// crossing is dragged now, so it has a gesture with the hand empty and the rule is satisfied
+    /// the other way round: «+ не появляется. мы же условились что в целом её таскать можно»
+    /// (Стас, 2026-08-10).
+    ///
+    /// The cold half is the control — the pointer well away from the crossing draws nothing, or
+    /// "there is a handle" would also be true of a dock that paints a grid of squares over the
+    /// panels.
     #[test]
-    fn a_crossing_shows_no_handle_until_ctrl_is_held() {
+    fn a_crossing_has_a_handle_with_no_modifier_held() {
+        /// Well inside a panel, far from any junction of this scene.
+        const ELSEWHERE: Pos2 = Pos2::new(80.0, 80.0);
+
         let id = Id::new(DOCK_ID);
         let style = Style::default();
         let (ctx, mut state, _, center) = cross_scene(&style, id);
 
-        hover(&ctx, &mut state, &style, id, center);
-        let (_, open_hand) = run_frame_painting(&ctx, &mut state, &style, id, vec![]);
+        hover(&ctx, &mut state, &style, id, ELSEWHERE);
+        let (_, cold) = run_frame_painting(&ctx, &mut state, &style, id, vec![]);
         assert!(
-            open_hand.is_empty(),
-            "an open-handed hover over a crossing drew {open_hand:?}"
+            cold.is_empty(),
+            "the crossing drew a handle with the pointer at {ELSEWHERE:?}: {cold:?}"
         );
 
+        hover(&ctx, &mut state, &style, id, center);
+        let (_, open_hand) = run_frame_painting(&ctx, &mut state, &style, id, vec![]);
+        assert_eq!(
+            open_hand.len(),
+            1,
+            "an open-handed hover over the crossing at {center:?} drew {open_hand:?}"
+        );
+
+        // And ctrl does not change what is on screen — what it changes is what a click means.
         hover_holding(
             &ctx,
             &mut state,
@@ -3708,20 +3751,21 @@ mod tests {
         );
     }
 
-    /// A crossing is dragged like any other point of the separator it sits on — because there is
-    /// nothing there to drag.
+    /// The gesture at a crossing: one drag moves the line **and both** dividers that end on it,
+    /// so the four panels around it are resized together and the two dividers stay one line.
     ///
-    /// Four panels moving at once off a coincidence of alignment is the gesture this took away,
-    /// and "took away" is stated as a *sameness* rather than as a list of things that must not
-    /// move: the same drag, at the crossing and at a point of the same line 200pt clear of it,
-    /// has to leave the same four rectangles. Anything the crossing still did specially — a
-    /// second boundary carried along, a clamp of its own, a press swallowed and dropped — comes
-    /// out as a difference between the two.
+    /// This is the reverse of what the crate did until 2026-08-10, when a press at a crossing was
+    /// deliberately a press on the separator underneath — the argument being that two dividers
+    /// aligned by coincidence are not a corner. Overruled from the screen («в целом её таскать
+    /// можно»), so the assertion is inverted rather than deleted: what used to be checked as a
+    /// *sameness* with a press 200pt down the same line is now checked as a difference from it, and
+    /// that control drag is still here, because "the crossing moved two dividers" says nothing if
+    /// an ordinary separator drag moves them too.
     ///
-    /// The control is the second half of that: both scenes must actually move, or "the same"
-    /// would also be true of a dock where dragging did nothing anywhere.
+    /// Judged on the screen and not on fractions: the three boundaries are cut from different
+    /// intervals, so "the fraction changed" says nothing about how far anything went.
     #[test]
-    fn a_crossing_drags_like_any_other_point_on_the_separator() {
+    fn dragging_a_crossing_moves_the_line_and_both_dividers() {
         const BY: Vec2 = Vec2::new(-60.0, 55.0);
         /// Far enough down the line to be clear of the handle's reach at any style.
         const CLEAR: f32 = 200.0;
@@ -3730,7 +3774,7 @@ mod tests {
         let style = Style::default();
 
         // A scene per gesture: the first drag is a real edit, and what the second is about is
-        // where it was aimed, not the layout the first one left.
+        // where it was aimed, not the layout the first one left. `[top_left, .., bottom_right]`.
         let scene = |from: Option<Vec2>| {
             let ctx = Context::default();
             let (mut state, outer_id, leaves) = build_cross(true, 0.5, 0.5);
@@ -3746,17 +3790,39 @@ mod tests {
         let (before_at, after_at) = scene(None);
         let (before_clear, after_clear) = scene(Some(Vec2::new(0.0, CLEAR)));
 
+        // The line itself, from either grab: this is the component both gestures share.
+        assert!(
+            (after_at[0].right() - before_at[0].right() - BY.x).abs() < 1.5,
+            "the line between the two columns was to move {}pt sideways, and went from {} to {}",
+            BY.x,
+            before_at[0].right(),
+            after_at[0].right()
+        );
         assert!(
             (after_clear[0].right() - before_clear[0].right() - BY.x).abs() < 1.5,
             "the control drag, {CLEAR}pt clear of the crossing, did not move the line it grabbed"
         );
-        assert_rects_close(&after_at, &after_clear);
-        assert!(
-            (after_at[0].bottom() - before_at[0].bottom()).abs() < 0.5,
-            "the crossing carried its columns' dividers along: the left one went from {} to {}",
-            before_at[0].bottom(),
-            after_at[0].bottom()
-        );
+
+        // What only the crossing does: both dividers follow, on either side of the line.
+        for (panel, corner) in [(0usize, "left"), (2usize, "right")] {
+            assert!(
+                (after_at[panel].bottom() - before_at[panel].bottom() - BY.y).abs() < 1.5,
+                "the {corner} column's divider was to move {}pt down with the crossing, and went \
+                 from {} to {}",
+                BY.y,
+                before_at[panel].bottom(),
+                after_at[panel].bottom()
+            );
+            // And the control leaves them where they were, which is what makes the four lines
+            // above a fact about the crossing rather than about dragging in general.
+            assert!(
+                (after_clear[panel].bottom() - before_clear[panel].bottom()).abs() < 0.5,
+                "a drag {CLEAR}pt clear of the crossing carried the {corner} column's divider \
+                 along: {} to {}",
+                before_clear[panel].bottom(),
+                after_clear[panel].bottom()
+            );
+        }
     }
 
     /// A plain click transposes nothing.

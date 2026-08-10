@@ -179,11 +179,13 @@ pub struct SeparatorStyle {
 }
 
 /// Geometry of the handle offered where separators meet: the square drawn at a junction, which
-/// drags the corner at a tee and swaps the grouping at a crossing.
+/// drags every separator meeting there at once and, at a crossing, swaps the grouping on
+/// ctrl+click.
 ///
 /// It is only ever on screen **under the pointer** — one is offered at every junction of every
-/// line, and painted cold they would be a grid of squares over the panels — and at a crossing
-/// only while ctrl is held, that being the modifier its one gesture is named by.
+/// line, and painted cold they would be a grid of squares over the panels that also made every
+/// line harder to grab. Shape makes no difference to that: a crossing's handle used to need ctrl
+/// held, back when its only gesture was the transposing click, and a crossing is dragged now.
 ///
 /// Colors are not here — the handle is drawn in the separator's own palette
 /// ([`SeparatorStyle::color_hovered`] and [`SeparatorStyle::color_dragged`], swapped between
@@ -213,11 +215,21 @@ pub struct CrossSplitToggleStyle {
     pub size: f32,
 
     /// How far outside that square the pointer is still caught, in points. By `Default` it's
-    /// `6.0`.
+    /// `2.0`.
+    ///
+    /// A couple of points, deliberately, and it used to be `6.0`: a handle that answers well
+    /// outside itself is a handle that takes the separator's own grab zone away, and on a dock with
+    /// a junction every few hundred points that reads as the lines being hard to grab —
+    /// «область у Т слишком большая слишком назойливая» (Стас, 2026-08-10). What it is *for* is
+    /// missing the square by a pixel or two, not aiming near it.
     pub catch_extra: f32,
 
     /// How far outside the catch zone the pointer is held once caught, in points. By `Default`
-    /// it's `6.0`. Setting it to `0.0` removes the hysteresis.
+    /// it's `2.0`. Setting it to `0.0` removes the hysteresis.
+    ///
+    /// Trimmed with `catch_extra` and for the same reason. It is the hysteresis and not the reach:
+    /// what it buys is that a hand resting on the edge of the catch zone does not flip between
+    /// "handle" and "separator" on every pixel of jitter, and two points buy that as well as six.
     pub hold_extra: f32,
 
     /// How far apart the two dividers may sit and still be offered a button, in points. By
@@ -525,8 +537,8 @@ impl Default for CrossSplitToggleStyle {
     fn default() -> Self {
         Self {
             size: 14.0,
-            catch_extra: 6.0,
-            hold_extra: 6.0,
+            catch_extra: 2.0,
+            hold_extra: 2.0,
             align_tolerance: 8.0,
         }
     }

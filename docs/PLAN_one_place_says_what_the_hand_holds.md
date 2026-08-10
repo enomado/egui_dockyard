@@ -406,14 +406,44 @@ Smallest blast radius first, and each step is committable on its own:
   place here because step 4 is a port, not a deletion: check the consumers first, and if they are
   really redundant, delete them *with* a gate that would have caught it — otherwise the next
   person measures the same nothing and concludes the same maybe.
-* **The junction handle is painted over everything, including menus** (Стас, 2026-08-10 — a bug,
-  not a preference). `draw_one_handle` puts it in `LayerId::new(Order::Foreground, handle_id)`
-  (junction.rs:805), which is the order egui's own context menus and popups use, and a fresh layer
-  in that order goes on top of them. So a menu opened over a separator has a square sitting on it.
-  The handle only needs to be above the dock's own content — `Order::Middle` is probably where it
-  belongs — but the hit test travels with the layer, so check what a press over the menu reaches
-  before and after: a handle that is drawn under the menu and still *catches* the press is the
-  same bug with the paint order fixed.
+* ~~**The junction handle is painted over everything, including menus**~~ (Стас, 2026-08-10 — a
+  bug, not a preference) — **fixed.** The tier is now `handle_layer(ui.layer_id().order)`: one
+  above the dock's own content, which is `Order::Middle` for the ordinary case of a dock in a
+  panel. Two things the doing of it turned up, and the second is the reason the item was worth a
+  scene rather than a one-line edit:
+  * **The press was never wrong — only the paint.** egui answers the two questions by two rules.
+    The pointer is ranked by `Areas::compare_order`, where a layer that is not an `Area` (and the
+    handle's is not) compares *below* every area of its tier, since `None < Some(i)`. The paint is
+    `GraphicLayers::drain`, which walks a tier's areas in that order and then sweeps up every layer
+    of the tier it has not seen — so the same non-area layer is ranked under the areas and painted
+    over them. At `Foreground` the handle already lost the press to a menu, exactly as it should,
+    and still put a square on top of it. Measured before the fix: the press test was green then and
+    is green now; only the paint test was red.
+  * **The residue is a dock hosted in a floating window**, which already draws in `Order::Middle` —
+    and egui has no tier between that and `Foreground`, where menus live. So a handle in a window
+    surface is at `Foreground` alongside them and can still be painted over one. Written into
+    `handle_layer`'s doc and left as the item below rather than hidden by a lower tier that would
+    lose the pointer.
+  Measured, not assumed — `tests/a_menu_is_above_the_junction_handle.rs` has the paint order, the
+  press, and a positive control that the aiming point really is a handle. Both mutations run:
+  putting the tier back to `Foreground` reddens the paint test by its own message (ten shapes over
+  the menu — the square and its arrows); dropping the handle *into* the dock's own tier reddens
+  **seventeen** tests in `junction.rs` by name, which is how well "the handle is above the content"
+  was already witnessed.
+* **A dock inside a floating window still paints its handles over menus** (the residue above). The
+  fix needs the handle's layer to have a rank of its own within `Foreground`, which means making it
+  an `egui::Area` — `Area` is what calls `Areas::set_state` and so what puts a layer in the order
+  list; `Context::set_sublayer` cannot do it alone, since it only moves children *already* in that
+  list. Worth knowing before trying: an `Area` brings a sizing pass (its first frame is invisible,
+  and handles appear and vanish with the pointer), a persisted `AreaState` per handle id, and its
+  own `move_to_top` on press. The scene is the one in
+  `a_menu_is_above_the_junction_handle.rs` with the dock shown in a window surface instead of a
+  panel.
+* **The tab drag's overlay has the same shape and has not been looked at.**
+  `drag_and_drop.rs:128` builds `LayerId::new(Order::Foreground, id)` the way the handle used to,
+  so a drop overlay drawn while a menu is open is the same "ranked under, painted over" pair. Not
+  investigated: whether a menu can be open during a tab drag at all is the first question, and if
+  it cannot, this is a non-item.
 * ~~**`DragSubject` is `pub(super)` for now.**~~ — published in step 6, together with
   `DragInFlight` and `DragSource` and the two accessors that hand one out.
 * **Two call sites now ask "is anything in flight *now*" the same way** (found while doing step

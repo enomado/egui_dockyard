@@ -273,6 +273,36 @@ fn toggle_metrics(toggle: &CrossSplitToggleStyle, room: f32) -> (f32, f32, f32) 
     )
 }
 
+/// The tier a handle's own layer belongs in, given the tier the dock itself is drawn in.
+///
+/// A handle has to win the pointer against the separators it sits on — that is what a layer of its
+/// own is *for* — and it has to lose to egui's menus and popups, which are areas in
+/// [`Order::Foreground`]. One tier above the dock's own content says both, and says the second one
+/// only where a tier is left to be above: a dock hosted in a floating window already draws in
+/// [`Order::Middle`], and egui has nothing between that and `Foreground`.
+///
+/// Why the tier decides the *paint* and not merely the press, which is the bug this exists for:
+/// egui ranks layers for the pointer by `Areas::compare_order`, where a layer that is not an
+/// [`egui::Area`] — and a handle's is not — compares below every area of the same tier, because
+/// `None < Some(i)`. It paints them by `GraphicLayers::drain`, which walks a tier's areas in that
+/// same order and then sweeps up every layer of the tier it has not seen yet. So a non-area layer
+/// is ranked *under* the areas of its tier and painted *over* them: at `Foreground` the handle lost
+/// the press to a menu, as it should, and still put a square on top of it. A tier lower it does
+/// neither.
+///
+/// The residue is written down rather than papered over: inside a floating window the handle is at
+/// `Foreground` alongside menus, so the square is on top of one again. Fixing that needs the
+/// handle's layer to be an area (which is what would give it a rank of its own), and that is a
+/// larger change than this one.
+fn handle_layer(dock: Order) -> Order {
+    match dock {
+        Order::Background => Order::Middle,
+        // A window surface, or anything else an application hosts the dock in: already at or above
+        // `Middle`, where the only tier left is the one menus live in.
+        _ => Order::Foreground,
+    }
+}
+
 /// How far `point` is from `rect` in the metric a *square* reaches in: the larger of the two
 /// axis gaps, and zero if the point is inside.
 ///
@@ -640,12 +670,12 @@ impl<Tab> DockArea<'_, Tab> {
     /// Draws a handle at every junction on `outer`'s line and carries out whatever the pointer
     /// asked of one of them: a drag resizes, a ctrl+click on a crossing transposes.
     ///
-    /// Each handle is drawn in its own [`Order::Foreground`] layer, on top of the surrounding
-    /// separators' default layer. Layer order is how egui resolves overlapping widgets — a
-    /// widget in a higher-order layer wins hover/click over anything underneath regardless of
-    /// screen position or `interact()` call order — so this is what stops the resize cursor and
-    /// the separator's own hover highlight from "bubbling" through the handle on top of it, with
-    /// no need to carve a hole out of the separator's interact rect.
+    /// Each handle is drawn in a layer of its own, one tier above the surrounding separators'
+    /// (see [`handle_layer`]). Layer order is how egui resolves overlapping widgets — a widget in
+    /// a higher-order layer wins hover/click over anything underneath regardless of screen
+    /// position or `interact()` call order — so this is what stops the resize cursor and the
+    /// separator's own hover highlight from "bubbling" through the handle on top of it, with no
+    /// need to carve a hole out of the separator's interact rect.
     pub(super) fn draw_junction_handles(
         &mut self,
         ui: &mut Ui,
@@ -810,7 +840,7 @@ impl<Tab> DockArea<'_, Tab> {
             )
             .collect();
         let handle_id = ui.id().with((key, "junction_handle"));
-        let layer_id = LayerId::new(Order::Foreground, handle_id);
+        let layer_id = LayerId::new(handle_layer(ui.layer_id().order), handle_id);
 
         // Never wider than the junction has room for — see `toggle_metrics` for how the three
         // lengths are cut down, and `handle_room` for what "room" answers to.

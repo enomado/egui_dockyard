@@ -6,9 +6,9 @@ point for whoever picks this up — read this file, then
 [src/widgets/dock_area/show/junction.rs](../src/widgets/dock_area/show/junction.rs) and the
 junction steps in [tests/dst.rs](../tests/dst.rs).
 
-**Where it comes from.** Upstream PR [#155](https://github.com/anhosh/egui_dock/pull/155), "one
+**Where it comes from.** An earlier design proposal, "one
 drag to resize them all" — dragging the point where two separators meet, so both move at once.
-It was reopened and rebased across seven release branches and never merged; junction *snapping*
+It was revisited across several release lines and never landed here; junction *snapping*
 was asked for and deferred, and the PR died there. We want the gesture, and we already have the
 one thing that PR did not: a control drawn at exactly that point.
 

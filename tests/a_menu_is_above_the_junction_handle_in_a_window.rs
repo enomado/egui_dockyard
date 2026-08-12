@@ -11,14 +11,14 @@
 //! handle as a real `Area`) is not supposed to know or care which surface it is drawn over.
 //!
 //! [`a_menu_is_above_the_junction_handle`]: mod@self
-//! [`draw_one_handle`]: egui_dock::DockArea
+//! [`draw_one_handle`]: egui_dockyard::DockArea
 
 use egui::{
     Area, Color32, Context, Event, Frame, Id, Modifiers, Order, PointerButton, Pos2, RawInput,
     Rect, Sense, Ui, Vec2, WidgetText,
 };
-use egui_dock::core::geom::{Point, Size};
-use egui_dock::{
+use egui_dockyard::core::geom::{Point, Size};
+use egui_dockyard::{
     DockArea, DockLayout, DockState, DragInFlight, DragSubject, NodePath, Style, TabViewer,
 };
 
@@ -86,15 +86,15 @@ fn a_tee_in_a_window() -> (DockState<String>, NodePath, NodePath, NodePath) {
     let root = state[window].root().unwrap();
     let [left, right] = state.split(
         NodePath::new(window, root),
-        egui_dock::Split::Right,
+        egui_dockyard::Split::Right,
         0.5,
-        egui_dock::Node::leaf("Right2".to_owned()),
+        egui_dockyard::Node::leaf("Right2".to_owned()),
     );
     let [left, below] = state.split(
         NodePath::new(window, left),
-        egui_dock::Split::Below,
+        egui_dockyard::Split::Below,
         0.5,
-        egui_dock::Node::leaf("Below".to_owned()),
+        egui_dockyard::Node::leaf("Below".to_owned()),
     );
     let path = |node| NodePath::new(window, node);
     (state, path(left), path(below), path(right))

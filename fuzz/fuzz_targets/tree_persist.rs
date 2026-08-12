@@ -28,7 +28,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use egui_dock::{DockState, Node, SurfaceIndex, SurfaceRef};
+use egui_dockyard::{DockState, Node, SurfaceIndex, SurfaceRef};
 
 type Tab = ron::Value;
 

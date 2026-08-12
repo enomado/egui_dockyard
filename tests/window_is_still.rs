@@ -27,7 +27,7 @@
 //! apart is whether the layout has already accounted for the space, and only a human knows that.
 
 use egui::{CentralPanel, Context, Id, Pos2, RawInput, Rect, Ui, Vec2, WidgetText};
-use egui_dock::{
+use egui_dockyard::{
     DockArea, DockLayout, DockState, Node, NodePath, Split, Style, SurfaceIndex, TabViewer,
 };
 

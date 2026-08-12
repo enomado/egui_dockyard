@@ -7,7 +7,7 @@
 //! *is* still a tab in the bar while it is dragged, so the close lands, and the dock is left
 //! holding a drag whose subject no longer exists.
 //!
-//! Reported against the fork; it panicked on the very next frame.
+//! Reported against this repository; it panicked on the very next frame.
 //!
 //! # Why it is a file of its own
 //!
@@ -52,7 +52,7 @@ use std::collections::HashSet;
 use egui::{
     CentralPanel, Context, Event, Id, PointerButton, Pos2, RawInput, Rect, Ui, Vec2, WidgetText,
 };
-use egui_dock::{
+use egui_dockyard::{
     DockArea, DockLayout, DockState, NodePath, Style, SurfaceIndex, TabIndex, TabPath, TabViewer,
     dragged_tab, tab_widget_id,
 };

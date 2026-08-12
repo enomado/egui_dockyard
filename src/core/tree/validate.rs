@@ -222,7 +222,7 @@ impl<Tab> Tree<Tab> {
     /// # Examples
     ///
     /// ```rust
-    /// # use egui_dock::DockState;
+    /// # use egui_dockyard::DockState;
     /// let mut dock_state = DockState::new(vec!["tab 1", "tab 2"]);
     /// let root = dock_state.main_surface().root().unwrap();
     /// let _ = dock_state.main_surface_mut().split_left(root, 0.5, vec!["tab 3"]);

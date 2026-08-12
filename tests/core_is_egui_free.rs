@@ -5,7 +5,7 @@
 //! "We agreed not to import egui in the core" rots silently — one `use egui::Rect` in a
 //! hurry and the property tests, the fuzz target and the deterministic simulator all
 //! quietly acquire a UI dependency again. This is the same class of drift that
-//! `tools/vendor_vs_fork.sh` catches between vendor and fork, so it gets the same
+//! the vendor comparison tool catches between the vendored copy and this crate, so it gets the same
 //! treatment: a check that fails loudly.
 //!
 //! # What is checked

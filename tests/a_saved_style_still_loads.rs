@@ -22,7 +22,7 @@
 
 #![cfg(feature = "serde")]
 
-use egui_dock::Style;
+use egui_dockyard::Style;
 
 /// The whole of a "saved style", as sparse as a save can be: one field, inside one struct.
 ///

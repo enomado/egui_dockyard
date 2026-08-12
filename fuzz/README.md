@@ -9,7 +9,7 @@ in `src/core/tree/validate.rs` — as the thing that decides whether a state is 
 | `tree_persist` | a saved layout (RON) | can a file the reader *accepts* produce an illegal dock? |
 
 They are not a replacement for the property tests in `src/proptests.rs`; they cover what those
-cannot afford. Both drive the **same** vocabulary of operations — `egui_dock::core::testkit`,
+cannot afford. Both drive the **same** vocabulary of operations — `egui_dockyard::core::testkit`,
 behind the crate's `testkit` feature — so what differs is only how a sequence is drawn:
 proptest draws blind and checks properties a fuzzer cannot afford per case (identity, the
 derived collapsing counts), libFuzzer draws with coverage feedback and runs sequences 64
@@ -90,13 +90,13 @@ turned into an entry fails the run — a silently empty corpus looks exactly lik
 the outside, and then "seeded with real layouts" is a claim about nothing. Pointing the tool at
 the seed directory itself re-checks what is already committed.
 
-Layouts of the application that vendors this fork keep the dock state in a field named `tab`,
+Layouts of the application that vendors this crate keep the dock state in a field named `tab`,
 so the tool lifts that field out verbatim; a file that is already a bare dock state is taken
 whole.
 
 ## What has been found
 
-Each of these is fixed in the fork, with a regression test next to the code it broke:
+Each of these is fixed in this repository, with a regression test next to the code it broke:
 
 * a saved file describing a leaf with no tabs below the root loaded into a tree that failed
   the oracle (`EmptyLeaf`) — both in the current reader and in the pre-arena one;

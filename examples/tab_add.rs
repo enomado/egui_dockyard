@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
 use eframe::{NativeOptions, egui};
-use egui_dock::{DockArea, DockState, NodePath, Style};
+use egui_dockyard::{DockArea, DockState, NodePath, Style};
 
 fn main() -> eframe::Result<()> {
     let options = NativeOptions::default();
@@ -16,7 +16,7 @@ struct TabViewer<'a> {
     added_nodes: &'a mut Vec<NodePath>,
 }
 
-impl egui_dock::TabViewer for TabViewer<'_> {
+impl egui_dockyard::TabViewer for TabViewer<'_> {
     type Tab = usize;
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {

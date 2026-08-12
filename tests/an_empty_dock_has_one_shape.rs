@@ -30,7 +30,7 @@
 //! strip is gone, stated without a screen.
 
 use egui::{CentralPanel, Context, Id, LayerId, Pos2, RawInput, Rect, Ui, Vec2, WidgetText};
-use egui_dock::{DockArea, DockLayout, DockState, Style, TabViewer};
+use egui_dockyard::{DockArea, DockLayout, DockState, Style, TabViewer};
 
 const SCREEN: Vec2 = Vec2::new(800.0, 600.0);
 

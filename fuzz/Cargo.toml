@@ -1,5 +1,5 @@
 [package]
-name = "egui_dock-fuzz"
+name = "egui_dockyard-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -14,7 +14,7 @@ arbitrary = { version = "1", features = ["derive"] }
 # format we really store is the whole point of seeding the corpus with real layouts.
 ron = "0.12"
 
-[dependencies.egui_dock]
+[dependencies.egui_dockyard]
 path = ".."
 # `testkit` exports the operation vocabulary this target drives the dock with — the same one
 # the property tests use. Without it the operations would have to be written down here a

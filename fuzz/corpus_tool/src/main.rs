@@ -11,7 +11,7 @@
 //!
 //! # What it does
 //!
-//! Saved layouts of the application that vendors this fork wrap the dock state in a field named
+//! Saved layouts of the application that vendors this crate wrap the dock state in a field named
 //! `tab`, next to unrelated application state. This tool lifts that field out verbatim (byte for
 //! byte — the point is to keep the original text, including fields the current format no longer
 //! writes), checks that the reader both accepts it and returns a well-formed dock state, and
@@ -28,7 +28,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use egui_dock::DockState;
+use egui_dockyard::DockState;
 
 /// Tabs are opaque here for the same reason they are opaque in the fuzz target: the format
 /// under test is the layout around them, not their payload.

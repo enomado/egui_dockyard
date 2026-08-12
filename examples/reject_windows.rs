@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
 use eframe::{NativeOptions, egui};
-use egui_dock::{DockArea, DockState, Style};
+use egui_dockyard::{DockArea, DockState, Style};
 
 fn main() -> eframe::Result<()> {
     let options = NativeOptions::default();
@@ -20,7 +20,7 @@ struct OpinionatedTab {
     content: String,
 }
 
-impl egui_dock::TabViewer for TabViewer {
+impl egui_dockyard::TabViewer for TabViewer {
     type Tab = OpinionatedTab;
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
@@ -80,7 +80,7 @@ impl Default for MyApp {
             vec![OpinionatedTab {
                 can_become_window: Ok(true),
                 title: "wise tab".to_owned(),
-                content: "egui_dock 0.7!".to_string(),
+                content: "egui_dockyard 0.7!".to_string(),
             }],
         );
         let [_, _] = tree.main_surface_mut().split_below(

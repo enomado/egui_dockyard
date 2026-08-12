@@ -3,7 +3,7 @@
 //! # Why this is a test file of its own
 //!
 //! Every other gesture in the vocabulary is the dock's own widget: a tab, a separator, a junction
-//! handle are all allocated and sensed by `egui_dock`, so "does the field know about it" is a
+//! handle are all allocated and sensed by `egui_dockyard`, so "does the field know about it" is a
 //! question about code that is right there. A window move is not — it belongs to
 //! [`egui::Window`], which the dock builds with no title bar, so egui resolves it to a
 //! drag-from-anywhere over the window's body. The dock takes none of that over. It reads the
@@ -24,7 +24,7 @@ use egui::{
     CentralPanel, Context, Event, Id, Modifiers, PointerButton, Pos2, RawInput, Rect, Ui, Vec2,
     WidgetText,
 };
-use egui_dock::{
+use egui_dockyard::{
     DockArea, DockLayout, DockState, DragInFlight, DragSubject, NodePath, Style, SurfaceIndex,
     TabViewer, drag_in_flight,
 };
@@ -62,7 +62,7 @@ fn dock_with_a_window() -> (DockState<String>, SurfaceIndex) {
 /// failed to end is filtered out as a leftover and the failure becomes invisible. Inside the
 /// frame it is still live, and a release that does not empty the hand can be seen.
 ///
-/// [`DockAreaResponse::dragging`]: egui_dock::dock_area::DockAreaResponse::dragging
+/// [`DockAreaResponse::dragging`]: egui_dockyard::dock_area::DockAreaResponse::dragging
 fn frame(
     ctx: &Context,
     state: &mut DockState<String>,

@@ -1,13 +1,13 @@
 [package]
-name = "egui_dock"
+name = "egui_dockyard"
 description = "Docking system for egui - an immediate-mode GUI library for Rust"
-authors = ["lain-dono", "Adam Gąsior (Adanos020)"]
+authors = ["lain-dono", "Adam Gąsior"]
 version = "0.20.2"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/Adanos020/egui_dock"
+repository = "https://github.com/enomado/egui_dockyard"
 categories = ["gui", "game-development"]
 include = ["src/**/*.rs", "Cargo.toml", "LICENSE"]
 keywords = ["egui", "gui", "tile", "dock", "layout"]

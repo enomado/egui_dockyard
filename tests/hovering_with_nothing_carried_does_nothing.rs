@@ -19,7 +19,9 @@
 //! read `hover_data` without requiring a carried tab, this is what goes red.
 
 use egui::{CentralPanel, Context, Event, Id, Pos2, RawInput, Rect, Ui, Vec2, WidgetText};
-use egui_dock::{DockArea, DockState, NodePath, Style, SurfaceIndex, TabIndex, TabViewer, tab_widget_id};
+use egui_dockyard::{
+    DockArea, DockState, NodePath, Style, SurfaceIndex, TabIndex, TabViewer, tab_widget_id,
+};
 
 const SCREEN: Vec2 = Vec2::new(1000.0, 700.0);
 const DOCK_ID: &str = "hovering_with_nothing_carried_does_nothing";
@@ -149,5 +151,9 @@ fn a_sweeping_hover_with_an_empty_hand_moves_nothing() {
         before,
         "hovering with nothing carried must not rearrange any tab"
     );
-    assert_eq!(sim.state.validate(), Ok(()), "and the dock stays well-formed");
+    assert_eq!(
+        sim.state.validate(),
+        Ok(()),
+        "and the dock stays well-formed"
+    );
 }

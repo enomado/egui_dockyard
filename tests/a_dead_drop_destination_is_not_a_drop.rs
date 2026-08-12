@@ -22,13 +22,13 @@
 //! look like "the same value as last frame" — so a preference can stay locked onto a dead node for
 //! as long as the lock lasts.
 //!
-//! `NodePath` is already an identity (see [`NodeId`](egui_dock::NodeId)'s docs), unlike the
+//! `NodePath` is already an identity (see [`NodeId`](egui_dockyard::NodeId)'s docs), unlike the
 //! position-keyed addresses the source bug decayed through, so there is only one way for it to go
 //! stale: the node it names leaves the tree. Once that happens, indexing it panicked —
 //! `move_tab` is where a `TabDestination::Node` gets turned into `self[dst.surface][dst.node]` —
 //! with `no node 1.0 in this tree`.
 //!
-//! Reproduced directly against the fork (not reported by a user): the drop overlay's own
+//! Reproduced directly against this repository (not reported by a user): the drop overlay's own
 //! preference lock is the one piece of cross-frame dock state this harness had not yet exercised
 //! from the destination side.
 //!
@@ -59,7 +59,7 @@ use std::collections::HashSet;
 use egui::{
     CentralPanel, Context, Event, Id, PointerButton, Pos2, RawInput, Rect, Ui, Vec2, WidgetText,
 };
-use egui_dock::{
+use egui_dockyard::{
     DockArea, DockLayout, DockState, NodePath, Style, SurfaceIndex, TabIndex, TabViewer,
     tab_widget_id,
 };
@@ -221,7 +221,10 @@ fn grab(sim: &mut Sim, leaf: NodePath, tab: usize) -> Pos2 {
     for step in (0..8u8).rev() {
         sim.move_to(home + (out - home) * (f32::from(step) / 8.0));
     }
-    assert!(sim.is_dragging(leaf, tab), "and still a live drag on the way back");
+    assert!(
+        sim.is_dragging(leaf, tab),
+        "and still a live drag on the way back"
+    );
     home
 }
 
@@ -247,9 +250,10 @@ fn three_leaves() -> (DockState<String>, NodePath, NodePath, NodePath) {
     let [left, right] = state
         .main_surface_mut()
         .split_right(root, 0.5, vec!["Target".to_owned()]);
-    let [left, elsewhere] = state
-        .main_surface_mut()
-        .split_below(left, 0.5, vec!["Elsewhere".to_owned()]);
+    let [left, elsewhere] =
+        state
+            .main_surface_mut()
+            .split_below(left, 0.5, vec!["Elsewhere".to_owned()]);
     let path = |node| NodePath::new(SurfaceIndex::main(), node);
     (state, path(left), path(right), path(elsewhere))
 }
@@ -371,7 +375,8 @@ fn an_unrelated_close_does_not_disturb_a_live_destination() {
     assert!(
         settled
             .iter()
-            .any(|(_, tabs)| tabs.contains(&"Tab 1".to_owned()) && tabs.contains(&"Target".to_owned())),
+            .any(|(_, tabs)| tabs.contains(&"Tab 1".to_owned())
+                && tabs.contains(&"Target".to_owned())),
         "the drop lands normally: the dragged tab and the destination's own tab end up together, \
          proving the preference survived the unrelated close instead of merely surviving because \
          there was nothing left to test against; got {settled:?}"

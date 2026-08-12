@@ -69,7 +69,7 @@ impl<'tree, Tab> DockArea<'tree, Tab> {
     #[inline(always)]
     pub fn new(tree: &'tree mut DockState<Tab>) -> DockArea<'tree, Tab> {
         Self {
-            id: Id::new("egui_dock::DockArea"),
+            id: Id::new("egui_dockyard::DockArea"),
             dock_state: tree,
             style: None,
             show_add_popup: false,

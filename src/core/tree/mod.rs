@@ -338,7 +338,7 @@ impl<Tab> Tree<Tab> {
     /// # Examples
     ///
     /// ```rust
-    /// # use egui_dock::{DockState, Split};
+    /// # use egui_dockyard::{DockState, Split};
     /// let mut dock_state = DockState::new(vec!["node 1", "node 2", "node 3"]);
     /// assert_eq!(dock_state.main_surface().num_tabs(), 3);
     ///
@@ -360,7 +360,7 @@ impl<Tab> Tree<Tab> {
     /// # Examples
     ///
     /// ```rust
-    /// # use egui_dock::DockState;
+    /// # use egui_dockyard::DockState;
     /// let mut dock_state = DockState::new(vec!["single tab"]);
     /// let root_node = dock_state.main_surface().root_node().unwrap();
     ///
@@ -376,7 +376,7 @@ impl<Tab> Tree<Tab> {
     /// # Examples
     ///
     /// ```rust
-    /// # use egui_dock::DockState;
+    /// # use egui_dockyard::DockState;
     /// let mut dock_state = DockState::new(vec!["single tab"]);
     /// let root_node = dock_state.main_surface_mut().root_node_mut().unwrap();
     /// root_node.append_tab("partner tab");
@@ -445,7 +445,7 @@ impl<Tab> Tree<Tab> {
     /// # Example
     ///
     /// ```rust
-    /// # use egui_dock::{DockState, SurfaceIndex, Split};
+    /// # use egui_dockyard::{DockState, SurfaceIndex, Split};
     /// let mut dock_state = DockState::new(vec!["tab 1", "tab 2"]);
     ///
     /// // At this point, the main surface only contains the leaf with tab 1 and 2.

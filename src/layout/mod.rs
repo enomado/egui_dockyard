@@ -22,10 +22,10 @@
 //! automation, diagnostics) can ask for the last known geometry:
 //!
 //! ```rust
-//! # use egui_dock::{DockLayout, DockState, NodePath, SurfaceIndex};
+//! # use egui_dockyard::{DockLayout, DockState, NodePath, SurfaceIndex};
 //! # egui::__run_test_ctx(|ctx| {
 //! let dock_state = DockState::new(vec!["a tab"]);
-//! let dock_id = egui::Id::new("egui_dock::DockArea");
+//! let dock_id = egui::Id::new("egui_dockyard::DockArea");
 //! let layout = DockLayout::load(ctx, dock_id);
 //! let root = dock_state.main_surface().root().unwrap();
 //! let _rect = layout.rect(NodePath::new(SurfaceIndex::main(), root));

@@ -28,7 +28,7 @@ use egui::{
     Area, Color32, Context, Event, Frame, Id, Modifiers, Order, PointerButton, Pos2, RawInput,
     Rect, Sense, Ui, Vec2, WidgetText,
 };
-use egui_dock::{
+use egui_dockyard::{
     DockArea, DockLayout, DockState, DragInFlight, DragSubject, NodeId, NodePath, Style,
     SurfaceIndex, TabViewer,
 };

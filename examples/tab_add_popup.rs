@@ -2,7 +2,7 @@
 
 use eframe::{NativeOptions, egui};
 use egui::{Color32, RichText};
-use egui_dock::{DockArea, DockState, NodePath, Style};
+use egui_dockyard::{DockArea, DockState, NodePath, Style};
 
 fn main() -> eframe::Result<()> {
     let options = NativeOptions::default();
@@ -74,7 +74,7 @@ struct TabViewer<'a> {
     added_nodes: &'a mut Vec<AddRequest>,
 }
 
-impl egui_dock::TabViewer for TabViewer<'_> {
+impl egui_dockyard::TabViewer for TabViewer<'_> {
     type Tab = MyTab;
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {

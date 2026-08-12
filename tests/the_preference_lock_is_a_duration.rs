@@ -27,7 +27,7 @@ use egui::{
     CentralPanel, Context, Event, Id, Modifiers, PointerButton, Pos2, RawInput, Rect, Ui, Vec2,
     WidgetText,
 };
-use egui_dock::{
+use egui_dockyard::{
     DockArea, DockLayout, DockState, Node, NodePath, Split, Style, SurfaceIndex, TabViewer,
 };
 
@@ -78,8 +78,8 @@ struct Scene {
     style: Style,
     frame: u32,
     window: SurfaceIndex,
-    right: egui_dock::NodeId,
-    left: egui_dock::NodeId,
+    right: egui_dockyard::NodeId,
+    left: egui_dockyard::NodeId,
 }
 
 impl Scene {
@@ -98,8 +98,8 @@ impl Scene {
         let window = state.add_window(vec!["floating".to_owned()]);
         {
             let window_state = state.get_window_state_mut(window).unwrap();
-            window_state.set_position(egui_dock::geom::Point::new(60.0, 60.0));
-            window_state.set_size(egui_dock::geom::Size::new(300.0, 240.0));
+            window_state.set_position(egui_dockyard::geom::Point::new(60.0, 60.0));
+            window_state.set_size(egui_dockyard::geom::Size::new(300.0, 240.0));
         }
 
         let mut scene = Self {
@@ -143,14 +143,14 @@ impl Scene {
         output.textures_delta.clear();
     }
 
-    fn leaf_rect(&self, surface: SurfaceIndex, node: egui_dock::NodeId) -> Rect {
+    fn leaf_rect(&self, surface: SurfaceIndex, node: egui_dockyard::NodeId) -> Rect {
         DockLayout::load(&self.ctx, Id::new(DOCK_ID))
             .rect(NodePath::new(surface, node))
             .expect("the leaf was laid out")
     }
 
     /// Where the first tab of a leaf was drawn — the point a drag has to start from.
-    fn first_tab(&self, surface: SurfaceIndex, node: egui_dock::NodeId) -> Rect {
+    fn first_tab(&self, surface: SurfaceIndex, node: egui_dockyard::NodeId) -> Rect {
         let id = Id::new(DOCK_ID)
             .with((surface, "surface"))
             .with((node, "node"))
@@ -219,7 +219,7 @@ impl Scene {
 
     /// Split a third leaf out of the left one, so the pointer has a main-surface leaf to cross
     /// on its way to the right-hand one.
-    fn split_off_a_middle_leaf(&mut self) -> egui_dock::NodeId {
+    fn split_off_a_middle_leaf(&mut self) -> egui_dockyard::NodeId {
         let [_, middle] = self.state.split(
             NodePath::new(SurfaceIndex::main(), self.left),
             Split::Right,
@@ -236,7 +236,7 @@ impl Scene {
     /// in the middle instead of the floating window.
     fn drag_over_a_main_leaf_and_release(
         &mut self,
-        crossed: egui_dock::NodeId,
+        crossed: egui_dockyard::NodeId,
         rest_frames: u32,
     ) -> Landed {
         let over = self.leaf_rect(SurfaceIndex::main(), crossed).center();
@@ -331,7 +331,7 @@ fn the_default_lock_holds_a_target_for_the_time_it_promises() {
 /// says. The gesture below rests two frames on the destination, some 0.28 s inside a 0.3 s
 /// lock, and the tab lands where the pointer is.
 ///
-/// Whether that asymmetry is intended is an open question — it is written up in `FORK.md`. If it
+/// Whether that asymmetry is intended is an open question — it is written up in `ORIGIN.md`. If it
 /// is ever made symmetric, this is the test that will say so, and it should be *changed* rather
 /// than deleted.
 #[test]

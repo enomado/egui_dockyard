@@ -52,9 +52,9 @@ use egui::{
     CentralPanel, Context, Event, Id, Modifiers, PointerButton, Pos2, RawInput, Rect, Ui, Vec2,
     WidgetText,
 };
-use egui_dock::dock_area::DockEvent;
-use egui_dock::shape::subtree_shape;
-use egui_dock::{
+use egui_dockyard::dock_area::DockEvent;
+use egui_dockyard::shape::subtree_shape;
+use egui_dockyard::{
     DockArea, DockLayout, DockState, DragInFlight, DragSubject, JunctionArms, Node, NodeId,
     NodePath, Split, Style, SurfaceIndex, TabId, TabIndex, TabPath, TabViewer, Tree,
     drag_hover_node, drag_in_flight, dragged_tab, tab_widget_id,
@@ -68,7 +68,7 @@ use egui_dock::{
 const SCREEN: Vec2 = Vec2::new(1280.0, 800.0);
 
 /// Id the dock area gets by default; the geometry map and the widget ids hang off it.
-const DOCK_ID: &str = "egui_dock::DockArea";
+const DOCK_ID: &str = "egui_dockyard::DockArea";
 
 // ---------------------------------------------------------------------------------------
 // Randomness
@@ -425,7 +425,7 @@ impl WindowSize {
 
 /// What a drop somewhere means, in the dock's own terms.
 ///
-/// The default overlay is [`OverlayType::Widgets`](egui_dock::OverlayType): five buttons in a
+/// The default overlay is [`OverlayType::Widgets`](egui_dockyard::OverlayType): five buttons in a
 /// plus shape over the hovered leaf decide what a drop means, and *anywhere else over the leaf*
 /// means "open a window". Aiming by eyeballed fractions of the rect was tried first and was
 /// wrong in both directions — the fractions that looked like "the left edge" were over the
@@ -460,7 +460,7 @@ enum Aim {
 /// a negative side). Everything else — including "the buttons are on top of one another" — is left
 /// for [`Sim::interpret`] to notice, because that is a fact about a *point*, not about the leaf.
 ///
-/// [`resolve_icon_based`]: https://docs.rs/egui_dock
+/// [`resolve_icon_based`]: https://docs.rs/egui_dockyard
 fn overlay_buttons(rect: Rect, style: &Style) -> Option<Vec<(Aim, Pos2, Rect)>> {
     let spacing = style.overlay.button_spacing;
     let inner = rect.shrink(spacing);
@@ -649,7 +649,7 @@ struct Sim {
 /// complete gesture inside one step, so a sweep that only looked between steps would see the two
 /// gestures a hold keeps open and conclude the third does not exist.
 ///
-/// [`DockAreaResponse::dragging`]: egui_dock::dock_area::DockAreaResponse::dragging
+/// [`DockAreaResponse::dragging`]: egui_dockyard::dock_area::DockAreaResponse::dragging
 #[derive(Clone, Copy, Default, Debug)]
 struct SubjectWatch {
     /// Frames spent carrying a tab.
@@ -796,7 +796,7 @@ struct Hold {
     /// An identity rather than a position, for the same reason the crate's own `DragSource` is
     /// one: every removal under the hold renumbers the bar, and a position would name the
     /// neighbour by the time it is read.
-    tab: (NodePath, egui_dock::TabId),
+    tab: (NodePath, egui_dockyard::TabId),
     /// The whole dock as it stood when the hand closed, so a release can say whether it landed
     /// into a scene that had moved underneath it — see [`HoldWatch::landings_after_a_change`].
     scene: String,
@@ -1078,12 +1078,12 @@ type Boundaries = Vec<(NodePath, f32)>;
 struct LeafIdentity {
     /// `(identity, title)` per tab, in order: the pair catches both a renumbered tab and a tab
     /// whose identity was kept while its content moved.
-    tabs: Vec<(egui_dock::TabId, String)>,
-    active: Option<egui_dock::TabId>,
+    tabs: Vec<(egui_dockyard::TabId, String)>,
+    active: Option<egui_dockyard::TabId>,
     /// The focus history, most recent first — the state that used to be quietly rewritten by a
     /// cancelled drag. The *whole* stack, not just its top: a step that disturbs an entry two
     /// deep disturbs where a later close lands, and a snapshot of the top alone cannot see it.
-    history: Vec<egui_dock::TabId>,
+    history: Vec<egui_dockyard::TabId>,
 }
 
 /// Names for the coverage report, in the order of [`outcome_index`].
@@ -3196,7 +3196,7 @@ impl Sim {
             //
             // Found by the sweep, on the commit rule rather than on this: `ReleaseJunction`
             // waited for a commit that had already been paid three steps earlier. Same shape as
-            // the fork's own "a middle click ended egui's drag and the dock went on carrying the
+            // this repository's own "a middle click ended egui's drag and the dock went on carrying the
             // tab" — and the same lesson, that the hand being closed and a gesture being live
             // are two facts, and only the second is the dock's.
             if let Some(held) = self.junction_hold.as_mut() {
@@ -5064,7 +5064,7 @@ fn reordering_a_tab_in_the_bar_keeps_it_the_same_tab() {
     let dragged = sim.state[leaf]
         .get_leaf()
         .unwrap()
-        .tab_id_at(egui_dock::TabIndex(0))
+        .tab_id_at(egui_dockyard::TabIndex(0))
         .expect("the first tab");
     let grab = sim.tab_rect(leaf, 0).expect("a tab to grab").center();
     let onto_itself = sim
@@ -5081,7 +5081,7 @@ fn reordering_a_tab_in_the_bar_keeps_it_the_same_tab() {
         sim.trace()
     );
     assert_eq!(
-        node.tab_id_at(egui_dock::TabIndex(1)),
+        node.tab_id_at(egui_dockyard::TabIndex(1)),
         Some(dragged),
         "and it is the same tab that was picked up, not a copy of it"
     );
@@ -5550,7 +5550,7 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         "no junction drag was ever ended by something other than letting go, across {SEEDS} \
          seeds. **Any** release ends an egui drag and a middle click is one, so closing a tab \
          under the hand ends the resize and pays its commit in that frame — the asymmetry the \
-         fork already has a finding about for tab drags, unasked here"
+         repository already has a finding about for tab drags, unasked here"
     );
 
     // The chokepoint's own coverage: every gesture the dock has a word for was seen *in the

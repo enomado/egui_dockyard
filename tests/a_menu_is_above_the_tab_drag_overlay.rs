@@ -41,7 +41,7 @@ use egui::{
     Area, CentralPanel, Context, Event, Frame, Id, Order, PointerButton, Pos2, RawInput, Rect,
     Sense, Ui, Vec2, WidgetText,
 };
-use egui_dock::{
+use egui_dockyard::{
     DockArea, DockLayout, DockState, DragSubject, NodePath, Style, SurfaceIndex, TabIndex,
     TabViewer, tab_widget_id,
 };

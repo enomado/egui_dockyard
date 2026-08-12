@@ -18,7 +18,7 @@ use egui::{
     CentralPanel, Context, Event, Id, Modifiers, PointerButton, Pos2, RawInput, Rect, Ui, Vec2,
     WidgetText,
 };
-use egui_dock::{
+use egui_dockyard::{
     DockArea, DockState, DragInFlight, DragSubject, Style, SurfaceIndex, TabViewer, WindowEdge,
     drag_in_flight,
 };
@@ -53,7 +53,7 @@ fn dock_with_a_window() -> (DockState<String>, SurfaceIndex) {
 /// See `tests/a_moved_window_says_so.rs` for why the answer is taken from
 /// [`DockAreaResponse::dragging`] and not from [`drag_in_flight`] afterwards.
 ///
-/// [`DockAreaResponse::dragging`]: egui_dock::dock_area::DockAreaResponse::dragging
+/// [`DockAreaResponse::dragging`]: egui_dockyard::dock_area::DockAreaResponse::dragging
 fn frame(
     ctx: &Context,
     state: &mut DockState<String>,

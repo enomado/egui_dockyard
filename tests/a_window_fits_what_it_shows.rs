@@ -27,7 +27,7 @@ use egui::{
     CentralPanel, Context, CornerRadius, Frame, Id, LayerId, Pos2, RawInput, Rect, Shape, Stroke,
     Ui, Vec2, WidgetText, epaint::ClippedShape,
 };
-use egui_dock::{
+use egui_dockyard::{
     DockArea, DockLayout, DockState, Node, NodePath, Split, Style, SurfaceIndex, TabViewer,
 };
 
@@ -168,7 +168,7 @@ fn style() -> Style {
 /// the window shrinks to a strip of tab bars, one row per leaf.
 fn window_of_collapsed_rows(
     rows: usize,
-) -> (DockState<String>, SurfaceIndex, Vec<egui_dock::NodeId>) {
+) -> (DockState<String>, SurfaceIndex, Vec<egui_dockyard::NodeId>) {
     assert!(rows >= 1);
     let mut state = DockState::new(vec![tab("main")]);
     let window = state.add_window(vec![tab("row 0")]);
@@ -311,7 +311,7 @@ fn a_window_paints_nothing_outside_itself() {
     state
         .get_window_state_mut(window)
         .unwrap()
-        .set_size(egui_dock::geom::Size::new(320.0, SQUEEZED_WINDOW));
+        .set_size(egui_dockyard::geom::Size::new(320.0, SQUEEZED_WINDOW));
 
     let painted_frame = settle(&ctx, &mut state, id, &style);
     let outer = window_area_rect(&ctx, window).expand(TOLERANCE);
@@ -492,7 +492,7 @@ fn click_collapse_button(
     id: Id,
     style: &Style,
     window: SurfaceIndex,
-    leaf: egui_dock::NodeId,
+    leaf: egui_dockyard::NodeId,
 ) {
     let rect = DockLayout::load(ctx, id)
         .rect(NodePath::new(window, leaf))

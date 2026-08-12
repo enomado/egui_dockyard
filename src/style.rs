@@ -37,7 +37,7 @@ pub enum TabAddAlign {
 /// Example:
 ///
 /// ```rust
-/// # use egui_dock::{DockArea, DockState, OverlayType, Style, TabAddAlign, TabViewer};
+/// # use egui_dockyard::{DockArea, DockState, OverlayType, Style, TabAddAlign, TabViewer};
 /// # use egui::{Ui, WidgetText};
 /// # struct MyTabViewer;
 /// # impl TabViewer for MyTabViewer {

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use eframe::{NativeOptions, egui};
-use egui_dock::{DockArea, DockState, Style, TabViewer};
+use egui_dockyard::{DockArea, DockState, Style, TabViewer};
 
 /// We identify tabs by the title of the file we are editing.
 type Title = String;

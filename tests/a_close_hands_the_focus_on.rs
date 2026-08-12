@@ -27,7 +27,7 @@
 use egui::{
     CentralPanel, Context, Event, Id, PointerButton, Pos2, RawInput, Rect, Ui, Vec2, WidgetText,
 };
-use egui_dock::{
+use egui_dockyard::{
     DockArea, DockState, LeafNode, NodePath, Style, SurfaceIndex, TabId, TabIndex, TabViewer,
     tab_widget_id,
 };

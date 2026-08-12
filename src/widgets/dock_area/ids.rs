@@ -38,17 +38,17 @@ use crate::{DockState, NodePath, TabId, TabPath};
 /// Id of the widget one tab is drawn as, in the dock area with id `dock_area_id`.
 ///
 /// `dock_area_id` is the id of the [`DockArea`](crate::DockArea) — the default is
-/// `Id::new("egui_dock::DockArea")`, or whatever was passed to
+/// `Id::new("egui_dockyard::DockArea")`, or whatever was passed to
 /// [`DockArea::id`](crate::DockArea::id).
 ///
 /// `tab` is the tab's identity inside its leaf, which
 /// [`LeafNode::tab_id_at`](crate::LeafNode::tab_id_at) resolves from a position.
 ///
 /// ```rust
-/// # use egui_dock::{DockState, NodePath, SurfaceIndex, TabIndex, tab_widget_id};
+/// # use egui_dockyard::{DockState, NodePath, SurfaceIndex, TabIndex, tab_widget_id};
 /// # egui::__run_test_ctx(|ctx| {
 /// let dock_state = DockState::new(vec!["a tab"]);
-/// let dock_id = egui::Id::new("egui_dock::DockArea");
+/// let dock_id = egui::Id::new("egui_dockyard::DockArea");
 /// let leaf = dock_state.main_surface().root().unwrap();
 /// let path = NodePath::new(SurfaceIndex::main(), leaf);
 /// let tab = dock_state.leaf(path).unwrap().tab_id_at(TabIndex(0)).unwrap();
@@ -79,7 +79,7 @@ pub fn tab_widget_id(dock_area_id: Id, path: NodePath, tab: TabId) -> Id {
 /// #     CentralPanel, Context, Event, Id, PointerButton, Pos2, RawInput, Rect, Ui, Vec2,
 /// #     WidgetText,
 /// # };
-/// # use egui_dock::{
+/// # use egui_dockyard::{
 /// #     DockArea, DockState, NodePath, Style, SurfaceIndex, TabIndex, TabPath, TabViewer,
 /// #     dragged_tab, tab_widget_id,
 /// # };
@@ -239,7 +239,7 @@ pub fn dragged_tab<Tab>(
 /// #     CentralPanel, Context, Event, Id, PointerButton, Pos2, RawInput, Rect, Ui, Vec2,
 /// #     WidgetText,
 /// # };
-/// # use egui_dock::{
+/// # use egui_dockyard::{
 /// #     DockArea, DockLayout, DockState, NodePath, Style, SurfaceIndex, TabIndex, TabViewer,
 /// #     drag_hover_node, tab_widget_id,
 /// # };
@@ -369,7 +369,7 @@ mod tests {
     /// which is exactly the failure this helper exists to keep in one place.
     #[test]
     fn each_coordinate_of_a_tab_address_changes_its_id() {
-        let dock_id = Id::new("egui_dock::DockArea");
+        let dock_id = Id::new("egui_dockyard::DockArea");
         let dock_state = DockState::new(vec!["a tab", "another tab"]);
         let node = dock_state.main_surface().root().unwrap();
 
@@ -401,7 +401,7 @@ mod tests {
     /// the survivor keeps its own address and the closed tab's address is answered by nobody.
     #[test]
     fn a_tab_keeps_its_address_when_a_neighbour_is_closed() {
-        let dock_id = Id::new("egui_dock::DockArea");
+        let dock_id = Id::new("egui_dockyard::DockArea");
         let mut dock_state = DockState::new(vec!["first", "second", "third"]);
         let node = dock_state.main_surface().root().unwrap();
         let path = NodePath::new(SurfaceIndex::main(), node);

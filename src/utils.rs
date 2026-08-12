@@ -54,7 +54,7 @@ pub fn rect_stroke_box(rect: Rect, width: f32) -> Rect {
     rect.expand(-f32::ceil(width / 2.0))
 }
 
-/// Fade a `egui_dock::Style` to a certain opacity
+/// Fade a `egui_dockyard::Style` to a certain opacity
 pub(super) fn fade_dock_style(style: &mut Style, factor: f32) {
     style.main_surface_border_stroke.color = style
         .main_surface_border_stroke

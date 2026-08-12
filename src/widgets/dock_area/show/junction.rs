@@ -440,7 +440,7 @@ impl<Tab> DockArea<'_, Tab> {
     ///
     /// `None` if the geometry map does not describe every part, or if one of them is degenerate
     /// (zero-size): such a part has nothing to pivot around, and dividing by its extent would
-    /// produce a NaN fraction — which this crate has already been bitten by once (see the fork's
+    /// produce a NaN fraction — which this crate has already been bitten by once (see the project's
     /// incident notes on `SplitNode.fraction`).
     fn band(&self, root: NodePath, horizontal: bool) -> Option<Band> {
         let mut parts = Vec::new();

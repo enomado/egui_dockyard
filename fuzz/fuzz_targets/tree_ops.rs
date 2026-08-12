@@ -1,7 +1,7 @@
 #![no_main]
 //! Coverage-guided sibling of the property tests in `src/proptests.rs`.
 //!
-//! Both harnesses drive the **same** vocabulary of operations — `egui_dock::core::testkit`,
+//! Both harnesses drive the **same** vocabulary of operations — `egui_dockyard::core::testkit`,
 //! behind the crate's `testkit` feature. That is deliberate: the operations used to be spelled
 //! out here and in the property tests separately, and the copies drifted in a way that decided
 //! what got tested (the property side never left the main surface; this side never checked
@@ -28,8 +28,8 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use egui_dock::DockState;
-use egui_dock::core::testkit::{Op, apply, check_tab_count, total_tabs};
+use egui_dockyard::DockState;
+use egui_dockyard::core::testkit::{Op, apply, check_tab_count, total_tabs};
 
 fuzz_target!(|ops: Vec<Op>| {
     let mut state = DockState::new(vec![0u32, 1, 2]);

@@ -4,10 +4,10 @@ version = "0.0.0"
 publish = false
 edition = "2024"
 
-# Deliberately a separate crate rather than a bin inside `egui_dock-fuzz`: that crate links
+# Deliberately a separate crate rather than a bin inside `egui_dockyard-fuzz`: that crate links
 # libFuzzer, which brings its own `main` and its own build flags. This one is plain cargo, so
 # it runs on stable and can be used (and tested) without the fuzzing toolchain.
 
 [dependencies]
-egui_dock = { path = "../..", features = ["serde"] }
+egui_dockyard = { path = "../..", features = ["serde"] }
 ron = "0.12"

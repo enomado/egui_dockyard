@@ -1,12 +1,12 @@
 # Findings
 
-Every bug this fork fixes, written up so it is useful **without** the fork: symptom, root
-cause, the fix we shipped, and the evidence that the fix does what it claims. Upstream — or
-anyone else — is free to take any of it, reimplement it differently, or ignore it. No
-attribution needed, nothing owed. See [FORK.md](FORK.md) for why the fork exists.
+Every bug this repository fixes, written up so it is useful on its own: symptom, root
+cause, the fix we shipped, and the evidence that the fix does what it claims. Anyone else is free
+to take any of it, reimplement it differently, or ignore it. See [ORIGIN.md](ORIGIN.md) for why
+this repository exists.
 
 This file is append-only in spirit: when we fix something here, it gets a section. If a finding
-lands upstream, its section stays and gets marked as landed, so the history of *why* survives.
+lands another implementation, its section stays and gets marked as landed, so the history of *why* survives.
 
 Ordered newest first.
 
@@ -14,7 +14,7 @@ Ordered newest first.
 
 ## Killing a stale drop preference killed the drag it belonged to
 
-**Status upstream:** not reported.
+**Status another implementation:** not reported.
 
 **Symptom.** Not user-facing — caught building the sweep-level acceptance test the previous
 finding below filed as a gap. Hold a tab over a leaf long enough for the drop overlay to settle
@@ -54,7 +54,7 @@ have"), where before this session it only reddened `tests/a_dead_drop_destinatio
 
 ## The drop overlay's own preference outlived the node it was pointing at
 
-**Status upstream:** not reported.
+**Status another implementation:** not reported.
 
 **Symptom.** Pick a tab up, pull it over a *different* leaf long enough for the drop overlay to
 settle a preference on it, and — without letting go — make that leaf disappear (the application
@@ -116,7 +116,7 @@ still-locked interleaving inside the sweep itself; deleting the fix turns
 `seeded_scenarios_keep_the_dock_well_formed` red on `drop_complaint`, the same panic this section
 describes. Building that interleaving surfaced a second, independent bug — seeing above.
 
-Found directly against the fork, not by a user: picking up the backlog item track A left ("a
+Found directly against this repository, not by a user: picking up the backlog item track A left ("a
 drop destination is cross-frame state too, and nothing watches it") and reproducing it by hand
 before writing anything.
 
@@ -124,7 +124,7 @@ before writing anything.
 
 ## A divider with nowhere to go still answered a drag, and the answer was always "dead centre"
 
-**Status upstream:** not reported.
+**Status another implementation:** not reported.
 
 **Symptom.** Shrink a window until a split's node is shorter than `2 * separator.extra`, then drag
 that separator. Nothing moves — there is nowhere for it to move — and the ratio the user set is
@@ -162,7 +162,7 @@ purpose.
 
 ## A middle click ended egui's drag and the dock went on carrying the tab
 
-**Status upstream:** not reported.
+**Status another implementation:** not reported.
 
 **Symptom.** Pick a tab up and, without letting go, middle-click **another** tab to close it. The
 tab in flight is still in the tree, so nothing panics and nothing is misplaced; what is left is a
@@ -196,7 +196,7 @@ a whole gesture.
 
 ## A drag remembered *where* its tab was, so closing that tab panicked — or dragged its neighbour
 
-**Status upstream:** reported (the panic half).
+**Status another implementation:** reported (the panic half).
 
 **Symptom.** Press the left button on a tab, pull it out of the tab row and bring it back —
 still holding — then middle-click to close it. The dock panicked on the next frame with
@@ -259,7 +259,7 @@ had, and not to the closed tab's.
 
 ## An empty dock had two shapes, and the one an application starts in did not look empty
 
-**Status upstream:** not reported.
+**Status another implementation:** not reported.
 
 **Symptom.** `DockState::new(vec![])` — how an application that opens with nothing docked builds
 its state — drew a strip of empty tab bar across the top of the dock area, and offered a drop
@@ -303,7 +303,7 @@ turns both red — the second on "1 node(s) got a rectangle", which is the tab b
 
 ## A saved layout could name a split fraction that is not a fraction, and the reader handed it straight to the tree
 
-**Status upstream:** not reported.
+**Status another implementation:** not reported.
 
 **Symptom.** Loading a layout whose split says `fraction: 5.5` (or an infinity, or `NaN`) produced
 a `DockState` that fails its own oracle — `SplitFractionOutOfRange` / `SplitFractionNotFinite`.
@@ -328,7 +328,7 @@ and the corpus replay crashes again.
 
 ## A collapsed floating window was sized in one coordinate system and drawn in another, so its last row of tabs hung out of the frame
 
-**Status upstream:** not reported.
+**Status another implementation:** not reported.
 
 **Symptom.** Collapse every leaf of a floating window — the arrow at the left of each tab bar —
 and the window becomes a strip of tab bars, one row per leaf. With one leaf the strip was
@@ -383,7 +383,7 @@ three times over, that the window comes back the size it was; deleting the conve
 
 ## A tab bar painted outside the leaf that owns it, because a `Ui`'s clip rectangle is replaced rather than intersected
 
-**Status upstream:** not reported. The line is upstream's.
+**Status another implementation:** not reported. The line is another implementation's.
 
 **Symptom.** The bottom row of the collapsed window above did not merely fail to fit — it was not
 cut off either. Its tabs were painted over the window's border and beyond it, while the buttons
@@ -439,7 +439,7 @@ being blurred rather than by name.
 
 ## A surface drew a border and then painted over it, most visibly at its rounded corners
 
-**Status upstream:** not reported. The line is upstream's.
+**Status another implementation:** not reported. The line is another implementation's.
 
 **Symptom.** Give the dock a border with any rounding at all and the corners are not there: the
 first thing drawn inside the surface — a tab bar, a filled rectangle with square corners — covers
@@ -472,7 +472,7 @@ on rectangles rather than pixels, so it holds for whatever radius a style asks f
 
 ## A "+" between a two-part row and a three-part row was not offered a toggle, because the detector read the tree instead of the picture
 
-**Status upstream:** not applicable — the cross-split toggle is this fork's own feature.
+**Status another implementation:** not applicable — the cross-split toggle is this this repository's own feature.
 
 **Symptom.** Two rows across the dock, the upper one cut into 2 panels and the lower into 3, with
 one divider of each on the same line. On screen that is a plain "+": a vertical line running the
@@ -553,7 +553,7 @@ is satisfied entirely by 2x2s, which is the one shape the old rule got right.
 
 ## The clamp that keeps a panel on screen was applied to the saved ratio, so resizing a window edited the layout
 
-**Status upstream:** not submitted.
+**Status another implementation:** not submitted.
 
 **Symptom.** Shrink a window far enough and a divider's position is *gone* — not moved, gone.
 Growing the window back leaves it dead centre. Nothing announced it, nothing was persisted as a
@@ -627,7 +627,7 @@ and that is precisely the state the old code could not stay in.
 
 ## The DST harness asked the dock for three things it never promised
 
-**Status upstream:** not applicable — this is our own headless test harness, not library code.
+**Status another implementation:** not applicable — this is our own headless test harness, not library code.
 
 All three surfaced within minutes of putting the cross-split toggle into the sweep's vocabulary,
 and none of them was a fault in the dock. They are written down because each is a way a harness
@@ -673,7 +673,7 @@ the grab moves along the divider instead, the way a hand would.
 
 ## Transposing a cross split rewired the tree by assignment, and left two nodes pointing at the wrong parent
 
-**Status upstream:** not applicable — the cross-split toggle is this fork's own feature.
+**Status another implementation:** not applicable — the cross-split toggle is this this repository's own feature.
 
 **Symptom.** None, for a while. The dock kept drawing correctly. Then some later gesture that
 walks *up* from a node — a split, a leaf removal — panicked inside `Tree::split` with
@@ -711,7 +711,7 @@ that owns the invariants, not in the caller that knows the shape it wants.
 
 ## Transposing a cross split mid-pass left the separators reading the old shape, and one divider snapped back
 
-**Status upstream:** not applicable — the cross-split toggle is this fork's own feature.
+**Status another implementation:** not applicable — the cross-split toggle is this this repository's own feature.
 
 **Symptom.** Toggle a 2x2 cross so the two side-by-side columns become two stacked rows (the two
 inner dividers merge into one full-width divider). Drag that divider down. Toggle back to
@@ -762,7 +762,7 @@ its own.
 
 ## `Context::run_ui` output dropped unconsumed textures_delta under egui 0.36
 
-**Status upstream:** not applicable — this is our own headless test harness, not library code.
+**Status another implementation:** not applicable — this is our own headless test harness, not library code.
 
 **Symptom.** Bumping the `egui` dependency to 0.36 turned 16 of the DST tests red with the same
 panic on drop: `Dropped TexturesDelta with 1 unapplied deltas. Deltas need to be handled.`
@@ -783,7 +783,7 @@ correct for a headless harness with nowhere to send the delta. `tests/dst.rs`, `
 
 ## The separator's clamp switched itself off on small nodes, so a panel could be squeezed to nothing
 
-**Status upstream:** not submitted.
+**Status another implementation:** not submitted.
 
 **Symptom.** In a node whose extent along the split axis is no larger than
 `SeparatorStyle::extra` (175 px by default), dragging the separator drives `fraction` all the way
@@ -834,7 +834,7 @@ provoked it, not the fragility.
 
 ## Dragging a tab along its own bar destroyed it and built a new one
 
-**Status upstream:** not submitted. The remaining half of the finding below: that one fixed the
+**Status another implementation:** not submitted. The remaining half of the finding below: that one fixed the
 drop that resolves to the slot the tab is *already* in, this one fixes the drop that really does
 move it — within the same node.
 
@@ -892,7 +892,7 @@ tests above, and neither the trace comparison nor the structural oracle notices 
 
 ## A tab dropped back where it came from reported a layout change
 
-**Status upstream:** not submitted. Same event and the same class of lie as the separator-drag
+**Status another implementation:** not submitted. Same event and the same class of lie as the separator-drag
 finding below, arriving through a different gesture — and this one was found by a user, not by a
 test.
 
@@ -960,7 +960,7 @@ the single-tab bail-out return `true` fails the reported-gesture test; restoring
 
 ## Collapsing a pane was two calls, and the public API let you make only the first
 
-**Status upstream:** not submitted. No bug is being fixed here — the two collapsed-count bugs
+**Status another implementation:** not submitted. No bug is being fixed here — the two collapsed-count bugs
 below are already fixed. This removes the shape that produced both of them.
 
 **Symptom.** None, today. That is the point: the two findings below (the gesture counting the
@@ -1007,7 +1007,7 @@ instead of a copy of it.
 
 ## Loading believed the collapsed counts in the file, including for the nodes it had just dropped
 
-**Status upstream:** not submitted. The fix is three lines and one deletion; it is written up
+**Status another implementation:** not submitted. The fix is three lines and one deletion; it is written up
 because the *shape* of the mistake is the interesting part.
 
 **Symptom.** A saved layout loads with the wrong collapsed height: a floating window opens
@@ -1074,7 +1074,7 @@ the immediate parent: the property fails, the structural oracle stays green.
 
 ## The main surface was an entry in a vector that everything agreed must never be empty
 
-**Status upstream:** not submitted. This one is a deliberate breaking change to the public API,
+**Status another implementation:** not submitted. This one is a deliberate breaking change to the public API,
 so it is offered as a design note rather than a patch.
 
 **Symptom.** Not a single bug — a family of them, all already fixed here, all of the same shape:
@@ -1147,7 +1147,7 @@ the vector fails `map_tabs_keeps_window_indices`.
 
 ## Collapsed rows were counted by the gesture, not by the tree
 
-**Status upstream:** not submitted.
+**Status another implementation:** not submitted.
 
 **Symptom.** A dock with collapsed panes reserves the wrong amount of vertical space, and stays
 wrong until something else happens to collapse. Three ways in:
@@ -1201,7 +1201,7 @@ which is the finding stated as a test: the count was already wrong before anythi
 
 ## Surfaces are addressed by position too, and every sweep repaired them differently
 
-**Status upstream:** not submitted.
+**Status another implementation:** not submitted.
 
 **Symptom.** Four separate failures, found by fuzzing dock operations against
 `DockState::validate`:
@@ -1267,7 +1267,7 @@ empty *tree*, never for a hole.
 
 ## The tree addressed nodes by position, so every structural edit renamed them
 
-**Status upstream:** not submitted. This is a representation change, not a patch — it is
+**Status another implementation:** not submitted. This is a representation change, not a patch — it is
 offered as a description of a root cause rather than as something to cherry-pick.
 
 **Symptom.** Two of the fixes below ("focus survives the removal of the root leaf" and "the
@@ -1301,7 +1301,7 @@ Three things that used to be checked are now impossible to express:
   old id stops resolving;
 - an index that "survived" a structural edit — nothing is renumbered by an edit.
 
-**Evidence.** The whole test suite of the fork, plus:
+**Evidence.** The whole test suite of this repository, plus:
 
 - `proptests::ids_keep_naming_the_same_node`: over random operation sequences, an id taken
   before an operation still names a leaf with the same tabs afterwards, unless that
@@ -1329,7 +1329,7 @@ new one.
 
 ## Focus survives the removal of the root leaf
 
-**Status upstream:** not submitted.
+**Status another implementation:** not submitted.
 
 **Symptom.** Focus a leaf that happens to be the tree's root, then remove it — for instance by
 closing its last tab, which routes through `Tree::remove_tab` → `Tree::remove_leaf`. The tree is
@@ -1365,7 +1365,7 @@ not.
 
 ## No structural oracle, so nothing checks the tree except the eye
 
-**Status upstream:** not submitted. Not a bug — tooling, offered because it is what
+**Status another implementation:** not submitted. Not a bug — tooling, offered because it is what
 turned the focus bug above up.
 
 **Observation.** The tree is a `Vec<Node<Tab>>` addressed as an implicit binary heap: children of
@@ -1389,7 +1389,7 @@ with a subtree quietly detached or an index pointing at the wrong thing.
   structural oracle cannot see: an implementation that "fixed" a broken move by dropping the tab
   would keep every structural invariant intact.
 
-**Evidence that it is not vacuous.** Removing the index clamp in `move_tab` (upstream #308) makes
+**Evidence that it is not vacuous.** Removing the index clamp in `move_tab` (another implementation #308) makes
 both properties fail. Eight unit tests each corrupt a tree in one specific way and assert the
 oracle names that way.
 
@@ -1399,7 +1399,7 @@ oracle names that way.
 
 ## Active tab falls back to the left neighbour, not the tab you were viewing
 
-**Status upstream:** PR [#325](https://github.com/anhosh/egui_dock/pull/325), open, mergeable.
+**Status another implementation:** PR #325, open, mergeable.
 
 **Symptom.** A leaf's active tab is a positional index. When the active tab is removed — closed,
 or moved/detached out through a split — the leaf falls back to `active - 1`. That is surprising
@@ -1424,7 +1424,7 @@ than an identity. `prev_active` is a targeted fix, not a cure for the class.
 
 ## `LayoutCommitted` fires for separator drags that changed nothing
 
-**Status upstream:** not submitted (depends on the `DockEvent` API, which was PR #323).
+**Status another implementation:** not submitted (depends on the `DockEvent` API, which was PR #323).
 
 **Symptom.** Grab a separator that already sits at its clamped limit, drag, release. A "layout
 committed" signal is emitted although `split.fraction` never moved. Consumers that diff a layout
@@ -1450,7 +1450,7 @@ guard.
 
 ## Phantom scroll bar in every tab body
 
-**Status upstream:** not submitted.
+**Status another implementation:** not submitted.
 
 **Symptom.** Every tab body renders a scroll bar with about one pixel of travel, even when the
 content obviously fits.
@@ -1485,5 +1485,5 @@ shipped that workaround once and had to revert it.
 ## Unrelated: CI on `main` is red on recent stable
 
 `clippy::useless_borrows_in_formatting` fires twice on `examples/hello.rs`, and the clippy step
-runs before the tests, so every pull request shows red with no test results. The fix is removing
+runs before the tests, so every automated check shows red with no test results. The fix is removing
 two `&`; it is carried here as commit `4984717`.

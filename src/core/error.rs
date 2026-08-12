@@ -18,5 +18,5 @@ pub enum Error {
     InvalidTab,
 }
 
-/// Type alias for `Result` on [`egui_dock::Error`](Error).
+/// Type alias for `Result` on [`egui_dockyard::Error`](Error).
 pub type Result<T = (), E = Error> = std::result::Result<T, E>;

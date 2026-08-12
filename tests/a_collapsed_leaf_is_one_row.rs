@@ -18,7 +18,7 @@
 //! it lives in `a_window_fits_what_it_shows.rs`.
 
 use egui::{CentralPanel, Context, Id, Pos2, RawInput, Rect, Ui, Vec2, WidgetText};
-use egui_dock::{
+use egui_dockyard::{
     DockArea, DockLayout, DockState, Node, NodeId, NodePath, Split, Style, SurfaceIndex, TabViewer,
 };
 

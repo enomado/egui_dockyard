@@ -1,6 +1,8 @@
-//! # `egui_dock`: docking support for `egui`
+//! # `egui_dockyard`: docking support for `egui`
 //!
-//! Originally created by [@lain-dono](https://github.com/lain-dono), this library provides docking support for `egui`.
+//! This library provides docking support for `egui`. It originated in the
+//! `egui_dockyard` project created by lain-dono and is developed here as an
+//! independent line; see the repository's `ORIGIN.md` for context.
 //! It lets you open and close tabs, freely move them around, resize them, and undock them into new egui windows which
 //! can also have other tabs docked in them.
 //!
@@ -14,7 +16,7 @@
 //! You show the tabs using [`DockArea`] and specify how they are shown by implementing [`TabViewer`].
 //!
 //! ```rust
-//! use egui_dock::{DockArea, DockState, Style, TabViewer};
+//! use egui_dockyard::{DockArea, DockState, Style, TabViewer};
 //! use egui::{Ui, WidgetText};
 //!
 //! // First, let's pick a type that we'll use to attach some data to each tab.
@@ -75,7 +77,7 @@
 //!
 //! ## Look and feel customization
 //!
-//! `egui_dock` exposes the [`Style`] struct that lets you change how tabs and the [`DockArea`]
+//! `egui_dockyard` exposes the [`Style`] struct that lets you change how tabs and the [`DockArea`]
 //! should look and feel. [`Style`] is divided into several, more specialized structs that handle
 //! individual elements of the UI.
 //!
@@ -85,7 +87,7 @@
 //! Example:
 //!
 //! ```rust
-//! # use egui_dock::{DockArea, DockState, OverlayType, Style, TabAddAlign, TabViewer};
+//! # use egui_dockyard::{DockArea, DockState, OverlayType, Style, TabAddAlign, TabViewer};
 //! # use egui::{Ui, WidgetText};
 //! # struct MyTabViewer;
 //! # impl TabViewer for MyTabViewer {
@@ -131,8 +133,8 @@
 //! Example:
 //!
 //! ```rust
-//! # use egui_dock::DockState;
-//! # use egui_dock::geom::{Point, Size};
+//! # use egui_dockyard::DockState;
+//! # use egui_dockyard::geom::{Point, Size};
 //! # let mut dock_state = DockState::new(vec![]);
 //! // Create a new window `Surface` with one tab inside it.
 //! let mut surface_index = dock_state.add_window(vec!["Window Tab".to_string()]);
@@ -157,7 +159,7 @@
 //! Example:
 //!
 //! ```rust
-//! # use egui_dock::DockState;
+//! # use egui_dockyard::DockState;
 //! // Create a `DockState` with an initial tab "tab1" in the main `Surface`'s root node.
 //! let mut dock_state = DockState::new(vec!["tab1".to_string()]);
 //!
@@ -197,7 +199,7 @@
 //! Example usage:
 //!
 //! ```rust
-//! # use egui_dock::{DockState, TabContextMenuTranslations, Translations, LeafTranslations};
+//! # use egui_dockyard::{DockState, TabContextMenuTranslations, Translations, LeafTranslations};
 //! # type Tab = ();
 //! let translations_pl = Translations {
 //!     tab_context_menu: TabContextMenuTranslations {

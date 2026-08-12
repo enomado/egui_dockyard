@@ -6,7 +6,7 @@
 /// (`2i + 1` / `2i + 2`), so every structural edit renamed nodes. Anything that held an
 /// address across such an edit — focus, a drag in flight, a geometry map, a caller that
 /// split a node and then wanted to touch it again — silently addressed a *different*
-/// node. Two shipped bug fixes in this fork are that class of bug.
+/// node. Two shipped bug fixes in this repository are that class of bug.
 ///
 /// A `NodeId` is an arena handle instead: the slot the node lives in, plus the generation
 /// of that slot. Structural edits move nothing, so an id stays valid for as long as the

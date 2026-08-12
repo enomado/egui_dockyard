@@ -1,6 +1,6 @@
 # Examples
 
-This directory contains examples of how to use `egui_dock`.
+This directory contains examples of how to use `egui_dockyard`.
 
 To run an example, use the following command from the project root:
 
@@ -12,7 +12,7 @@ Replace `<example_name>` with the name of the example file without the `.rs` ext
 
 ## List of Examples
 
-- [`hello`](hello.rs): A comprehensive demo of `egui_dock` features, including a style editor and various dock configurations.
+- [`hello`](hello.rs): A comprehensive demo of `egui_dockyard` features, including a style editor and various dock configurations.
 - [`simple`](simple.rs): A minimal example showing how to set up a basic dock with a few tabs.
 - [`tab_add`](tab_add.rs): Shows how to implement a custom "add tab" button and handle it in the `update` loop.
 - [`tab_add_popup`](tab_add_popup.rs): Demonstrates how to use a popup menu for adding different types of tabs.

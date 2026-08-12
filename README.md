@@ -1,5 +1,6 @@
 # `egui_dockyard`: docking system for [egui](https://docs.rs/egui)
 
+[![github](https://img.shields.io/badge/github-enomado%2Fegui__dockyard-8da0cb?logo=github)](https://github.com/enomado/egui_dockyard)
 [![crates.io](https://img.shields.io/crates/v/egui_dockyard)](https://crates.io/crates/egui_dockyard)
 [![docs.rs](https://img.shields.io/docsrs/egui_dockyard)](https://docs.rs/egui_dockyard/)
 [![egui_version](https://img.shields.io/badge/egui-0.36-blue)](https://docs.rs/egui)
@@ -42,8 +43,8 @@ egui_dockyard = "0.20"
 ```
 
 Then proceed by setting up `egui`, following its [documentation](https://docs.rs/egui). Once
-that's done, you can start using `egui_dockyard` – more details on that can be found in the
-[documentation](https://docs.rs/egui_dockyard/latest/egui_dockyard/).
+that's done, you can start using `egui_dockyard`. The complete API reference is available in the
+[docs.rs documentation](https://docs.rs/egui_dockyard/latest/egui_dockyard/).
 
 ## Examples
 
@@ -60,10 +61,22 @@ You can run them with Cargo from the crate's root directory, for example: `cargo
 
 ### [egui_tiles](https://docs.rs/egui_tiles)
 
-It's a library aiming to achieve similar goals in addition to being more flexible and customizable.
+`egui_tiles` has a substantially stronger and more ambitious core model. Its
+containers, recursive layout model, grids, and generality make it a better
+foundation when the application needs a flexible tiling engine rather than a
+traditional tabbed dock.
 
-One feature it supports that `egui_dockyard` does not at the moment is the ability to divide nodes into more than two
-children, enabling horizontal, vertical, and grid layouts.
+The trade-off is the user experience. `egui_tiles` exposes a broader set of
+layout primitives: panels without tabs, grids, and other containers that do not
+map directly onto a tab-oriented workspace. Using it often requires rethinking
+how the application represents, names, focuses, persists, and navigates tabs.
+It can feel overbuilt if the product fundamentally wants a familiar set of
+document/tool tabs that can be docked and floated.
 
-> [!NOTE]
-> `egui_tiles` is much earlier in development than `egui_dockyard` and doesn't yet support a lot of features.
+The two projects also do not have complete feature parity. Some behaviours and
+interaction details that are first-class in `egui_dockyard` need different
+application-level decisions in `egui_tiles`, while `egui_tiles` supports layout
+shapes that this project deliberately does not. Choose `egui_tiles` for its
+stronger layout core; choose `egui_dockyard` when the tab-and-dock interaction
+model is the product and compatibility with that model matters more than a
+general tiling engine.

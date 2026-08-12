@@ -3,7 +3,7 @@
 //! # Why this is a test file of its own
 //!
 //! A `DockArea` draws a lot of things at positions the layout pass has already decided: tab
-//! bars, close and collapse and add buttons, scroll bars, the cross-split toggle. None of them
+//! bars, close and collapse and add buttons, the cross-split toggle. None of them
 //! may *claim* space in the `Ui` the dock is drawn into — and one of them did. `Ui::scope_builder`
 //! folds the child's `min_rect` into the parent and advances its cursor, which is the right thing
 //! for a widget laid out in a flow and exactly the wrong thing for one painted at an absolute
@@ -80,13 +80,13 @@ fn frame(ctx: &Context, state: &mut DockState<String>, id: Id, pointer: Option<P
 }
 
 /// A floating window carrying a 2x2 cross, one leaf of which holds enough tabs to overflow its
-/// tab bar and bring out the scroll bar.
+/// tab bar.
 fn ornamented_window() -> (DockState<String>, SurfaceIndex) {
     let tab = |name: &str| name.to_owned();
     let mut state = DockState::new(vec![tab("main")]);
 
-    // Enough tabs that the bar cannot show them all in a 600px window: the overflow scroll bar
-    // is one more thing drawn at a position the layout chose.
+    // Enough tabs that the bar cannot show them all in a 600px window, while the window still
+    // carries every other dock ornament.
     let crowded: Vec<String> = (0..12).map(|i| tab(&format!("crowded {i}"))).collect();
     let window = state.add_window(crowded);
 

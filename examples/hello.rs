@@ -253,10 +253,6 @@ impl MyContext {
 
             ui.checkbox(&mut style.tab_bar.fill_tab_bar, "Expand tabs");
             ui.checkbox(
-                &mut style.tab_bar.show_scroll_bar_on_overflow,
-                "Show scroll bar on tab overflow",
-            );
-            ui.checkbox(
                 &mut style.tab.hline_below_active_tab_name,
                 "Show a line below the active tab name",
             );

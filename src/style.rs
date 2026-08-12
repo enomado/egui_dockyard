@@ -321,9 +321,6 @@ pub struct TabBarStyle {
     /// Inner margin of tab bar. By `Default` it's `Margin::ZERO`.
     pub inner_margin: Margin,
 
-    /// Show a scroll bar when tab bar overflows. By `Default` it's `true`.
-    pub show_scroll_bar_on_overflow: bool,
-
     /// Tab corner_radius. By `Default` it's [`CornerRadius::default`].
     pub corner_radius: CornerRadius,
 
@@ -588,7 +585,6 @@ impl Default for TabBarStyle {
             bg_fill: Color32::WHITE,
             height: 24.0,
             inner_margin: Margin::ZERO,
-            show_scroll_bar_on_overflow: true,
             corner_radius: CornerRadius::default(),
             hline_color: Color32::BLACK,
             fill_tab_bar: false,

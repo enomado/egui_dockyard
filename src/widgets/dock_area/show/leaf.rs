@@ -4,7 +4,7 @@ use egui::{
     Align, Align2, Button, Color32, CornerRadius, CursorIcon, Frame, Id, Key, LayerId, Layout,
     NumExt, Order, Popup, PopupCloseBehavior, Rect, Response, ScrollArea, Sense, Shape, Stroke,
     StrokeKind, TextStyle, Ui, UiBuilder, Vec2, WidgetText, emath::TSTransform, epaint::TextShape,
-    lerp, pos2, vec2,
+    pos2, vec2,
 };
 
 use crate::NodePath;
@@ -119,7 +119,6 @@ impl<Tab> DockArea<'_, Tab> {
         let tabbar_outer_rect = tabbar_outer_rect - style.tab_bar.inner_margin;
 
         let mut available_width = tabbar_outer_rect.width();
-        let scroll_bar_width = available_width;
         if available_width == 0.0 {
             return tabbar_outer_rect;
         }
@@ -253,14 +252,11 @@ impl<Tab> DockArea<'_, Tab> {
 
         self.tab_bar_scroll(
             ui,
-            state,
             path,
             actual_width,
             available_width,
-            scroll_bar_width,
             &tabbar_response,
             tab_hovered,
-            fade_style,
         );
 
         tabbar_outer_rect
@@ -1160,14 +1156,11 @@ impl<Tab> DockArea<'_, Tab> {
     fn tab_bar_scroll(
         &mut self,
         ui: &mut Ui,
-        state: &State,
         path: NodePath,
         actual_width: f32,
         available_width: f32,
-        scroll_bar_width: f32,
         tabbar_response: &Response,
         tab_hovered: bool,
-        fade_style: Option<&Style>,
     ) {
         if available_width <= 0.0 {
             return;
@@ -1177,68 +1170,11 @@ impl<Tab> DockArea<'_, Tab> {
             .get_leaf_mut()
             .expect("This node must be a leaf");
         let overflow = (actual_width - available_width).at_least(0.0);
-        let style = fade_style.unwrap_or_else(|| self.style.as_ref().unwrap());
 
-        // Compare to 1.0 and not 0.0 to avoid drawing a scroll bar due
-        // to floating point precision issue during tab drawing.
+        // Compare to 1.0 and not 0.0 to avoid reacting to a sub-pixel overflow from tab
+        // layout. The tab bar owns its scroll position, but deliberately has no visual
+        // scroll widget: wheel input above the tabs is all of the interaction.
         if overflow > 1.0 {
-            if style.tab_bar.show_scroll_bar_on_overflow {
-                // Draw scroll bar
-                let bar_height = 7.5;
-                let (scroll_bar_rect, _scroll_bar_response) = ui.allocate_exact_size(
-                    vec2(scroll_bar_width, bar_height),
-                    Sense::click_and_drag(),
-                );
-
-                // Compute scroll bar handle position and size.
-                let overflow_ratio = actual_width / available_width;
-                let scroll_ratio = -leaf.scroll / overflow;
-
-                let scroll_bar_handle_size = overflow_ratio.recip() * scroll_bar_rect.width();
-                let scroll_bar_handle_start = lerp(
-                    scroll_bar_rect.left()..=scroll_bar_rect.right() - scroll_bar_handle_size,
-                    scroll_ratio,
-                );
-                let scroll_bar_handle_rect = Rect::from_min_size(
-                    pos2(scroll_bar_handle_start, scroll_bar_rect.min.y),
-                    vec2(scroll_bar_handle_size, bar_height),
-                );
-
-                let scroll_bar_handle_response = ui.interact(
-                    scroll_bar_handle_rect,
-                    self.id.with((path.node, "node")),
-                    Sense::drag(),
-                );
-
-                // Coefficient to apply to input displacements so that we move the scroll by the correct amount.
-                let points_to_scroll_coefficient =
-                    overflow / (scroll_bar_rect.width() - scroll_bar_handle_size);
-
-                leaf.scroll -=
-                    scroll_bar_handle_response.drag_delta().x * points_to_scroll_coefficient;
-
-                if let Some(pos) = state.last_hover_pos
-                    && scroll_bar_rect.contains(pos)
-                {
-                    leaf.scroll += ui.input(|i| i.smooth_scroll_delta.y + i.smooth_scroll_delta.x)
-                        * points_to_scroll_coefficient;
-                }
-
-                // Draw the bar.
-                ui.painter()
-                    .rect_filled(scroll_bar_rect, 0.0, ui.visuals().extreme_bg_color);
-
-                ui.painter().rect_filled(
-                    scroll_bar_handle_rect,
-                    bar_height / 2.0,
-                    ui.visuals()
-                        .widgets
-                        .style(&scroll_bar_handle_response)
-                        .bg_fill,
-                );
-            }
-
-            // Handle user input.
             if tabbar_response.hovered() || tab_hovered {
                 leaf.scroll += ui.input(|i| i.smooth_scroll_delta.y + i.smooth_scroll_delta.x);
             }

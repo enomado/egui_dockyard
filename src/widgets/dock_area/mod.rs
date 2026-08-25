@@ -47,9 +47,7 @@ pub struct DockArea<'tree, Tab> {
     allowed_splits: AllowedSplits,
     window_bounds: Option<Rect>,
 
-    to_remove: Vec<TabRemoval>,
-    to_detach: Vec<TabPath>,
-    new_focused: Option<NodePath>,
+    mutations: Vec<DockMutation>,
     tab_hover_rect: Option<(Rect, TabIndex)>,
     /// Geometry of every node, recomputed by the layout pass each frame.
     ///
@@ -61,6 +59,18 @@ pub struct DockArea<'tree, Tab> {
     /// Events accumulated during this render pass, drained into
     /// [`DockAreaResponse::events`] at the end of `show_inside_with_response`.
     events: Vec<DockEvent>,
+}
+
+/// A tree edit requested while a [`DockArea`] is drawing.
+///
+/// Drawing collects these requests and the render epilogue applies them after every surface has
+/// been visited. Paths address nodes, so removals and detaches retain their reverse request
+/// order when they are applied.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::widgets::dock_area) enum DockMutation {
+    Remove(TabRemoval),
+    Detach(TabPath),
+    Focus(NodePath),
 }
 
 // Builder
@@ -79,9 +89,7 @@ impl<'tree, Tab> DockArea<'tree, Tab> {
             draggable_tabs: true,
             show_tab_name_on_hover: false,
             allowed_splits: AllowedSplits::default(),
-            to_remove: Vec::new(),
-            to_detach: Vec::new(),
-            new_focused: None,
+            mutations: Vec::new(),
             tab_hover_rect: None,
             layout: DockLayout::default(),
             events: Vec::new(),

@@ -6,7 +6,7 @@ use egui::{
 use paste::paste;
 
 use super::{
-    DockAreaResponse,
+    DockAreaResponse, DockMutation,
     drag_and_drop::{DragSource, HoverData, overlay_layer, register_overlay_layer},
     events::DockEvent,
     state::{DragSubject, State},
@@ -230,7 +230,16 @@ impl<Tab> DockArea<'_, Tab> {
             );
         }
 
-        for removal in self.to_remove.drain(..).rev() {
+        let mutations = std::mem::take(&mut self.mutations);
+        let mut new_focused = mutations.iter().rev().find_map(|mutation| match mutation {
+            DockMutation::Focus(path) => Some(*path),
+            DockMutation::Remove(_) | DockMutation::Detach(_) => None,
+        });
+
+        for mutation in mutations.iter().rev() {
+            let DockMutation::Remove(removal) = *mutation else {
+                continue;
+            };
             match removal {
                 TabRemoval::Tab(path, ForcedRemoval(is_forced)) => {
                     // Who takes the focus is the application's call when it wants it; asked
@@ -254,7 +263,7 @@ impl<Tab> DockArea<'_, Tab> {
                             }
                             OnCloseResponse::Focus => {
                                 leaf.activate_tab_remembering(path.tab);
-                                self.new_focused = Some(path.node_path());
+                                new_focused = Some(path.node_path());
                                 self.events.push(DockEvent::LayoutCommitted);
                             }
                             OnCloseResponse::Ignore => {
@@ -296,7 +305,10 @@ impl<Tab> DockArea<'_, Tab> {
             }
         }
 
-        for path in self.to_detach.drain(..).rev() {
+        for mutation in mutations.iter().rev() {
+            let DockMutation::Detach(path) = *mutation else {
+                continue;
+            };
             let mouse_pos = state.last_hover_pos;
             // The detached window inherits the size of the node the tab came from; a
             // node that was never laid out (nothing to inherit) gets a default size.
@@ -311,7 +323,7 @@ impl<Tab> DockArea<'_, Tab> {
             self.events.push(DockEvent::LayoutCommitted);
         }
 
-        if let Some(focused) = self.new_focused {
+        if let Some(focused) = new_focused {
             // `new_focused` is set unconditionally on any click within a leaf
             // body and on tab-title clicks, even when the leaf is already
             // focused. Only emit a finalised event if the focus actually

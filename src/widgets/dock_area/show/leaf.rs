@@ -15,6 +15,7 @@ use crate::tab_viewer::OnCloseResponse;
 use crate::{
     DockArea, Style, SurfaceIndex, TabAddAlign, TabIndex, TabStyle, TabViewer,
     dock_area::{
+        DockMutation,
         drag_and_drop::{DragSource, HoverData, TreeComponent},
         state::{DragSubject, State},
     },
@@ -87,10 +88,10 @@ impl<Tab> DockArea<'_, Tab> {
             .filter_map(|(tab_index, tab)| tab_viewer.force_close(tab).then_some(tab_index))
             .collect();
         for tab_index in forced {
-            self.to_remove.push(TabRemoval::Tab(
+            self.mutations.push(DockMutation::Remove(TabRemoval::Tab(
                 (path, tab_index).into(),
                 ForcedRemoval(true),
-            ));
+            )));
         }
     }
 
@@ -440,15 +441,18 @@ impl<Tab> DockArea<'_, Tab> {
                             && tab_viewer.allowed_in_windows(tab)
                             && ui.add(eject_button).clicked()
                         {
-                            self.to_detach.push((path, tab_index).into());
+                            self.mutations
+                                .push(DockMutation::Detach((path, tab_index).into()));
                             ui.close();
                         }
                         if show_close_button && ui.add(close_button).clicked() {
                             match tab_viewer.on_close(tab) {
-                                OnCloseResponse::Close => self.to_remove.push(TabRemoval::Tab(
-                                    (path, tab_index).into(),
-                                    ForcedRemoval(false),
-                                )),
+                                OnCloseResponse::Close => {
+                                    self.mutations.push(DockMutation::Remove(TabRemoval::Tab(
+                                        (path, tab_index).into(),
+                                        ForcedRemoval(false),
+                                    )))
+                                }
                                 OnCloseResponse::Focus => {
                                     // Only count as a finalised event if `active`
                                     // actually changes; the focus push at the end
@@ -460,7 +464,7 @@ impl<Tab> DockArea<'_, Tab> {
                                         leaf.activate_tab_remembering(tab_index);
                                         self.events.push(DockEvent::LayoutCommitted);
                                     }
-                                    self.new_focused = Some(path);
+                                    self.mutations.push(DockMutation::Focus(path));
                                 }
                                 OnCloseResponse::Ignore => (),
                             }
@@ -470,10 +474,10 @@ impl<Tab> DockArea<'_, Tab> {
                 }
 
                 if close_clicked {
-                    self.to_remove.push(TabRemoval::Tab(
+                    self.mutations.push(DockMutation::Remove(TabRemoval::Tab(
                         (path, tab_index).into(),
                         ForcedRemoval(false),
-                    ));
+                    )));
                 }
 
                 if let Some(pos) = state.last_hover_pos {
@@ -530,17 +534,17 @@ impl<Tab> DockArea<'_, Tab> {
                     activate_to = Some(tab_index);
                     self.events.push(DockEvent::LayoutCommitted);
                 }
-                self.new_focused = Some(path);
+                self.mutations.push(DockMutation::Focus(path));
             }
 
             tab_viewer.on_tab_button(tab, &response);
 
             if self.show_close_buttons && tab_viewer.is_closeable(tab) && response.middle_clicked()
             {
-                self.to_remove.push(TabRemoval::Tab(
+                self.mutations.push(DockMutation::Remove(TabRemoval::Tab(
                     (path, tab_index).into(),
                     ForcedRemoval(false),
-                ));
+                )));
             }
 
             // `tab` is no longer borrowed past this point — safe to take a fresh
@@ -722,7 +726,8 @@ impl<Tab> DockArea<'_, Tab> {
                                 )
                                 .clicked()
                             {
-                                self.to_remove.push(TabRemoval::Window(window));
+                                self.mutations
+                                    .push(DockMutation::Remove(TabRemoval::Window(window)));
                             }
                         });
                     });
@@ -746,10 +751,12 @@ impl<Tab> DockArea<'_, Tab> {
                     if let Some(window) = path.surface.as_window()
                         && !close_window_disabled
                     {
-                        self.to_remove.push(TabRemoval::Window(window));
+                        self.mutations
+                            .push(DockMutation::Remove(TabRemoval::Window(window)));
                     }
                 } else if !disabled {
-                    self.to_remove.push(TabRemoval::Node(path));
+                    self.mutations
+                        .push(DockMutation::Remove(TabRemoval::Node(path)));
                 }
             }
 
@@ -1224,7 +1231,7 @@ impl<Tab> DockArea<'_, Tab> {
                 && body_rect.contains(pos)
                 && Some(ui.layer_id()) == ui.ctx().layer_id_at(pos)
             {
-                self.new_focused = Some(path);
+                self.mutations.push(DockMutation::Focus(path));
             }
 
             let (style, fade_factor) = fade.unwrap_or_else(|| (self.style.as_ref().unwrap(), 1.0));

@@ -1,6 +1,6 @@
 use crate::{NodePath, TabPath, WindowIndex};
 
-/// An enum expressing an entry in the `to_remove` field in [`DockArea`].
+/// An enum expressing a [`DockMutation`](super::DockMutation::Remove) payload.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum TabRemoval {
     Tab(TabPath, ForcedRemoval),

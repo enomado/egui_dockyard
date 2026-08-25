@@ -6,6 +6,7 @@ use egui::{
 use crate::{
     DockArea, NodePath, Style, SurfaceIndex, TabViewer, WindowIndex,
     dock_area::{
+        DockMutation,
         events::DockEvent,
         show::{border_clearance, collapsed_strip_height},
         state::{DragSubject, State, WindowEdge},
@@ -183,7 +184,8 @@ impl<Tab> DockArea<'_, Tab> {
         });
 
         if !open {
-            self.to_remove.push(TabRemoval::Window(window));
+            self.mutations
+                .push(DockMutation::Remove(TabRemoval::Window(window)));
         }
     }
 

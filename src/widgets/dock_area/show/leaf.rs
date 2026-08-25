@@ -1218,7 +1218,7 @@ impl<Tab> DockArea<'_, Tab> {
 
         let leaf = self
             .dock_state
-            .leaf_mut(path)
+            .leaf(path)
             .expect("This node must be a leaf");
         if !collapsed && let Some(tab) = leaf.active_focused() {
             if previous_viewport != Some(body_rect) {

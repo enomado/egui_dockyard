@@ -31,7 +31,7 @@ impl egui_dockyard::TabViewer for TabViewer {
         ui.label(format!("Content of {tab}"));
     }
 
-    fn on_rect_changed(&mut self, _tab: &mut Self::Tab) {
+    fn on_rect_changed(&mut self, _tab: &Self::Tab) {
         self.modified = true
     }
 }

@@ -281,7 +281,14 @@ impl<Tab> LeafNode<Tab> {
 
     /// The active tab, or `None` if the leaf holds no tabs.
     #[inline]
-    pub fn active_focused(&mut self) -> Option<&mut Tab> {
+    pub fn active_focused(&self) -> Option<&Tab> {
+        let index = self.active_index()?;
+        self.tab_at(index)
+    }
+
+    /// The active tab for editing, or `None` if the leaf holds no tabs.
+    #[inline]
+    pub fn active_focused_mut(&mut self) -> Option<&mut Tab> {
         let index = self.active_index()?;
         self.tab_at_mut(index)
     }

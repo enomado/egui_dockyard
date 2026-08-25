@@ -103,7 +103,7 @@ pub trait TabViewer {
     ///
     /// This is useful for tabs that need to adjust their content based on the
     /// available space.
-    fn on_rect_changed(&mut self, _tab: &mut Self::Tab) {}
+    fn on_rect_changed(&mut self, _tab: &Self::Tab) {}
 
     /// Content of the popup under the add button. Useful for selecting what type of tab to add.
     ///

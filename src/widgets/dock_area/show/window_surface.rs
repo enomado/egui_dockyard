@@ -94,7 +94,7 @@ impl<Tab> DockArea<'_, Tab> {
                         .find(|node| self.dock_state[surf_index][*node].is_leaf())
                         .expect("a window surface should never be empty")
                 });
-            let leaf = self.dock_state[surf_index][node_id].get_leaf_mut().unwrap();
+            let leaf = self.dock_state[surf_index][node_id].get_leaf().unwrap();
             let active = leaf
                 .active_focused()
                 .expect("a window surface should never hold an empty leaf");

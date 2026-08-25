@@ -399,14 +399,14 @@ impl<Tab> Tree<Tab> {
             .breadth_first()
             .into_iter()
             .find(|id| self[*id].is_leaf())?;
-        self.leaf_mut(first_leaf).unwrap().active_focused()
+        self.leaf_mut(first_leaf).unwrap().active_focused_mut()
     }
 
     /// Returns the active `Tab` inside the focused leaf node or [`None`] if it does not exist.
     #[inline]
     pub fn find_active_focused(&mut self) -> Option<&mut Tab> {
         let focused = self.focused_node?;
-        self.leaf_mut(focused).ok()?.active_focused()
+        self.leaf_mut(focused).ok()?.active_focused_mut()
     }
 
     /// Gets the id of the currently focused leaf node; returns [`None`] when no leaf is focused.

@@ -11,7 +11,10 @@ pub trait TabViewer {
     fn title(&mut self, tab: &Self::Tab) -> WidgetText;
 
     /// Actual tab content.
-    fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab);
+    ///
+    /// The dock tree is read-only for the whole draw pass. Return application-owned actions
+    /// from the viewer instead of mutating this tab in place; the owner applies them afterwards.
+    fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab);
 
     /// Content inside the context menu shown when the tab is right-clicked.
     ///

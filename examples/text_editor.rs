@@ -28,7 +28,7 @@ impl TabViewer for Buffers {
         egui::WidgetText::from(&*title)
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, title: &mut Title) {
+    fn ui(&mut self, ui: &mut egui::Ui, title: &Title) {
         let text = self.buffers.entry(title.clone()).or_default();
         egui::TextEdit::multiline(text)
             .desired_width(f32::INFINITY)

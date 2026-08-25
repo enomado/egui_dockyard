@@ -1296,7 +1296,7 @@ impl<Tab> DockArea<'_, Tab> {
                         // shows up only on real overflow. `ui.available_size()` inside
                         // `tab_viewer.ui()` is unchanged, so canvases that allocate the available
                         // size still fill the body as before.
-                        tab_viewer.ui(ui, tab);
+                        tab_viewer.ui(ui, &*tab);
                     });
             });
         }

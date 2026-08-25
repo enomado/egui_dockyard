@@ -72,7 +72,7 @@ impl TabViewer for Viewer {
         tab.clone().into()
     }
 
-    fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
+    fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {
         match tab.as_str() {
             // Deliberately larger than the body: the point of the scene is content that does not
             // fit, which is what puts the body's `ScrollArea` to work.

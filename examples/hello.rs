@@ -94,7 +94,7 @@ impl TabViewer for MyContext {
         tab.as_str().into()
     }
 
-    fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
+    fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {
         match tab.as_str() {
             "Simple Demo" => self.simple_demo(ui),
             "Style Editor" => self.style_editor(ui),

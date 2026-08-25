@@ -110,7 +110,7 @@ impl TabViewer for Viewer {
         tab.as_str().into()
     }
 
-    fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
+    fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {
         ui.label(tab.as_str());
     }
 }

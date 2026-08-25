@@ -36,7 +36,7 @@ impl TabViewer for Viewer {
         tab.clone().into()
     }
 
-    fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
+    fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {
         ui.label(tab.as_str());
     }
 }

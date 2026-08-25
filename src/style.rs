@@ -43,7 +43,7 @@ pub enum TabAddAlign {
 /// # impl TabViewer for MyTabViewer {
 /// #     type Tab = ();
 /// #     fn title(&mut self, tab: &Self::Tab) -> WidgetText { WidgetText::default() }
-/// #     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {}
+/// #     fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {}
 /// # }
 /// # egui::__run_test_ui(|ui| {
 /// # #[allow(deprecated)]

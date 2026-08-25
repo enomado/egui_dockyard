@@ -1382,7 +1382,7 @@ mod tests {
             tab.to_string().into()
         }
 
-        fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
+        fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {
             ui.label(tab.to_string());
         }
     }

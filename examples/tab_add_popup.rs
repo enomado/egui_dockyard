@@ -81,7 +81,7 @@ impl egui_dockyard::TabViewer for TabViewer<'_> {
         tab.title().into()
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &Self::Tab) {
         ui.label(tab.content());
     }
 

@@ -27,7 +27,7 @@ impl egui_dockyard::TabViewer for TabViewer {
         (&*tab).into()
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &Self::Tab) {
         ui.label(format!("Content of {tab}"));
     }
 

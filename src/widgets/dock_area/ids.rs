@@ -90,7 +90,7 @@ pub fn tab_widget_id(dock_area_id: Id, path: NodePath, tab: TabId) -> Id {
 /// #     fn title(&mut self, tab: &String) -> WidgetText {
 /// #         tab.as_str().into()
 /// #     }
-/// #     fn ui(&mut self, ui: &mut Ui, tab: &mut String) {
+/// #     fn ui(&mut self, ui: &mut Ui, tab: &String) {
 /// #         ui.label(tab.as_str());
 /// #     }
 /// # }
@@ -250,7 +250,7 @@ pub fn dragged_tab<Tab>(
 /// #     fn title(&mut self, tab: &String) -> WidgetText {
 /// #         tab.as_str().into()
 /// #     }
-/// #     fn ui(&mut self, ui: &mut Ui, tab: &mut String) {
+/// #     fn ui(&mut self, ui: &mut Ui, tab: &String) {
 /// #         ui.label(tab.as_str());
 /// #     }
 /// # }

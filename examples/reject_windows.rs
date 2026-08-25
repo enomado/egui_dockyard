@@ -12,7 +12,10 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-struct TabViewer;
+#[derive(Default)]
+struct TabViewer {
+    window_opinions: Vec<(String, bool)>,
+}
 
 struct OpinionatedTab {
     can_become_window: Result<bool, bool>,
@@ -27,17 +30,23 @@ impl egui_dockyard::TabViewer for TabViewer {
         (&tab.title).into()
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &Self::Tab) {
         ui.label(&tab.content);
-        match &mut tab.can_become_window {
-            Ok(changing_opinion) => {
-                ui.add(egui::Checkbox::new(
-                    changing_opinion,
-                    "can be turned into window",
-                ));
+        match tab.can_become_window {
+            Ok(opinion) => {
+                let mut next_opinion = opinion;
+                if ui
+                    .add(egui::Checkbox::new(
+                        &mut next_opinion,
+                        "can be turned into window",
+                    ))
+                    .changed()
+                {
+                    self.window_opinions.push((tab.title.clone(), next_opinion));
+                }
             }
             Err(fixed_opinion) => {
-                if *fixed_opinion {
+                if fixed_opinion {
                     ui.small("this tab can exist in a window");
                 } else {
                     ui.small("this tab cannot exist in a window");
@@ -108,8 +117,21 @@ impl Default for MyApp {
 
 impl eframe::App for MyApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let mut tab_viewer = TabViewer::default();
         DockArea::new(&mut self.tree)
             .style(Style::from_egui(ui.style().as_ref()))
-            .show_inside(ui, &mut TabViewer {});
+            .show_inside(ui, &mut tab_viewer);
+
+        // The viewer only emits intents while the tree is borrowed for drawing. The owner
+        // applies them afterwards, so a tab body never mutates its own dock entry mid-frame.
+        for (title, opinion) in tab_viewer.window_opinions {
+            for (_, tab) in self.tree.iter_all_tabs_mut() {
+                if tab.title == title
+                    && let Ok(current) = &mut tab.can_become_window
+                {
+                    *current = opinion;
+                }
+            }
+        }
     }
 }

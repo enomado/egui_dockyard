@@ -1378,7 +1378,7 @@ mod tests {
     impl TabViewer for Viewer {
         type Tab = u32;
 
-        fn title(&mut self, tab: &mut Self::Tab) -> WidgetText {
+        fn title(&mut self, tab: &Self::Tab) -> WidgetText {
             tab.to_string().into()
         }
 

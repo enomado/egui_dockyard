@@ -19,7 +19,7 @@ struct TabViewer<'a> {
 impl egui_dockyard::TabViewer for TabViewer<'_> {
     type Tab = usize;
 
-    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+    fn title(&mut self, tab: &Self::Tab) -> egui::WidgetText {
         format!("Tab {tab}").into()
     }
 

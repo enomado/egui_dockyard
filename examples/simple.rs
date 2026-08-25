@@ -18,7 +18,7 @@ struct TabViewer {}
 impl egui_dockyard::TabViewer for TabViewer {
     type Tab = String;
 
-    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+    fn title(&mut self, tab: &Self::Tab) -> egui::WidgetText {
         (&*tab).into()
     }
 
@@ -26,7 +26,7 @@ impl egui_dockyard::TabViewer for TabViewer {
         ui.label(format!("Content of {tab}"));
     }
 
-    fn on_close(&mut self, _tab: &mut Self::Tab) -> OnCloseResponse {
+    fn on_close(&mut self, _tab: &Self::Tab) -> OnCloseResponse {
         println!("Closed tab: {_tab}");
         OnCloseResponse::Close
     }

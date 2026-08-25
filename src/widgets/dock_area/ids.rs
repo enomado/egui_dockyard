@@ -87,7 +87,7 @@ pub fn tab_widget_id(dock_area_id: Id, path: NodePath, tab: TabId) -> Id {
 /// # struct Viewer;
 /// # impl TabViewer for Viewer {
 /// #     type Tab = String;
-/// #     fn title(&mut self, tab: &mut String) -> WidgetText {
+/// #     fn title(&mut self, tab: &String) -> WidgetText {
 /// #         tab.as_str().into()
 /// #     }
 /// #     fn ui(&mut self, ui: &mut Ui, tab: &mut String) {
@@ -247,7 +247,7 @@ pub fn dragged_tab<Tab>(
 /// # struct Viewer;
 /// # impl TabViewer for Viewer {
 /// #     type Tab = String;
-/// #     fn title(&mut self, tab: &mut String) -> WidgetText {
+/// #     fn title(&mut self, tab: &String) -> WidgetText {
 /// #         tab.as_str().into()
 /// #     }
 /// #     fn ui(&mut self, ui: &mut Ui, tab: &mut String) {

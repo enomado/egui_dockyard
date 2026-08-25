@@ -90,7 +90,7 @@ struct MyApp {
 impl TabViewer for MyContext {
     type Tab = String;
 
-    fn title(&mut self, tab: &mut Self::Tab) -> WidgetText {
+    fn title(&mut self, tab: &Self::Tab) -> WidgetText {
         tab.as_str().into()
     }
 
@@ -104,7 +104,7 @@ impl TabViewer for MyContext {
         }
     }
 
-    fn context_menu(&mut self, ui: &mut Ui, tab: &mut Self::Tab, _path: NodePath) {
+    fn context_menu(&mut self, ui: &mut Ui, tab: &Self::Tab, _path: NodePath) {
         match tab.as_str() {
             "Simple Demo" => self.simple_demo_menu(ui),
             _ => {
@@ -118,7 +118,7 @@ impl TabViewer for MyContext {
         ["Inspector", "Style Editor"].contains(&tab.as_str())
     }
 
-    fn on_close(&mut self, tab: &mut Self::Tab) -> OnCloseResponse {
+    fn on_close(&mut self, tab: &Self::Tab) -> OnCloseResponse {
         self.open_tabs.remove(tab);
         OnCloseResponse::Close
     }

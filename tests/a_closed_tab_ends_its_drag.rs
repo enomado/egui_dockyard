@@ -72,7 +72,7 @@ struct Viewer {
 impl TabViewer for Viewer {
     type Tab = String;
 
-    fn title(&mut self, tab: &mut Self::Tab) -> WidgetText {
+    fn title(&mut self, tab: &Self::Tab) -> WidgetText {
         tab.clone().into()
     }
 
@@ -80,7 +80,7 @@ impl TabViewer for Viewer {
         ui.label(tab.as_str());
     }
 
-    fn force_close(&mut self, tab: &mut Self::Tab) -> bool {
+    fn force_close(&mut self, tab: &Self::Tab) -> bool {
         self.force_close.contains(tab)
     }
 }

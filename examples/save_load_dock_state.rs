@@ -23,7 +23,7 @@ struct TabViewer {
 impl egui_dockyard::TabViewer for TabViewer {
     type Tab = String;
 
-    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+    fn title(&mut self, tab: &Self::Tab) -> egui::WidgetText {
         (&*tab).into()
     }
 

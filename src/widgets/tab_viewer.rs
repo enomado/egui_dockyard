@@ -8,7 +8,7 @@ pub trait TabViewer {
     type Tab;
 
     /// The title to be displayed in the tab bar.
-    fn title(&mut self, tab: &mut Self::Tab) -> WidgetText;
+    fn title(&mut self, tab: &Self::Tab) -> WidgetText;
 
     /// Actual tab content.
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab);
@@ -17,22 +17,22 @@ pub trait TabViewer {
     ///
     /// `_path` specifies which [`SurfaceIndex`](crate::SurfaceIndex) and [`Node`](crate::Node)
     /// that this particular context menu belongs to.
-    fn context_menu(&mut self, _ui: &mut Ui, _tab: &mut Self::Tab, _path: NodePath) {}
+    fn context_menu(&mut self, _ui: &mut Ui, _tab: &Self::Tab, _path: NodePath) {}
 
     /// Unique ID for this tab.
     ///
     /// If not implemented, uses tab title text as an ID source.
-    fn id(&mut self, tab: &mut Self::Tab) -> Id {
+    fn id(&mut self, tab: &Self::Tab) -> Id {
         Id::new(self.title(tab).text())
     }
 
     /// Called after each tab button is shown, so you can add a tooltip, check for clicks, etc.
-    fn on_tab_button(&mut self, _tab: &mut Self::Tab, _response: &egui::Response) {}
+    fn on_tab_button(&mut self, _tab: &Self::Tab, _response: &egui::Response) {}
 
     /// This is called when the `_tab` gets closed by the user.
     ///
     /// Returns an `OnCloseResponse` which determines what happens to the tab after this function gets called.
-    fn on_close(&mut self, _tab: &mut Self::Tab) -> OnCloseResponse {
+    fn on_close(&mut self, _tab: &Self::Tab) -> OnCloseResponse {
         OnCloseResponse::Close
     }
 
@@ -82,7 +82,7 @@ pub trait TabViewer {
     /// Returns `true` if the tab should be forced to close, `false` otherwise.
     ///
     /// In the event this function returns true the tab will be removed without calling `on_close`.
-    fn force_close(&mut self, _tab: &mut Self::Tab) -> bool {
+    fn force_close(&mut self, _tab: &Self::Tab) -> bool {
         false
     }
 
@@ -116,7 +116,7 @@ pub trait TabViewer {
     /// Specifies a tab's ability to be shown in a window.
     ///
     /// Returns `false` if this tab should never be turned into a window.
-    fn allowed_in_windows(&self, _tab: &mut Self::Tab) -> bool {
+    fn allowed_in_windows(&self, _tab: &Self::Tab) -> bool {
         true
     }
 

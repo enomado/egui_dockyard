@@ -81,10 +81,10 @@ impl<Tab> DockArea<'_, Tab> {
         );
 
         let leaf = self.dock_state[path]
-            .get_leaf_mut()
+            .get_leaf()
             .expect("This node must be a leaf here");
         let forced: Vec<TabIndex> = leaf
-            .iter_tabs_mut_indexed()
+            .iter_tabs_indexed()
             .filter_map(|(tab_index, tab)| tab_viewer.force_close(tab).then_some(tab_index))
             .collect();
         for tab_index in forced {
@@ -141,7 +141,7 @@ impl<Tab> DockArea<'_, Tab> {
         let (actual_width, tab_hovered) = {
             let leaf = self
                 .dock_state
-                .leaf_mut(path)
+                .leaf(path)
                 .expect("This node must be a leaf");
 
             let tabbar_inner_rect = Rect::from_min_size(
@@ -222,15 +222,15 @@ impl<Tab> DockArea<'_, Tab> {
                 // Current leaf contains non-closable tabs.
                 let disabled = self
                     .dock_state
-                    .leaf_mut(path)
-                    .map(|leaf| !leaf.iter_tabs_mut().all(|tab| tab_viewer.is_closeable(tab)))
+                    .leaf(path)
+                    .map(|leaf| !leaf.iter_tabs().all(|tab| tab_viewer.is_closeable(tab)))
                     .expect("This node must be a leaf");
 
                 // Current window contains non-closable tabs.
                 let close_window_disabled = disabled
-                    || !self.dock_state[path.surface].iter_mut().all(|node| {
-                        node.get_leaf_mut().is_none_or(|leaf| {
-                            leaf.iter_tabs_mut().all(|tab| tab_viewer.is_closeable(tab))
+                    || !self.dock_state[path.surface].iter().all(|node| {
+                        node.get_leaf().is_none_or(|leaf| {
+                            leaf.iter_tabs().all(|tab| tab_viewer.is_closeable(tab))
                         })
                     });
 
@@ -330,13 +330,13 @@ impl<Tab> DockArea<'_, Tab> {
 
             let (is_active, label, tab_style, closeable) = {
                 let leaf = self.dock_state[path]
-                    .get_leaf_mut()
+                    .get_leaf()
                     .expect("This node must be a leaf");
                 let style = fade.unwrap_or_else(|| self.style.as_ref().unwrap());
                 let tab_style = tab_viewer.tab_style_override(&leaf[tab_index], &style.tab);
                 (
                     leaf.is_active(tab_index) || is_being_dragged,
-                    tab_viewer.title(&mut leaf[tab_index]),
+                    tab_viewer.title(&leaf[tab_index]),
                     tab_style.unwrap_or(style.tab.clone()),
                     tab_viewer.is_closeable(&leaf[tab_index]),
                 )
@@ -411,9 +411,9 @@ impl<Tab> DockArea<'_, Tab> {
 
                 if self.show_tab_name_on_hover {
                     let tab = self.dock_state[path]
-                        .get_leaf_mut()
+                        .get_leaf()
                         .expect("This node must be a leaf")
-                        .tab_at_mut(tab_index)
+                        .tab_at(tab_index)
                         .expect("this tab was just drawn");
                     response = response.on_hover_ui(|ui| {
                         ui.label(tab_viewer.title(tab));
@@ -427,14 +427,14 @@ impl<Tab> DockArea<'_, Tab> {
                         Button::new(&self.dock_state.translations.tab_context_menu.close_button);
 
                     response.context_menu(|ui| {
+                        // Still `_mut`: the `Focus` arm below activates the tab in place.
+                        // That is a live edit during draw, and one of the sites D4 has to
+                        // move into the request list; the tab itself is only read.
                         let leaf = self.dock_state[path]
                             .get_leaf_mut()
                             .expect("This node must be a leaf");
-                        // Read the active flag before borrowing the tab out of the same
-                        // leaf: the two borrows cannot overlap now that tabs are behind
-                        // accessors rather than a public field.
                         let already_active = leaf.is_active(tab_index);
-                        let tab = &mut leaf[tab_index];
+                        let tab = &leaf[tab_index];
 
                         tab_viewer.context_menu(ui, tab, path);
                         if (path.surface.is_main() || !is_lonely_tab)
@@ -508,9 +508,9 @@ impl<Tab> DockArea<'_, Tab> {
             let mut activate_to: Option<TabIndex> = None;
 
             // Paint hline below each tab unless its active (or option says otherwise).
-            let leaf = self.dock_state.leaf_mut(path).unwrap();
+            let leaf = self.dock_state.leaf(path).unwrap();
             let already_active = leaf.is_active(tab_index);
-            let tab = &mut leaf[tab_index];
+            let tab = &leaf[tab_index];
             let style = fade.unwrap_or_else(|| self.style.as_ref().unwrap());
             let tab_style = tab_viewer.tab_style_override(tab, &style.tab);
             let tab_style = tab_style.as_ref().unwrap_or(&style.tab);
@@ -1312,8 +1312,8 @@ impl<Tab> DockArea<'_, Tab> {
             let is_dragged_valid = match carried {
                 Some(src) => match src.resolve(self.dock_state) {
                     Some(src_path) => {
-                        let leaf = self.dock_state.leaf_mut(src_path.node_path()).unwrap();
-                        tab_viewer.allowed_in_windows(&mut leaf[src_path.tab])
+                        let leaf = self.dock_state.leaf(src_path.node_path()).unwrap();
+                        tab_viewer.allowed_in_windows(&leaf[src_path.tab])
                             || path.surface == SurfaceIndex::main()
                     }
                     // The dragged tab left the tree during its own drag. The pass that noticed

@@ -437,10 +437,10 @@ impl<Tab> DockArea<'_, Tab> {
             let path = carried
                 .resolve(self.dock_state)
                 .expect("a drag whose tab is gone was already cancelled");
-            let Node::Leaf(leaf) = &mut self.dock_state[path.node_path()] else {
+            let Node::Leaf(leaf) = &self.dock_state[path.node_path()] else {
                 unreachable!("tab drags can only come from leaf nodes")
             };
-            tab_viewer.allowed_in_windows(&mut leaf[path.tab])
+            tab_viewer.allowed_in_windows(&leaf[path.tab])
         };
 
         if let Some(pointer) = state.last_hover_pos {

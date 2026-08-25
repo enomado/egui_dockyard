@@ -231,6 +231,37 @@ impl<Tab> DockArea<'_, Tab> {
         }
 
         let mutations = std::mem::take(&mut self.mutations);
+        self.apply_render_mutations(&mutations, state.last_hover_pos, tab_viewer);
+
+        // Read before the state is stored away, and read through the liveness filter for the same
+        // reason `drag_in_flight` does: a gesture whose subject left the tree never gets its
+        // `drag_stopped`, and what it leaves behind is a leftover the dock itself no longer acts
+        // on — announcing it would name a gesture nobody is making.
+        let dragging = state.in_flight_at(ui.ctx().cumulative_pass_nr()).copied();
+        state.store(ui.ctx(), self.id);
+        // Drop geometry of nodes that this pass removed (closed tabs, collapsed splits)
+        // before publishing, so out-of-frame readers never see a rectangle for a node
+        // that no longer exists.
+        self.layout.retain_live(self.dock_state);
+        std::mem::take(&mut self.layout).store(ui.ctx(), self.id);
+        DockAreaResponse {
+            events: std::mem::take(&mut self.events),
+            dragging,
+        }
+    }
+
+    /// Apply the requests accumulated while surfaces were rendered.
+    ///
+    /// This is deliberately a separate phase: draw code is allowed to *request* a structural
+    /// edit, but it cannot invalidate paths while sibling surfaces are still being visited.
+    /// The method is the pre-public D3 seam; D4 moves the remaining live edits into the same
+    /// request list before the draw API itself can borrow only `&DockState`.
+    fn apply_render_mutations(
+        &mut self,
+        mutations: &[DockMutation],
+        last_hover_pos: Option<Pos2>,
+        tab_viewer: &mut impl TabViewer<Tab = Tab>,
+    ) {
         let mut new_focused = mutations.iter().rev().find_map(|mutation| match mutation {
             DockMutation::Focus(path) => Some(*path),
             DockMutation::Remove(_) | DockMutation::Detach(_) => None,
@@ -309,7 +340,6 @@ impl<Tab> DockArea<'_, Tab> {
             let DockMutation::Detach(path) = *mutation else {
                 continue;
             };
-            let mouse_pos = state.last_hover_pos;
             // The detached window inherits the size of the node the tab came from; a
             // node that was never laid out (nothing to inherit) gets a default size.
             let size = self
@@ -318,7 +348,7 @@ impl<Tab> DockArea<'_, Tab> {
                 .map_or(Vec2::new(100., 150.), |rect| rect.size());
             self.dock_state.detach_tab(
                 path,
-                Rect::from_min_size(mouse_pos.unwrap_or(Pos2::ZERO), size).into(),
+                Rect::from_min_size(last_hover_pos.unwrap_or(Pos2::ZERO), size).into(),
             );
             self.events.push(DockEvent::LayoutCommitted);
         }
@@ -334,22 +364,6 @@ impl<Tab> DockArea<'_, Tab> {
             if !already_focused {
                 self.events.push(DockEvent::LayoutCommitted);
             }
-        }
-
-        // Read before the state is stored away, and read through the liveness filter for the same
-        // reason `drag_in_flight` does: a gesture whose subject left the tree never gets its
-        // `drag_stopped`, and what it leaves behind is a leftover the dock itself no longer acts
-        // on — announcing it would name a gesture nobody is making.
-        let dragging = state.in_flight_at(ui.ctx().cumulative_pass_nr()).copied();
-        state.store(ui.ctx(), self.id);
-        // Drop geometry of nodes that this pass removed (closed tabs, collapsed splits)
-        // before publishing, so out-of-frame readers never see a rectangle for a node
-        // that no longer exists.
-        self.layout.retain_live(self.dock_state);
-        std::mem::take(&mut self.layout).store(ui.ctx(), self.id);
-        DockAreaResponse {
-            events: std::mem::take(&mut self.events),
-            dragging,
         }
     }
 

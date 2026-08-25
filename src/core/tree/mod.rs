@@ -37,6 +37,9 @@ pub mod validate;
 /// Rewriting the shape of a subtree out of the nodes it already has.
 pub(crate) mod regroup;
 
+/// Transposing the grouping around a crossing — see the module for the picture.
+pub(crate) mod transpose;
+
 use std::{
     cmp::max,
     collections::VecDeque,

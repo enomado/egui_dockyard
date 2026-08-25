@@ -51,14 +51,12 @@
 //! off it in one line: **a junction is a position either neighbouring band has a divider at, and
 //! a crossing is one they both do**. Neither `n` nor `m` appears in it, and neither does depth.
 
-use std::collections::VecDeque;
-
 use egui::{
     CursorIcon, Id, Order, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
     epaint::CornerRadius, pos2, vec2,
 };
 
-use crate::core::tree::regroup::Regroup;
+use crate::dock_area::DockMutation;
 use crate::dock_area::events::DockEvent;
 use crate::dock_area::state::{DragSubject, JunctionArms, State};
 use crate::{CrossSplitToggleStyle, DockArea, NodeId, NodePath, SeparatorStyle};
@@ -69,18 +67,15 @@ use crate::{CrossSplitToggleStyle, DockArea, NodeId, NodePath, SeparatorStyle};
 /// The flattening stops at the first node of the *other* orientation, and that is not an
 /// approximation — a divider below such a node does not span the band, so it cannot reach
 /// either end of it and cannot take part in a crossing.
+/// What the parts themselves are is not here: this is the *measured* half of a chain, and which
+/// nodes make it up is the tree's half — [`Tree::chain`](crate::core::tree::Tree::chain), which
+/// `band` calls and a transposition calls again when it is applied.
 struct Band {
-    /// The parts, in screen order (left to right, or top to bottom).
-    parts: Vec<NodePath>,
-
-    /// The `parts.len() - 1` splits of the chain, in screen order: `dividers[k]` is the split
-    /// whose boundary falls between `parts[k]` and `parts[k + 1]`.
-    ///
-    /// They double as the pool of ids a transposition rebuilds the band out of — a chain taken
-    /// apart and re-nested needs exactly as many splits as it had.
+    /// The chain's splits, in screen order: `dividers[k]` is the split whose boundary falls
+    /// between part `k` and part `k + 1`.
     dividers: Vec<NodeId>,
 
-    /// The `parts.len() + 1` boundaries along the band's own axis, ascending: the band's two
+    /// The `dividers.len() + 2` boundaries along the band's own axis, ascending: the band's two
     /// outer edges, and each divider's midpoint in between.
     ///
     /// Part `k` is cut from the interval `bounds[k]..bounds[k + 1]` — the rectangle
@@ -95,11 +90,6 @@ impl Band {
     /// Where this band's dividers are, in screen coordinates along its axis. Ascending.
     fn divider_positions(&self) -> &[f32] {
         &self.bounds[1..self.bounds.len() - 1]
-    }
-
-    /// The band's full extent along its axis.
-    fn span(&self) -> (f32, f32) {
-        (self.bounds[0], self.bounds[self.bounds.len() - 1])
     }
 
     /// Whether every part is at least `extra` long — and with it, whether this band can be cut
@@ -364,76 +354,9 @@ fn edge(rect: Rect, horizontal: bool, far: bool) -> f32 {
     }
 }
 
-/// The group `band.parts[from..=to]`, rebuilt as a chain of splits taken from `pool`.
-///
-/// Right-leaning, and the nesting is genuinely free: every binary arrangement of the same parts
-/// at the same boundaries draws the same picture — that ambiguity is the whole reason this
-/// module exists. What is not free is the fractions, and those come straight off [`Band::bounds`].
-fn rebuild_chain(
-    band: &Band,
-    from: usize,
-    to: usize,
-    horizontal: bool,
-    pool: &mut impl Iterator<Item = NodeId>,
-) -> Regroup {
-    if from == to {
-        return Regroup::Keep(band.parts[from].node);
-    }
-    let id = pool
-        .next()
-        .expect("a chain is rebuilt out of exactly the splits it was taken apart from");
-    Regroup::Split {
-        id,
-        horizontal,
-        fraction: (band.bounds[from + 1] - band.bounds[from])
-            / (band.bounds[to + 1] - band.bounds[from]),
-        children: [
-            Box::new(Regroup::Keep(band.parts[from].node)),
-            Box::new(rebuild_chain(band, from + 1, to, horizontal, pool)),
-        ],
-    }
-}
-
-/// One half of a transposed cross: what the two bands each had on one side of the crossing
-/// line, stacked along `outer`'s old axis.
-///
-/// The half itself reuses a split from `pool`, and so does every chain inside it, in that order
-/// — which is what makes the 2x2 case come out with `outer`'s two old children still playing
-/// the two halves, exactly as the special-cased version of this used to leave them.
-fn rebuild_half(
-    bands: &[Band; 2],
-    from: [usize; 2],
-    to: [usize; 2],
-    outer_horizontal: bool,
-    stack_fraction: f32,
-    pool: &mut impl Iterator<Item = NodeId>,
-) -> Regroup {
-    let id = pool
-        .next()
-        .expect("each half of a transposed cross reuses one of the chains' splits");
-    let inner_horizontal = !outer_horizontal;
-    Regroup::Split {
-        id,
-        horizontal: outer_horizontal,
-        fraction: stack_fraction,
-        children: [
-            Box::new(rebuild_chain(
-                &bands[0],
-                from[0],
-                to[0],
-                inner_horizontal,
-                pool,
-            )),
-            Box::new(rebuild_chain(
-                &bands[1],
-                from[1],
-                to[1],
-                inner_horizontal,
-                pool,
-            )),
-        ],
-    }
-}
+// The rebuild itself — which node ends up under which split — lives on the tree, in
+// `core::tree::transpose`: it is an operation on the tree, and the only thing this module has
+// that the tree does not is where the boundaries ended up on screen.
 
 impl<Tab> DockArea<'_, Tab> {
     /// Flattens the chain of `horizontal`-oriented splits rooted at `root` into a [`Band`].
@@ -443,19 +366,21 @@ impl<Tab> DockArea<'_, Tab> {
     /// produce a NaN fraction — which this crate has already been bitten by once (see the project's
     /// incident notes on `SplitNode.fraction`).
     fn band(&self, root: NodePath, horizontal: bool) -> Option<Band> {
-        let mut parts = Vec::new();
-        let mut dividers = Vec::new();
-        self.collect_band(root, horizontal, &mut parts, &mut dividers);
+        // Which nodes make up the chain is a question about the tree, and the tree answers it —
+        // the same walk `transpose_cross` uses to rebuild them. What is added here is the half
+        // the tree cannot know: where they ended up on screen.
+        let chain = self.dock_state[root.surface].chain(root.node, horizontal);
 
-        let rects: Vec<Rect> = parts
+        let rects: Vec<Rect> = chain
+            .parts
             .iter()
-            .map(|part| self.layout.rect(*part))
+            .map(|node| self.layout.rect(NodePath::new(root.surface, *node)))
             .collect::<Option<_>>()?;
         if rects.iter().any(|r| r.width() <= 0.0 || r.height() <= 0.0) {
             return None;
         }
 
-        let mut bounds = Vec::with_capacity(parts.len() + 1);
+        let mut bounds = Vec::with_capacity(rects.len() + 1);
         bounds.push(edge(rects[0], horizontal, false));
         for pair in rects.windows(2) {
             bounds.push(0.5 * (edge(pair[0], horizontal, true) + edge(pair[1], horizontal, false)));
@@ -463,38 +388,9 @@ impl<Tab> DockArea<'_, Tab> {
         bounds.push(edge(rects[rects.len() - 1], horizontal, true));
 
         Some(Band {
-            parts,
-            dividers,
+            dividers: chain.dividers,
             bounds,
         })
-    }
-
-    /// The in-order walk behind [`Self::band`].
-    ///
-    /// In-order is what puts both output lists in screen order: everything the first child
-    /// contributes lies before the split's own boundary, and everything the second contributes
-    /// lies after it, at every level of the chain.
-    fn collect_band(
-        &self,
-        path: NodePath,
-        horizontal: bool,
-        parts: &mut Vec<NodePath>,
-        dividers: &mut Vec<NodeId>,
-    ) {
-        let node = &self.dock_state[path];
-        let in_chain = if horizontal {
-            node.is_horizontal()
-        } else {
-            node.is_vertical()
-        };
-        if !in_chain {
-            parts.push(path);
-            return;
-        }
-        let [first, second] = self.child_paths(path);
-        self.collect_band(first, horizontal, parts, dividers);
-        dividers.push(path.node);
-        self.collect_band(second, horizontal, parts, dividers);
     }
 
     /// Every junction on the line between `outer`'s two children, in screen order.
@@ -769,7 +665,7 @@ impl<Tab> DockArea<'_, Tab> {
                 }
             }
             Some((index, Grip::Transpose)) => {
-                self.transpose_cross_split(pixels_per_point, &junctions, index);
+                self.request_transpose_cross_split(&junctions, index);
                 self.events.push(DockEvent::CrossSplitTransposed);
             }
             Some((_, Grip::Idle)) | None => {}
@@ -1250,32 +1146,25 @@ impl<Tab> DockArea<'_, Tab> {
     /// aligned that is nothing at all. It is the one movement a press is allowed to make, and it
     /// is the point of pressing.
     ///
-    /// This runs in the *middle* of the separator pass (its only caller is a toggle button,
-    /// drawn at the tail of `show_separator` for `outer`), and `show_separator` is still going
-    /// to be called for the nodes below it further down the same loop — reading their geometry
-    /// from [`Self::layout`], which up to this point describes the grouping we have just
-    /// replaced. So the last thing this does is re-run the layout pass over the rewritten
-    /// subtree, and the rest of the pass sees the shape that now exists.
+    /// The measuring half of a transposition: turn what this frame drew into the four numbers
+    /// [`Tree::transpose_cross`](crate::core::tree::Tree::transpose_cross) needs, and queue it.
     ///
-    /// The cost of not doing it used to be worse than a misdrawn frame: `show_separator` pushed
-    /// `fraction` into a band derived from whatever rectangle it read, on every frame, drag or
-    /// no drag — so a stale rectangle shorter than `2 * separator.extra` (whose band is the
-    /// single point 0.5) *overwrote* the ratio the transposition had just computed. That is how
-    /// transposing after dragging the outer divider used to snap one of the two new inner
-    /// dividers back to dead centre. Only a gesture writes `fraction` now (see `SeparatorBand`),
-    /// so what is left here is one frame of dividers painted and hit-tested against a shape that
-    /// no longer exists — pinned by
-    /// `the_toggle_leaves_the_geometry_map_describing_the_tree_it_just_wrote`, which has to read
-    /// the map *inside* the editing frame, since any quiet frame rebuilds it.
-    fn transpose_cross_split(
-        &mut self,
-        pixels_per_point: f32,
-        junctions: &Junctions,
-        index: usize,
-    ) {
+    /// Queued rather than done here, like every other edit drawing asks for. Its only caller is
+    /// a toggle button drawn at the tail of `show_separator` for `outer`, in the *middle* of the
+    /// separator pass — `show_separator` is still going to be called for the nodes below it
+    /// further down the same loop, reading their geometry from [`Self::layout`]. Rewriting the
+    /// tree under that loop is what used to force a mid-pass relayout to keep the two in step;
+    /// with the edit in the epilogue the whole pass sees one shape, and the relayout happens
+    /// once, after it, where `apply_render_mutations` puts it.
+    ///
+    /// What is left of the old hazard is a frame of dividers painted and hit-tested against the
+    /// grouping the user has just replaced — the click frame, ~16 ms, the same shift already
+    /// accepted for activation and collapsing. The geometry map published at the end of that
+    /// frame still describes the tree that now exists, which is what
+    /// `the_toggle_leaves_the_geometry_map_describing_the_tree_it_just_wrote` pins.
+    fn request_transpose_cross_split(&mut self, junctions: &Junctions, index: usize) {
         let Junctions {
             outer,
-            outer_horizontal,
             bands,
             outer_bounds,
             ..
@@ -1285,77 +1174,15 @@ impl<Tab> DockArea<'_, Tab> {
             unreachable!("only a crossing is offered a transposition")
         };
 
-        // The crossing line, along the bands' axis. Averaged: the two dividers are allowed to
-        // differ by up to `TOLERANCE`, that being the point of the tolerance.
-        let line = 0.5 * (band0.bounds[i + 1] + band1.bounds[j + 1]);
-        let (span_start, span_end) = band0.span();
-        let cross_fraction = (line - span_start) / (span_end - span_start);
-        let stack_fraction =
-            (outer_bounds[1] - outer_bounds[0]) / (outer_bounds[2] - outer_bounds[0]);
-
-        // The pool of split ids the new shape is built out of: exactly the two chains being
-        // taken apart. `outer` is not in it — it stays where it is, because its own parent
-        // points at it — and the arithmetic leaves none over: `(n - 1) + (m - 1)` ids in, two
-        // halves plus `(k - 1) + (n - k - 1) + (l - 1) + (m - l - 1)` chain splits out.
-        let mut pool = band0.dividers.iter().chain(&band1.dividers).copied();
-        let inner_horizontal = !outer_horizontal;
-
-        let near = rebuild_half(
-            bands,
-            [0, 0],
-            [i, j],
-            *outer_horizontal,
-            stack_fraction,
-            &mut pool,
-        );
-        let far = rebuild_half(
-            bands,
-            [i + 1, j + 1],
-            [band0.parts.len() - 1, band1.parts.len() - 1],
-            *outer_horizontal,
-            stack_fraction,
-            &mut pool,
-        );
-        assert!(
-            pool.next().is_none(),
-            "a transposition needs exactly as many splits as the chains it took apart"
-        );
-
-        let shape = Regroup::Split {
-            id: outer.node,
-            horizontal: inner_horizontal,
-            fraction: cross_fraction,
-            children: [Box::new(near), Box::new(far)],
-        };
-        // Through the tree rather than by assigning `Node`s: subtrees change parent here, and a
-        // child's back-pointer and the subtree's collapsing bookkeeping live outside the `Node`
-        // being assigned. See `Tree::regroup`.
-        self.dock_state[outer.surface].regroup(outer.node, &shape);
-
-        // Bring the geometry map back in step with the shape we just wrote (see the note on
-        // staleness above). `max_rect` is the surface root's rectangle — the same value
-        // `render_nodes` hands to `compute_rect_sizes`, recorded by `allocate_area_for_root_node`.
-        // Parents before children: each call writes its children's rectangles, which the calls
-        // after it cut their own children out of.
-        let root = self.dock_state[outer.surface]
-            .root()
-            .expect("the surface being laid out has a root: `outer` lives in it");
-        let max_rect = self
-            .layout
-            .rect(NodePath::new(outer.surface, root))
-            .expect("the root was laid out at the top of this pass");
-        let mut queue = VecDeque::from([outer.node]);
-        while let Some(node) = queue.pop_front() {
-            let Some(children) = self.dock_state[outer.surface].children(node) else {
-                continue;
-            };
-            self.compute_rect_sizes(
-                pixels_per_point,
-                NodePath::new(outer.surface, node),
-                max_rect,
-            );
-            queue.extend(children);
-        }
+        self.mutations.push(DockMutation::TransposeCross {
+            outer: *outer,
+            at: [i, j],
+            bounds: [band0.bounds.clone(), band1.bounds.clone()],
+            // The one number from the other axis: where `outer`'s own boundary sits between its
+            // two edges, which is the share each rebuilt half keeps for the first chain.
+            stack_fraction: (outer_bounds[1] - outer_bounds[0])
+                / (outer_bounds[2] - outer_bounds[0]),
+        });
     }
 }
 

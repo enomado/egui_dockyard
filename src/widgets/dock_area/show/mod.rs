@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use duplicate::duplicate;
 use egui::{
     Context, CornerRadius, CursorIcon, EventFilter, Key, Pos2, Rect, Sense, StrokeKind, Ui, Vec2,
@@ -231,7 +233,12 @@ impl<Tab> DockArea<'_, Tab> {
         }
 
         let mutations = std::mem::take(&mut self.mutations);
-        self.apply_render_mutations(&mutations, state.last_hover_pos, tab_viewer);
+        self.apply_render_mutations(
+            &mutations,
+            state.last_hover_pos,
+            ui.ctx().pixels_per_point(),
+            tab_viewer,
+        );
 
         // Read before the state is stored away, and read through the liveness filter for the same
         // reason `drag_in_flight` does: a gesture whose subject left the tree never gets its
@@ -260,6 +267,7 @@ impl<Tab> DockArea<'_, Tab> {
         &mut self,
         mutations: &[DockMutation],
         last_hover_pos: Option<Pos2>,
+        pixels_per_point: f32,
         tab_viewer: &mut impl TabViewer<Tab = Tab>,
     ) {
         let mut new_focused = mutations.iter().rev().find_map(|mutation| match mutation {
@@ -270,6 +278,7 @@ impl<Tab> DockArea<'_, Tab> {
             | DockMutation::SetSplitFraction { .. }
             | DockMutation::SetWindowMinimized { .. }
             | DockMutation::WindowShown { .. }
+            | DockMutation::TransposeCross { .. }
             | DockMutation::Remove(_)
             | DockMutation::Detach(_) => None,
         });
@@ -285,6 +294,45 @@ impl<Tab> DockArea<'_, Tab> {
                     if !leaf.is_active(path.tab) {
                         leaf.activate_tab_remembering(path.tab);
                         self.events.push(DockEvent::LayoutCommitted);
+                    }
+                }
+                DockMutation::TransposeCross {
+                    outer,
+                    at,
+                    ref bounds,
+                    stack_fraction,
+                } => {
+                    let [first, second] = bounds;
+                    self.dock_state[outer.surface].transpose_cross(
+                        outer.node,
+                        at,
+                        [first, second],
+                        stack_fraction,
+                    );
+                    // The pass drew — and hit-tested — the grouping this replaces, so the
+                    // geometry map describes that one. Bring it back in step here, while the
+                    // shape just written is the shape the surface has: `max_rect` is the surface
+                    // root's rectangle, the same value `render_nodes` hands to
+                    // `compute_rect_sizes`. Parents before children, each call cutting its
+                    // children out of a rectangle an earlier call wrote.
+                    let root = self.dock_state[outer.surface]
+                        .root()
+                        .expect("the surface being laid out has a root: `outer` lives in it");
+                    let max_rect = self
+                        .layout
+                        .rect(NodePath::new(outer.surface, root))
+                        .expect("the root was laid out at the top of this pass");
+                    let mut queue = VecDeque::from([outer.node]);
+                    while let Some(node) = queue.pop_front() {
+                        let Some(children) = self.dock_state[outer.surface].children(node) else {
+                            continue;
+                        };
+                        self.compute_rect_sizes(
+                            pixels_per_point,
+                            NodePath::new(outer.surface, node),
+                            max_rect,
+                        );
+                        queue.extend(children);
                     }
                 }
                 DockMutation::SetLeafCollapsed { path, collapsed } => {

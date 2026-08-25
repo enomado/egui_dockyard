@@ -64,17 +64,39 @@ pub struct DockArea<'tree, Tab> {
 /// A tree edit requested while a [`DockArea`] is drawing.
 ///
 /// Drawing collects these requests and the render epilogue applies them after every surface has
-/// been visited. Paths address nodes, so removals and detaches retain their reverse request
-/// order when they are applied.
+/// been visited. Between them the tree is read-only, which is the whole point: no drawing site
+/// can invalidate a path while sibling surfaces are still being visited.
+///
+/// # The order they are applied in
+///
+/// One law, stated once, because "it happened to work" is not an order:
+///
+/// 1. everything that edits a node **that still exists as drawing saw it** — the transposition,
+///    activation, collapsing, minimizing, scroll, fraction — in **request order**, i.e. the
+///    order the frame asked for them;
+/// 2. `Remove` and `Detach`, in **reverse** request order, because they invalidate paths and the
+///    later ones were addressed against a tree the earlier ones had not yet cut;
+/// 3. the **last** `Focus` asked for, if any.
+///
+/// Phase 1 comes before phase 2 for a reason beyond tidiness: a removal asks who inherits the
+/// focus only when it takes the *active* tab, so it has to see the activation this frame
+/// requested.
 ///
 /// # The one-frame shift, and how it could be removed
 ///
-/// `Activate` and `SetLeafCollapsed` change what a leaf *shows*, and a leaf draws its tab bar
-/// (where the click lands) before its body in the same pass — see `show_leaf`. Deferring them
-/// to the epilogue therefore costs one frame: the body of the click frame still paints the
-/// previous tab, and the new one appears on the next repaint (~16 ms at 60 fps). This is an
-/// accepted behavioural change, not an oversight (decision of 2026-08-26); the click acceptance
-/// in the plan covers it.
+/// Three of these cost a frame, and the rest cost nothing — which of the two it is follows from
+/// where in the pass the value is read, not from what the variant means.
+///
+/// `Activate`, `SetLeafCollapsed` and `TransposeCross` change what the frame *shows*, and the
+/// showing happens after the click that asks: a leaf draws its tab bar (where the click lands)
+/// before its body, and the transposition's toggle is drawn while separators below it are still
+/// to come. Deferring them therefore costs one frame — the click frame paints the old picture,
+/// the new one appears on the next repaint (~16 ms at 60 fps). This is an accepted behavioural
+/// change, not an oversight (decision of 2026-08-26); the click acceptance in the plan covers it.
+///
+/// `SetLeafScroll`, `SetSplitFraction` and `WindowShown` cost nothing at all, because each is
+/// *already* read earlier in the pass than it was written — see the note on each. Deferring them
+/// changed no behaviour, and the wheel, separator-drag and window gates say so unchanged.
 ///
 /// It is removable, and the shape is known. The requests are queued *before* the body is drawn,
 /// so the body does not need the tree to be mutated — it only needs to know which tab to show.
@@ -85,12 +107,14 @@ pub struct DockArea<'tree, Tab> {
 /// first and the node second. The tree still stays read-only for the whole pass; what changes is
 /// that draw resolves against *tree + pending queue* rather than the tree alone.
 ///
-/// Not done here on purpose: it widens the seam every drawing site has to thread through, and
-/// that widening is only worth paying for once the queue is the *only* way the tree changes —
-/// i.e. after the remaining live edits (view state still living inside nodes: tab-bar scroll,
-/// window geometry, split fraction) have left the node. Doing it earlier would mean threading
-/// the override through code that can still mutate the tree behind it, which buys nothing.
-#[derive(Debug, Clone, Copy)]
+/// Not done here on purpose: it widens the seam every drawing site has to thread through, and it
+/// buys back 16 ms on gestures that are single clicks. The precondition it was waiting for is met
+/// — as of 2026-08-26 this queue *is* the only way drawing changes the tree — so what is left is
+/// a straight trade, to be made when the shift is judged on screen rather than in a plan.
+// Not `Copy`: `TransposeCross` carries the measured boundaries of two chains, and there is no
+// fixed-size stand-in for "however many parts that chain had". The epilogue reads the list by
+// reference, so nothing is cloned to apply it.
+#[derive(Debug, Clone)]
 pub(in crate::widgets::dock_area) enum DockMutation {
     /// Make a tab the active one in its leaf, remembering the previous active tab.
     ///
@@ -149,6 +173,21 @@ pub(in crate::widgets::dock_area) enum DockMutation {
     WindowShown {
         surface: SurfaceIndex,
         took_expanded_height: bool,
+    },
+    /// Regroup around a crossing, keeping every leaf where it is on screen — the structural edit
+    /// behind the toggle drawn where two dividers cross.
+    ///
+    /// The measured half of it travels in the request, because the tree cannot know it and the
+    /// epilogue cannot re-measure it: `bounds` are the boundaries of each of the two chains along
+    /// its own axis, and `stack_fraction` the one number from the other axis. Everything about
+    /// *which node goes where* is derived from the tree when this is applied, by
+    /// [`Tree::transpose_cross`](crate::core::tree::Tree::transpose_cross).
+    TransposeCross {
+        outer: NodePath,
+        /// Which divider of each chain the crossing is made of.
+        at: [usize; 2],
+        bounds: [Vec<f32>; 2],
+        stack_fraction: f32,
     },
     Remove(TabRemoval),
     Detach(TabPath),

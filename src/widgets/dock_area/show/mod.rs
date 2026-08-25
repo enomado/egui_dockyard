@@ -268,6 +268,8 @@ impl<Tab> DockArea<'_, Tab> {
             | DockMutation::SetLeafCollapsed { .. }
             | DockMutation::SetLeafScroll { .. }
             | DockMutation::SetSplitFraction { .. }
+            | DockMutation::SetWindowMinimized { .. }
+            | DockMutation::WindowShown { .. }
             | DockMutation::Remove(_)
             | DockMutation::Detach(_) => None,
         });
@@ -310,6 +312,19 @@ impl<Tab> DockArea<'_, Tab> {
                     // No event either: the gesture that asked already said what it was —
                     // `SeparatorDragging` while the hand moves, `LayoutCommitted` on release or
                     // on the double-click reset.
+                }
+                DockMutation::SetWindowMinimized { surface, minimized } => {
+                    // Pushes `LayoutCommitted` itself, as it did when it ran during the click.
+                    self.window_set_minimized(surface, minimized);
+                }
+                DockMutation::WindowShown {
+                    surface,
+                    took_expanded_height,
+                } => {
+                    self.dock_state
+                        .get_window_state_mut(surface)
+                        .expect("the window was drawn this frame")
+                        .requests_honoured(took_expanded_height);
                 }
                 DockMutation::Remove(_) | DockMutation::Detach(_) | DockMutation::Focus(_) => (),
             }

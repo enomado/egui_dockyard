@@ -829,7 +829,7 @@ impl<Tab> DockArea<'_, Tab> {
 
         if response.clicked() {
             if on_secondary_button {
-                self.window_toggle_minimized(path.surface);
+                self.window_request_toggle_minimized(path.surface);
             } else {
                 // Queued, not applied: the leaf whose collapsed flag this flips is the one
                 // being drawn, and its body is still ahead in this pass. See `DockMutation`
@@ -848,7 +848,7 @@ impl<Tab> DockArea<'_, Tab> {
                     .clicked()
                 {
                     ui.close();
-                    self.window_toggle_minimized(path.surface);
+                    self.window_request_toggle_minimized(path.surface);
                 }
             });
         }

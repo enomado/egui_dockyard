@@ -134,12 +134,16 @@ impl<Tab> DockArea<'_, Tab> {
             )
         };
 
-        let egui_window = crate::dock_area::window_ui::create_window(
-            self.dock_state.get_window_state_mut(surf_index).unwrap(),
+        let (egui_window, took_expanded_height) = crate::dock_area::window_ui::create_window(
+            self.dock_state.get_window_state(surf_index).unwrap(),
             id,
             bounds,
             chrome,
         );
+        self.mutations.push(DockMutation::WindowShown {
+            surface: surf_index,
+            took_expanded_height,
+        });
 
         let minimized = self
             .dock_state
@@ -394,7 +398,7 @@ impl<Tab> DockArea<'_, Tab> {
         );
 
         if response.clicked() {
-            self.window_toggle_minimized(surface_index);
+            self.window_request_toggle_minimized(surface_index);
         }
     }
 
@@ -446,12 +450,37 @@ impl<Tab> DockArea<'_, Tab> {
         ));
     }
 
-    pub(super) fn window_toggle_minimized(&mut self, surf_index: SurfaceIndex) {
+    /// Ask for a window to be minimized or restored — the click handler's half.
+    ///
+    /// Queued rather than done here for the reason the whole of `DockMutation` exists: the
+    /// surface whose window this is, is the one being drawn. The value is computed now, off
+    /// the state the click saw, so two requests in a frame cannot toggle each other away.
+    pub(super) fn window_request_toggle_minimized(&mut self, surf_index: SurfaceIndex) {
         let minimized = self
             .dock_state
             .get_window_state(surf_index)
             .unwrap()
             .is_minimized();
+        self.mutations.push(DockMutation::SetWindowMinimized {
+            surface: surf_index,
+            minimized: !minimized,
+        });
+    }
+
+    /// Minimize or restore a window — the epilogue's half, applied from
+    /// [`DockMutation::SetWindowMinimized`].
+    ///
+    /// Reads this pass's geometry to remember how tall the window was, exactly as it did when
+    /// it ran during the click.
+    pub(super) fn window_set_minimized(&mut self, surf_index: SurfaceIndex, minimized: bool) {
+        let was_minimized = self
+            .dock_state
+            .get_window_state(surf_index)
+            .unwrap()
+            .is_minimized();
+        if was_minimized == minimized {
+            return;
+        }
         let surface = &mut self.dock_state[surf_index];
 
         if surface.root_node().is_some_and(|node| node.is_collapsed()) {
@@ -461,7 +490,7 @@ impl<Tab> DockArea<'_, Tab> {
             if let Some(window_state) = self.dock_state.get_window_state_mut(surf_index) {
                 window_state.toggle_minimized();
             }
-        } else if minimized {
+        } else if was_minimized {
             if let Some(window_state) = self.dock_state.get_window_state_mut(surf_index) {
                 window_state.set_new(true);
                 window_state.toggle_minimized();

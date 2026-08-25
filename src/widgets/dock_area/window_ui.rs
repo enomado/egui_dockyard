@@ -10,8 +10,10 @@ use crate::WindowState;
 
 /// Build the [`egui::Window`] that will host `state`'s surface this frame.
 ///
-/// Consumes the pending "move/resize me" requests recorded in the state — they are
-/// one-shot by design, so calling this twice in a frame would drop them.
+/// *Reads* the pending "move/resize me" requests recorded in the state; spending them is the
+/// caller's job, through `DockMutation::WindowShown` — which is why the second half of the
+/// returned pair says whether the expanded height was one of the requests read. They are
+/// one-shot by design, and a window is built once per frame, so the two halves stay in step.
 ///
 /// `chrome` is everything between the window's outer height and the content area inside it —
 /// see `window_chrome_height`. It is needed because [`WindowState::expanded_height`] records
@@ -20,11 +22,11 @@ use crate::WindowState;
 ///
 /// The `'static` lifetime means the window's `open` field is always `None`.
 pub(super) fn create_window(
-    state: &mut WindowState,
+    state: &WindowState,
     id: Id,
     bounds: Rect,
     chrome: f32,
-) -> Window<'static> {
+) -> (Window<'static>, bool) {
     let new = state.is_new();
     let mut window_constructor = Window::new("").id(id).constrain_to(bounds).title_bar(false);
 
@@ -35,10 +37,11 @@ pub(super) fn create_window(
         window_constructor = window_constructor.fixed_size(size);
     }
     // Reset the height of the window if it is now expanded
+    let mut took_expanded_height = false;
     if new && let Some(height) = state.expanded_height() {
         let height = height + chrome;
         window_constructor = window_constructor.max_height(height).min_height(height);
+        took_expanded_height = true;
     }
-    state.set_new(false);
-    window_constructor
+    (window_constructor, took_expanded_height)
 }

@@ -77,18 +77,35 @@ impl WindowState {
     }
 
     #[inline(always)]
-    pub(crate) fn next_position(&mut self) -> Option<Point> {
-        self.next_position.take()
+    pub(crate) fn next_position(&self) -> Option<Point> {
+        self.next_position
     }
 
     #[inline(always)]
-    pub(crate) fn next_size(&mut self) -> Option<Size> {
-        self.next_size.take()
+    pub(crate) fn next_size(&self) -> Option<Size> {
+        self.next_size
+    }
+
+    /// Forget the one-shot requests a frame has just honoured.
+    ///
+    /// Reading and spending used to be one act (`take`), which meant the only code allowed to
+    /// look at a request was code holding the state mutably — drawing, in other words. They
+    /// are two acts now: drawing reads, and the render epilogue spends, through
+    /// `DockMutation::WindowShown`. `took_expanded_height` says whether the height was read
+    /// too, which only happens for a window that is new this frame.
+    #[inline(always)]
+    pub(crate) fn requests_honoured(&mut self, took_expanded_height: bool) {
+        self.next_position = None;
+        self.next_size = None;
+        if took_expanded_height {
+            self.expanded_height = None;
+        }
+        self.new = false;
     }
 
     #[inline(always)]
-    pub(crate) fn expanded_height(&mut self) -> Option<f32> {
-        self.expanded_height.take()
+    pub(crate) fn expanded_height(&self) -> Option<f32> {
+        self.expanded_height
     }
 
     #[inline(always)]

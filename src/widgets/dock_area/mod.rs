@@ -22,7 +22,7 @@ pub use state::{DragInFlight, DragSubject, JunctionArms, WindowEdge};
 use tab_removal::TabRemoval;
 
 use crate::layout::DockLayout;
-use crate::{NodePath, Style, TabIndex, TabPath, core::DockState};
+use crate::{NodePath, Style, SurfaceIndex, TabIndex, TabPath, core::DockState};
 
 /// Displays a [`DockState`] in `egui`.
 pub struct DockArea<'tree, Tab> {
@@ -126,6 +126,29 @@ pub(in crate::widgets::dock_area) enum DockMutation {
     SetSplitFraction {
         path: NodePath,
         fraction: f32,
+    },
+    /// Minimize or restore a floating window. Carries the target value, like
+    /// [`SetLeafCollapsed`](Self::SetLeafCollapsed) and for the same reason.
+    SetWindowMinimized {
+        surface: SurfaceIndex,
+        minimized: bool,
+    },
+    /// A floating window has been built this frame out of the one-shot requests recorded in
+    /// its [`WindowState`](crate::WindowState) — "move me here", "size me like this", "you are
+    /// new" — so those requests are now spent.
+    ///
+    /// Drawing used to spend them itself, by handing `create_window` a `&mut WindowState` that
+    /// took each one out. It reads them now and says here what it read, which is the same
+    /// thing one phase later: a window is built exactly once per frame, so nothing else can
+    /// observe the difference.
+    ///
+    /// `took_expanded_height` mirrors the condition under which the height was read — only a
+    /// *new* window is resized back to what it was before it collapsed. Carried rather than
+    /// re-derived in the epilogue, because by then `SetLeafCollapsed` may have set the flag
+    /// again for the very next frame, and clearing the height on that would lose it.
+    WindowShown {
+        surface: SurfaceIndex,
+        took_expanded_height: bool,
     },
     Remove(TabRemoval),
     Detach(TabPath),

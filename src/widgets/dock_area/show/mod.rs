@@ -266,6 +266,8 @@ impl<Tab> DockArea<'_, Tab> {
             DockMutation::Focus(path) => Some(*path),
             DockMutation::Activate(_)
             | DockMutation::SetLeafCollapsed { .. }
+            | DockMutation::SetLeafScroll { .. }
+            | DockMutation::SetSplitFraction { .. }
             | DockMutation::Remove(_)
             | DockMutation::Detach(_) => None,
         });
@@ -291,6 +293,23 @@ impl<Tab> DockArea<'_, Tab> {
                         self.window_update_collapsed(path);
                         self.events.push(DockEvent::LayoutCommitted);
                     }
+                }
+                DockMutation::SetLeafScroll { path, scroll } => {
+                    self.dock_state
+                        .leaf_mut(path)
+                        .expect("a scroll is only requested for a leaf")
+                        .scroll = scroll;
+                    // No `LayoutCommitted`: scrolling a tab bar has never been a layout edit a
+                    // consumer diffs, and it is requested on plain resizes too (the clamp).
+                }
+                DockMutation::SetSplitFraction { path, fraction } => {
+                    self.dock_state[path.surface][path.node]
+                        .get_split_mut()
+                        .expect("a fraction is only requested for a split")
+                        .fraction = fraction;
+                    // No event either: the gesture that asked already said what it was —
+                    // `SeparatorDragging` while the hand moves, `LayoutCommitted` on release or
+                    // on the double-click reset.
                 }
                 DockMutation::Remove(_) | DockMutation::Detach(_) | DockMutation::Focus(_) => (),
             }
@@ -950,10 +969,10 @@ impl<Tab> DockArea<'_, Tab> {
                 }
 
                 if response.double_clicked() && self.split_fraction(path) != 0.5 {
-                    self.dock_state[path.surface][path.node]
-                        .get_split_mut()
-                        .expect("a separator is only drawn for a split")
-                        .fraction = 0.5;
+                    self.mutations.push(DockMutation::SetSplitFraction {
+                        path,
+                        fraction: 0.5,
+                    });
                     self.events.push(DockEvent::LayoutCommitted);
                 }
             }
@@ -1035,13 +1054,13 @@ impl<Tab> DockArea<'_, Tab> {
             return false;
         };
         let new_fraction = (band.effective + delta / range).clamp(band.min, band.max);
-        let split = self.dock_state[path.surface][path.node]
-            .get_split_mut()
-            .expect("`split_gesture` answered, so the node is a split");
-        if split.fraction == new_fraction {
+        if self.split_fraction(path) == new_fraction {
             return false;
         }
-        split.fraction = new_fraction;
+        self.mutations.push(DockMutation::SetSplitFraction {
+            path,
+            fraction: new_fraction,
+        });
         true
     }
 }

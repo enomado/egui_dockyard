@@ -1160,21 +1160,32 @@ impl<Tab> DockArea<'_, Tab> {
             return;
         }
 
-        let leaf = self.dock_state[path]
-            .get_leaf_mut()
-            .expect("This node must be a leaf");
+        let current = self
+            .dock_state
+            .leaf(path)
+            .expect("This node must be a leaf")
+            .scroll;
         let overflow = (actual_width - available_width).at_least(0.0);
 
         // Compare to 1.0 and not 0.0 to avoid reacting to a sub-pixel overflow from tab
         // layout. The tab bar owns its scroll position, but deliberately has no visual
         // scroll widget: wheel input above the tabs is all of the interaction.
+        let mut scroll = current;
         if overflow > 1.0 {
             if tabbar_response.hovered() || tab_hovered {
-                leaf.scroll += ui.input(|i| i.smooth_scroll_delta.y + i.smooth_scroll_delta.x);
+                scroll += ui.input(|i| i.smooth_scroll_delta.y + i.smooth_scroll_delta.x);
             }
         }
 
-        leaf.scroll = leaf.scroll.clamp(-overflow, 0.0);
+        // The clamp runs on every frame, not only on a scrolled one: the overflow it clamps
+        // against changes whenever the leaf is resized or a tab comes and goes, and a
+        // position left outside it would scroll the bar off its own end. Only an actual
+        // change is queued, so a still tab bar asks for nothing.
+        let scroll = scroll.clamp(-overflow, 0.0);
+        if scroll != current {
+            self.mutations
+                .push(DockMutation::SetLeafScroll { path, scroll });
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

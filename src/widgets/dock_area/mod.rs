@@ -104,6 +104,29 @@ pub(in crate::widgets::dock_area) enum DockMutation {
         path: NodePath,
         collapsed: bool,
     },
+    /// Scroll position of a leaf's tab bar, in points.
+    ///
+    /// Queued **without** the one-frame shift described above, and that is a property of the
+    /// pass rather than of this variant: `tab_bar` reads `scroll` at its top to place the
+    /// strip of tabs and only decides the new value at its bottom, once the tabs have been
+    /// measured. The write has therefore never affected the frame that made it — the wheel
+    /// already showed up one frame later — so moving it into the epilogue changes nothing a
+    /// user can see.
+    SetLeafScroll {
+        path: NodePath,
+        scroll: f32,
+    },
+    /// Where a split cuts its two children, as a fraction of the parent.
+    ///
+    /// Also free of the one-frame shift, for the same kind of reason: `render_nodes` computes
+    /// every rectangle from the stored fractions in its *first* pass and draws separators in
+    /// its *third*, so a fraction written by a drag was never read again before the next
+    /// frame's layout. Carries the target value, not a delta, so the clamp stays where it is
+    /// computed (`nudge_split`) and two requests for one split cannot compound.
+    SetSplitFraction {
+        path: NodePath,
+        fraction: f32,
+    },
     Remove(TabRemoval),
     Detach(TabPath),
     Focus(NodePath),

@@ -264,8 +264,37 @@ impl<Tab> DockArea<'_, Tab> {
     ) {
         let mut new_focused = mutations.iter().rev().find_map(|mutation| match mutation {
             DockMutation::Focus(path) => Some(*path),
-            DockMutation::Remove(_) | DockMutation::Detach(_) => None,
+            DockMutation::Activate(_)
+            | DockMutation::SetLeafCollapsed { .. }
+            | DockMutation::Remove(_)
+            | DockMutation::Detach(_) => None,
         });
+
+        // What a leaf *shows* is settled first, and in request order — these edits address nodes
+        // that still exist exactly as drawing saw them. Removals come after, for the reason
+        // spelled out on `DockMutation::Activate`: a removal asks who inherits the focus only
+        // when it takes the active tab, so it has to see the activation this frame requested.
+        for mutation in mutations {
+            match *mutation {
+                DockMutation::Activate(path) => {
+                    let leaf = self.dock_state.leaf_mut(path.node_path()).unwrap();
+                    if !leaf.is_active(path.tab) {
+                        leaf.activate_tab_remembering(path.tab);
+                        self.events.push(DockEvent::LayoutCommitted);
+                    }
+                }
+                DockMutation::SetLeafCollapsed { path, collapsed } => {
+                    if self.dock_state[path].is_collapsed() != collapsed {
+                        self.dock_state[path.surface].set_leaf_collapsed(path.node, collapsed);
+                        // Reads the collapsed flag it has just written, plus this pass's
+                        // geometry, to remember the height an expand has to restore.
+                        self.window_update_collapsed(path);
+                        self.events.push(DockEvent::LayoutCommitted);
+                    }
+                }
+                DockMutation::Remove(_) | DockMutation::Detach(_) | DockMutation::Focus(_) => (),
+            }
+        }
 
         for mutation in mutations.iter().rev() {
             let DockMutation::Remove(removal) = *mutation else {

@@ -8,7 +8,6 @@ use egui::{
 };
 
 use crate::NodePath;
-use crate::dock_area::events::DockEvent;
 use crate::dock_area::ids::tab_widget_id;
 use crate::dock_area::tab_removal::{ForcedRemoval, TabRemoval};
 use crate::tab_viewer::OnCloseResponse;
@@ -427,11 +426,8 @@ impl<Tab> DockArea<'_, Tab> {
                         Button::new(&self.dock_state.translations.tab_context_menu.close_button);
 
                     response.context_menu(|ui| {
-                        // Still `_mut`: the `Focus` arm below activates the tab in place.
-                        // That is a live edit during draw, and one of the sites D4 has to
-                        // move into the request list; the tab itself is only read.
                         let leaf = self.dock_state[path]
-                            .get_leaf_mut()
+                            .get_leaf()
                             .expect("This node must be a leaf");
                         let already_active = leaf.is_active(tab_index);
                         let tab = &leaf[tab_index];
@@ -454,15 +450,13 @@ impl<Tab> DockArea<'_, Tab> {
                                     )))
                                 }
                                 OnCloseResponse::Focus => {
-                                    // Only count as a finalised event if `active`
-                                    // actually changes; the focus push at the end
-                                    // of the render pass is guarded similarly so
-                                    // a no-op close-on-already-active-tab does not
-                                    // emit a committed event. The activation itself
-                                    // goes through the `prev_active` chokepoint.
+                                    // Only count as a finalised event if `active` actually
+                                    // changes; both the epilogue's activation and its focus
+                                    // push are guarded the same way, so a no-op
+                                    // close-on-already-active-tab emits nothing.
                                     if !already_active {
-                                        leaf.activate_tab_remembering(tab_index);
-                                        self.events.push(DockEvent::LayoutCommitted);
+                                        self.mutations
+                                            .push(DockMutation::Activate((path, tab_index).into()));
                                     }
                                     self.mutations.push(DockMutation::Focus(path));
                                 }
@@ -501,12 +495,6 @@ impl<Tab> DockArea<'_, Tab> {
                 tab_hovered = true;
             }
 
-            // Deferred tab activation: the `tab` borrow below holds `leaf`
-            // mutably until `on_tab_button`, so we cannot call the
-            // whole-`self`-borrowing `activate_tab_remembering` inside the click
-            // handler. Record the intent and apply it once that borrow ends.
-            let mut activate_to: Option<TabIndex> = None;
-
             // Paint hline below each tab unless its active (or option says otherwise).
             let leaf = self.dock_state.leaf(path).unwrap();
             let already_active = leaf.is_active(tab_index);
@@ -528,11 +516,13 @@ impl<Tab> DockArea<'_, Tab> {
                 || (tabs_ui.memory(|m| m.has_focus(title_id))
                     && tabs_ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Space)))
             {
-                // The active flag was read before `tab` borrowed the leaf; the
-                // mutation itself is deferred to after that borrow ends.
+                // Queued rather than applied: the leaf's body is drawn later in this same
+                // pass, so the click frame still paints the previous tab and the new one
+                // appears on the next repaint. `DockMutation` documents that shift and the
+                // shape that would remove it.
                 if !already_active {
-                    activate_to = Some(tab_index);
-                    self.events.push(DockEvent::LayoutCommitted);
+                    self.mutations
+                        .push(DockMutation::Activate((path, tab_index).into()));
                 }
                 self.mutations.push(DockMutation::Focus(path));
             }
@@ -545,16 +535,6 @@ impl<Tab> DockArea<'_, Tab> {
                     (path, tab_index).into(),
                     ForcedRemoval(false),
                 )));
-            }
-
-            // `tab` is no longer borrowed past this point — safe to take a fresh
-            // `&mut leaf` and funnel through the single activation chokepoint so
-            // `prev_active` is recorded.
-            if let Some(index) = activate_to {
-                self.dock_state
-                    .leaf_mut(path)
-                    .unwrap()
-                    .activate_tab_remembering(index);
             }
         }
 
@@ -851,9 +831,13 @@ impl<Tab> DockArea<'_, Tab> {
             if on_secondary_button {
                 self.window_toggle_minimized(path.surface);
             } else {
-                self.dock_state[path.surface].set_leaf_collapsed(path.node, !collapsed);
-                self.window_update_collapsed(path);
-                self.events.push(DockEvent::LayoutCommitted);
+                // Queued, not applied: the leaf whose collapsed flag this flips is the one
+                // being drawn, and its body is still ahead in this pass. See `DockMutation`
+                // for the one-frame shift this buys and the shape that would remove it.
+                self.mutations.push(DockMutation::SetLeafCollapsed {
+                    path,
+                    collapsed: !collapsed,
+                });
             }
         }
 
@@ -1000,7 +984,10 @@ impl<Tab> DockArea<'_, Tab> {
     }
 
     /// Updates the collapsed state of the node and its parents.
-    fn window_update_collapsed(&mut self, path: NodePath) {
+    ///
+    /// Called from the render epilogue, right after the collapsed flag it reads has been
+    /// written, not from the click handler that requested the change.
+    pub(super) fn window_update_collapsed(&mut self, path: NodePath) {
         let surface = &mut self.dock_state[path.surface];
         let collapsed = surface[path.node].is_collapsed();
         if !collapsed {

@@ -66,8 +66,44 @@ pub struct DockArea<'tree, Tab> {
 /// Drawing collects these requests and the render epilogue applies them after every surface has
 /// been visited. Paths address nodes, so removals and detaches retain their reverse request
 /// order when they are applied.
+///
+/// # The one-frame shift, and how it could be removed
+///
+/// `Activate` and `SetLeafCollapsed` change what a leaf *shows*, and a leaf draws its tab bar
+/// (where the click lands) before its body in the same pass — see `show_leaf`. Deferring them
+/// to the epilogue therefore costs one frame: the body of the click frame still paints the
+/// previous tab, and the new one appears on the next repaint (~16 ms at 60 fps). This is an
+/// accepted behavioural change, not an oversight (decision of 2026-08-26); the click acceptance
+/// in the plan covers it.
+///
+/// It is removable, and the shape is known. The requests are queued *before* the body is drawn,
+/// so the body does not need the tree to be mutated — it only needs to know which tab to show.
+/// Concretely: let `tab_bar` hand back the activation it just queued, and let `show_leaf` pass
+/// that as an override into `tab_body` ("draw this index this frame") instead of `tab_body`
+/// reading `leaf.active` off the tree. Same for the collapsed flag, which `show_leaf` already
+/// reads once at the top and threads through as a parameter — it would read the pending request
+/// first and the node second. The tree still stays read-only for the whole pass; what changes is
+/// that draw resolves against *tree + pending queue* rather than the tree alone.
+///
+/// Not done here on purpose: it widens the seam every drawing site has to thread through, and
+/// that widening is only worth paying for once the queue is the *only* way the tree changes —
+/// i.e. after the remaining live edits (view state still living inside nodes: tab-bar scroll,
+/// window geometry, split fraction) have left the node. Doing it earlier would mean threading
+/// the override through code that can still mutate the tree behind it, which buys nothing.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::widgets::dock_area) enum DockMutation {
+    /// Make a tab the active one in its leaf, remembering the previous active tab.
+    ///
+    /// Applied before `Remove`, which reproduces the present order: activation happens while
+    /// drawing, removal in the epilogue. The distinction matters — `remove_tab_choosing` only
+    /// asks for a successor when the tab it removes is the active one.
+    Activate(TabPath),
+    /// Collapse or expand a leaf. Carries the target value rather than a toggle so that two
+    /// requests for the same leaf in one frame cannot cancel each other out by ordering.
+    SetLeafCollapsed {
+        path: NodePath,
+        collapsed: bool,
+    },
     Remove(TabRemoval),
     Detach(TabPath),
     Focus(NodePath),

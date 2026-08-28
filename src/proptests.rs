@@ -79,6 +79,23 @@ fn open_window_count(state: &DockState<u32>) -> usize {
     crate::core::testkit::open_windows(state).len()
 }
 
+/// The ratio every live split is cut at, keyed by identity. The snapshot
+/// [`collapsing_never_moves_a_boundary`] compares.
+fn split_fractions(state: &DockState<u32>) -> HashMap<NodePath, f32> {
+    let mut fractions = HashMap::new();
+    for (surface_index, surface) in state.iter_surfaces_indexed() {
+        let Some(tree) = surface.node_tree() else {
+            continue;
+        };
+        for id in tree.breadth_first() {
+            if let Some(split) = tree[id].get_split() {
+                fractions.insert(NodePath::new(surface_index, id), split.fraction);
+            }
+        }
+    }
+    fractions
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(400))]
 
@@ -194,6 +211,58 @@ proptest! {
         // once, over fixed seeds, by `the_generator_reaches_what_the_properties_assume`. It
         // used to be a `prop_assume!` here, which discarded such cases instead of reporting
         // them: a generator that stopped collapsing anything would have gone unnoticed.
+    }
+
+    /// Collapsing and expanding a leaf never moves a boundary.
+    ///
+    /// The ratio of a split is what the *user* chose with the divider, and a collapsed half is
+    /// keeping it for when it comes back — that is the whole reason hiding a half is allowed to
+    /// leave the tree alone. Nothing in the collapse path writes a fraction today, and this
+    /// property is here so that stays true: the bug it is the model-side half of let the divider
+    /// of a sideways-collapsed split be *dragged*, which rewrote the ratio of a half that was
+    /// not even on screen (`tests/a_hidden_half_has_no_boundary_to_drag.rs` states the drawing
+    /// side of it).
+    ///
+    /// Only `ToggleCollapsed` steps are judged. Every other op is allowed to move boundaries —
+    /// a split is born with one, a removed leaf takes its parent's with it — and comparing
+    /// across those would be asserting that the tree never changes.
+    #[test]
+    fn collapsing_never_moves_a_boundary(ops in prop::collection::vec(op_strategy(), 1..24)) {
+        let mut dock_state = DockState::new(vec![0u32, 1, 2]);
+        let mut next_tab = 3u32;
+
+        for (step, op) in ops.into_iter().enumerate() {
+            let collapsing = matches!(op, Op::ToggleCollapsed { .. });
+            let before = collapsing.then(|| split_fractions(&dock_state));
+
+            if apply(&mut dock_state, op, &mut next_tab).is_none() {
+                continue;
+            }
+
+            let Some(before) = before else { continue };
+            let after = split_fractions(&dock_state);
+
+            // The same splits, too: collapsing is not allowed to add or drop one, and a
+            // comparison over the intersection alone would not notice if it did.
+            prop_assert_eq!(
+                before.keys().collect::<std::collections::HashSet<_>>(),
+                after.keys().collect::<std::collections::HashSet<_>>(),
+                "collapsing changed which splits exist, after step {} ({:?})", step, op
+            );
+
+            for (path, fraction) in &before {
+                prop_assert_eq!(
+                    after[path], *fraction,
+                    "split {:?} was cut at {} and is now cut at {}, after step {} ({:?})",
+                    path, fraction, after[path], step, op
+                );
+            }
+        }
+
+        // That the generated scenes actually collapse anything is asserted over fixed seeds by
+        // `the_generator_reaches_what_the_properties_assume`, for the reason spelled out in
+        // `collapsed_counts_stay_derived`: a `prop_assume!` here would discard the cases that
+        // never reached a collapse instead of reporting that they stopped happening.
     }
 
     /// A node id keeps naming the same node across operations that are not about it.

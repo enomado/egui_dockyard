@@ -874,9 +874,9 @@ impl<Tab> DockArea<'_, Tab> {
     /// grabbed by.
     ///
     /// `None` where there is no divider on screen to speak of: a node that is not a split, one
-    /// the layout pass has no rectangle for, or a vertical split with a collapsed child — that
-    /// last one is cut at the strip's edge rather than at its ratio, and `show_separator` does
-    /// not draw or hit-test it at all.
+    /// the layout pass has no rectangle for, or a split cut at a strip's edge rather than at its
+    /// ratio — see [`Self::separator_is_suppressed`], which `show_separator` asks the same
+    /// question of before it draws or hit-tests anything.
     ///
     /// A function, and the only derivation of this rectangle in the crate, for the reason
     /// [`split_rect`] gives: the drawn divider, the rectangle it is grabbed by, and anything
@@ -884,6 +884,37 @@ impl<Tab> DockArea<'_, Tab> {
     /// the cross-split button is sized by how close the nearest other divider is (see
     /// `DockArea::toggle_room`) — and re-deriving it there would have been the third copy of an
     /// arithmetic that has already drifted once.
+    /// Whether this split has no divider on screen this frame.
+    ///
+    /// A divider is drawn *at the split's ratio*, and that is only honest while the layout pass
+    /// cut the split at that ratio too. Both collapsed cases cut it somewhere else — at the edge
+    /// of the strip the collapsed side shrank to — so a divider drawn at the ratio would be a
+    /// line lying across a child that owns the space under it: visible, grabbable, and attached
+    /// to nothing. Worse, grabbing it *writes* the ratio, so the fraction the collapsed side is
+    /// keeping for when it expands would be edited while it is not even on screen.
+    ///
+    /// The two cases are asked differently on purpose:
+    ///
+    /// * **vertical** — read off the tree, because the layout branch is unconditional there: any
+    ///   collapsed child is squeezed into rows;
+    /// * **horizontal** — read off the *layout*, because whether a leaf became a strip is a
+    ///   decision with three conditions (the knob, a leaf rather than a split, an open sibling)
+    ///   and `compute_rect_sizes` is the one that makes it. Re-deriving those conditions here
+    ///   would be a second copy that drifts — which is exactly the bug this function fixes: the
+    ///   sideways branch was added to the layout, and this predicate, then written out twice
+    ///   inline, kept answering only for the vertical half.
+    fn separator_is_suppressed(&self, path: NodePath) -> bool {
+        let [left, right] = self.child_paths(path);
+
+        if self.dock_state[path].is_vertical()
+            && (self.dock_state[left].is_collapsed() || self.dock_state[right].is_collapsed())
+        {
+            return true;
+        }
+
+        self.layout.side_strip(left).is_some() || self.layout.side_strip(right).is_some()
+    }
+
     pub(super) fn separator_rect(
         &self,
         path: NodePath,
@@ -895,11 +926,8 @@ impl<Tab> DockArea<'_, Tab> {
         let fraction = split.fraction;
         let horizontal = node.is_horizontal();
 
-        if !horizontal {
-            let [left, right] = self.child_paths(path);
-            if self.dock_state[left].is_collapsed() || self.dock_state[right].is_collapsed() {
-                return None;
-            }
+        if self.separator_is_suppressed(path) {
+            return None;
         }
 
         let rect = split_rect(self.layout.rect(path)?, pixels_per_point);
@@ -940,11 +968,10 @@ impl<Tab> DockArea<'_, Tab> {
     ) {
         assert!(self.dock_state[path.surface][path.node].is_parent());
 
-        // If either of the children is collapsed, we don't want the user to interact with the separator
-        let [left_path, right_path] = self.child_paths(path);
-        if (self.dock_state[left_path].is_collapsed() || self.dock_state[right_path].is_collapsed())
-            && self.dock_state[path].is_vertical()
-        {
+        // A split the layout pass cut at a strip's edge has no divider to show or to grab —
+        // one question, asked in one place, because it used to be asked in two and the second
+        // copy was a case behind (see `separator_is_suppressed`).
+        if self.separator_is_suppressed(path) {
             return;
         }
 

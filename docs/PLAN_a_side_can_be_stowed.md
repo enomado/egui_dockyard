@@ -40,12 +40,20 @@ case — but it is not the goal and is not what the acceptance is about.
    as everything else and brings the side back as it was. Per-leaf marks in the strip (the way
    IDE side bars work) would need vertical text or icons in a strip one tab bar wide — a
    different feature, and one that only makes sense once someone asks for it.
-3. **The gesture is Shift + the collapse arrow of any leaf inside**, which stows that leaf's
-   parent split. Not a new button: the direction of a collapse has never been a property of the
-   button — the ordinary arrow already collapses a leaf into a row or into a strip depending on
-   the *parent* — and stowing follows the same rule one level up. What is new is the icon the
-   arrow draws while the modifier is held, which the crate already does for the "collapse the
-   whole window" secondary action (`tab_collapse`, `draw_chevron_down`).
+3. **The gesture is Shift + the collapse arrow of any leaf inside**, which stows **the whole
+   side** that leaf is in — the child of the root it belongs to. Not a new button: the direction
+   of a collapse has never been a property of the button — the ordinary arrow already collapses
+   a leaf into a row or into a strip depending on the *parent* — and this is the same idea read
+   one level out. What is new is the icon the arrow draws while the modifier is held, which the
+   crate already does for the "collapse the whole window" secondary action (`tab_collapse`,
+   `draw_chevron_down`).
+
+   *Revised 2026-08-28, by Стас, on the first reading of the implemented plan.* It used to say
+   the target was the leaf's **parent**, on the grounds that a collapse already answers to the
+   parent. That is true of a collapse and false of this: the parent of a leaf in a side of three
+   holds only two of them, so the side took two clicks to clear and a four-leaf side would take
+   three — while "put this side away" does not depend on which panel of it was clicked. "Шифт
+   клик на любой — двигает весь сплит." The gesture reads one *side* out, not one level out.
 4. **`is_collapsed()` answers yes for a stowed split.** Every caller of it asks "does this node
    draw a bar instead of its contents", and a stowed side does. Where the two part is the row
    count: a stowed split draws one bar whatever it contains, so it costs one row.
@@ -105,10 +113,16 @@ leaf.
 
 ### 4. The gesture — **done, `d2299d1`**
 
-`stow_target` answers "what would this arrow put away while the modifier is held": the **parent**
-of whatever it sits on, or nothing. Held on the arrow of a side that is already stowed it walks
-one level out again, which is how a side of three leaves goes away in two clicks — the leaf's
-parent is only part of such a side, and it takes a second click to reach the whole.
+`stow_target` answers "what would this arrow put away while the modifier is held": **the whole
+side** it sits in, or nothing. The side is `Tree::top_level_ancestor` — the child of the root
+this node belongs to — which answers from any depth in one step and needs no reasoning about
+orientations. Nothing where the gesture would add nothing: a leaf that is itself a side already
+folds into a strip with the plain arrow, and a side already stowed is what that arrow brings
+back.
+
+The test that pins this uses a side of **three** leaves, because a side of two cannot tell the
+rule from the one it replaced — there, the deepest leaf's parent *is* the side. Both new oracles
+die when the target goes back to `parent`.
 
 The same modifier as the secondary button, so a user who rebinds it rebinds both, and the window
 action wins where both could fire (it is the older meaning, and only exists on a floating
@@ -150,11 +164,8 @@ the path is outside that repository and breaks every cargo command on another ma
 
 * **Acceptance by clicking**, which is the open item: turn the knob on in `bur/rust_app` and put
   the right-hand side away. The tests here make the gesture through synthetic events at a
-  computed point, which says the wiring works; it does not say the icon reads as anything, that
-  the strip is comfortable to hit, or that walking one level out per click is what a hand
-  expects on a side of three leaves. That last one is the decision most likely to come back:
-  decision 3 says the target is the leaf's *parent*, which for a three-leaf side is only part of
-  it.
+  computed point, which says the wiring works; it does not say the icon reads as anything, or
+  that the strip is comfortable to hit.
 * The `Collapse` / stow step in `tests/dst.rs` (from the sibling plan) — the sweep still cannot
   collapse or stow anything, so this whole class is unreachable to it by construction. The
   proptest generator *can* (`Op::ToggleStowed`, and `the_generator_reaches_what_the_properties_assume`

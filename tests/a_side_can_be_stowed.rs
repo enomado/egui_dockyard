@@ -26,9 +26,11 @@
 //! * and it all comes back.
 //!
 //! The gesture is here too, because it is one button with two meanings — the modifier turns a
-//! leaf's collapse arrow into "put my parent away" — and a button like that needs both meanings
-//! pinned, or the modifier could be ignored, or read the wrong way round, and everything above
-//! would still pass.
+//! leaf's collapse arrow into "put my whole side away" — and a button like that needs both
+//! meanings pinned, or the modifier could be ignored, or read the wrong way round, and
+//! everything above would still pass. The scene for it is a side of **three** leaves on purpose:
+//! with two, the leaf's parent *is* the side, and a target that only reached the parent would
+//! look right.
 
 use egui::{
     CentralPanel, Context, Event, Id, Modifiers, PointerButton, Pos2, RawInput, Rect, Ui, Vec2,
@@ -576,43 +578,105 @@ fn the_arrow_on_a_stowed_side_brings_it_back() {
     );
 }
 
-/// The modifier turns a leaf's collapse arrow into "put my whole side away".
+/// A side of three leaves: `open | (one / (two / three))`, so that the deepest leaf's *parent*
+/// is only part of the side. Returns (state, the side, the inner split, the three leaves).
+fn a_side_of_three() -> (DockState<String>, NodeId, NodeId, [NodeId; 3]) {
+    let mut state = DockState::new(vec![tab("open")]);
+    let open = state.main_surface().root().unwrap();
+    let [_, one] = state.split(path(open), Split::Right, 0.5, Node::leaf(tab("side one")));
+    let [_, two] = state.split(path(one), Split::Below, 0.5, Node::leaf(tab("side two")));
+    let [_, three] = state.split(path(two), Split::Below, 0.5, Node::leaf(tab("side three")));
+
+    let inner = state
+        .main_surface()
+        .parent(three)
+        .expect("the two lower leaves have a parent");
+    let side = state
+        .main_surface()
+        .parent(inner)
+        .expect("and that parent hangs off the side");
+    (state, side, inner, [one, two, three])
+}
+
+/// The modifier turns a leaf's collapse arrow into "put my **whole side** away" — one click,
+/// from any leaf in it, however deep.
 ///
-/// The target is the leaf's **parent**, which is the same rule the arrow already follows one
-/// level down: what a collapse does — a row or a strip — has never been a property of the
-/// button, it is read off the parent. There is no second button to find.
+/// The target is the side, not the leaf's parent, and the scene is what tells the two apart: a
+/// side of three leaves is two splits, so the deepest leaf's parent holds only two of the three.
+/// A parent-sized target would clear this side in two clicks and a four-leaf side in three, and
+/// which panel of a side was clicked is not part of "put the side away" (decision of 2026-08-28,
+/// Стас).
 #[test]
-fn the_modifier_turns_the_arrow_into_stow_my_side() {
+fn the_modifier_puts_the_whole_side_away_in_one_click() {
     let style = style();
-    let mut scene = a_side_beside_a_column(false);
+    let (mut state, side, inner, leaves) = a_side_of_three();
     let ctx = Context::default();
-    frames(&ctx, &mut scene.state, &style, true);
-
-    let target = collapse_arrow_of(&layout_of(&ctx), scene.inside[0], &style);
-    click(
-        &ctx,
-        &mut scene.state,
-        &style,
-        true,
-        target,
-        Modifiers::SHIFT,
+    let drawn = frames(&ctx, &mut state, &style, true);
+    assert_eq!(
+        drawn.len(),
+        4,
+        "four leaves are open to begin with: {drawn:?}"
     );
+
+    // The deepest of the three, whose parent is not the side.
+    let target = collapse_arrow_of(&layout_of(&ctx), leaves[2], &style);
+    click(&ctx, &mut state, &style, true, target, Modifiers::SHIFT);
 
     assert!(
-        scene.state[path(scene.side)].is_stowed(),
-        "the modified click was supposed to put the leaf's parent away"
+        state[path(side)].is_stowed(),
+        "one modified click was supposed to put the whole side away"
     );
     assert!(
-        !scene.state[path(scene.inside[0])].is_collapsed(),
-        "and to leave the leaf it was made on alone — a side that comes back with one of its \
-         leaves collapsed is the spelling this feature exists to avoid"
+        !state[path(inner)].is_stowed(),
+        "and the side as a whole, not the clicked leaf's parent: stowing that would leave one of \
+         the three panels standing and need a second click for the rest"
     );
+    for leaf in leaves {
+        assert!(
+            !state[path(leaf)].is_collapsed(),
+            "the leaves inside are left exactly as they were, which is what the side comes back \
+             to"
+        );
+    }
 
-    let drawn = frames(&ctx, &mut scene.state, &style, true);
+    let drawn = frames(&ctx, &mut state, &style, true);
     assert_eq!(
         drawn,
         vec!["open".to_owned()],
-        "the side is away on the next repaint: painted {drawn:?}"
+        "the whole side is away on the next repaint: painted {drawn:?}"
+    );
+}
+
+/// On a leaf that is *itself* a side, the modifier adds nothing.
+///
+/// There is nothing for it to reach: the leaf is already the child of the root, and the plain
+/// arrow already folds it into a strip — the same picture the gesture would produce, one
+/// modifier less. So the arrow keeps its one meaning rather than acquiring a second that does
+/// the same thing.
+#[test]
+fn the_modifier_adds_nothing_on_a_leaf_that_is_its_own_side() {
+    let style = style();
+    let (mut state, side, _inner, _leaves) = a_side_of_three();
+    let open = state.main_surface().root().unwrap();
+    // `open` is the other child of the root — a side of one leaf.
+    let open = state
+        .main_surface()
+        .children(open)
+        .map(|[first, second]| if first == side { second } else { first })
+        .expect("the root is a split");
+    let ctx = Context::default();
+    frames(&ctx, &mut state, &style, true);
+
+    let target = collapse_arrow_of(&layout_of(&ctx), open, &style);
+    click(&ctx, &mut state, &style, true, target, Modifiers::SHIFT);
+
+    assert!(
+        state[path(open)].is_collapsed(),
+        "the arrow kept its ordinary meaning and collapsed the leaf"
+    );
+    assert!(
+        !state[path(side)].is_stowed(),
+        "and reached nothing else: the other side is untouched"
     );
 }
 

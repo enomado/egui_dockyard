@@ -1039,17 +1039,22 @@ impl<Tab> DockArea<'_, Tab> {
     /// The split this collapse arrow would put away while the modifier is held, or [`None`] if
     /// the gesture does not apply here.
     ///
-    /// The target is the **parent** of whatever the arrow sits on, and that is the whole idea:
-    /// the direction of a collapse has never been a property of the button — the ordinary arrow
-    /// already folds a leaf into a row or into a strip depending on the parent — so stowing is
-    /// the same rule one level up, not a new control. Held on the arrow of a side that is
-    /// already stowed, it walks outwards again, which is how a side of three leaves is put away
-    /// in two clicks.
+    /// The target is **the whole side** the arrow sits in — [`Tree::top_level_ancestor`], the
+    /// child of the root this node belongs to — and not merely its parent. The gesture is "put
+    /// this side away", so it has to mean the same thing from any leaf in it, however deep: a
+    /// side of three leaves is two splits, and a parent-sized target would take two clicks to
+    /// clear and a third for four leaves. Which panel of the side was clicked is not part of
+    /// what the user asked (decision of 2026-08-28, Стас: "shift-click on any of them moves the
+    /// whole split").
     ///
     /// The same modifier as the secondary button, deliberately: one meaning, "the bigger version
     /// of this action", and a user who rebinds it rebinds both. Hovering is required for the same
     /// reason it is there — otherwise every arrow in the dock would change its icon the moment
     /// the key went down.
+    ///
+    /// [`None`] where the gesture would add nothing. A leaf that is *itself* a side already goes
+    /// away with the plain arrow, which folds it into a strip — the same picture, one modifier
+    /// less; and a side already stowed is what the plain arrow brings back.
     ///
     /// Behind [`DockArea::collapse_sideways`] because the layout is: with the knob off a side
     /// stowed under a horizontal split would draw one bar and leave the rest of its column to
@@ -1064,10 +1069,11 @@ impl<Tab> DockArea<'_, Tab> {
         {
             return None;
         }
-        // A root node has no side to be part of, so the modifier means nothing on it and the
-        // arrow keeps its ordinary meaning.
-        let parent = self.dock_state[path.surface].parent(path.node)?;
-        Some(NodePath::new(path.surface, parent))
+        let tree = &self.dock_state[path.surface];
+        // `None` for the root, which is no side but the division itself.
+        let side = tree.top_level_ancestor(path.node)?;
+        (!tree[side].is_leaf() && !tree[side].is_stowed())
+            .then(|| NodePath::new(path.surface, side))
     }
 
     /// The arrow of "put my whole side away": the ordinary collapse triangle, doubled.

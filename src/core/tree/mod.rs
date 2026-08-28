@@ -330,6 +330,30 @@ impl<Tab> Tree<Tab> {
         order
     }
 
+    /// The ancestor of `node` that is a direct child of the root — the **side** of the surface
+    /// `node` belongs to.
+    ///
+    /// The root split is what divides the surface in two, so its two children are the two halves
+    /// everything else lives in; walking up to one of them answers "which side is this in?" from
+    /// any depth, in one step and without reasoning about orientations. A side whose insides are
+    /// split further, and split again, is still one side.
+    ///
+    /// `Some(node)` when `node` is already a child of the root. [`None`] for the root itself,
+    /// which belongs to no side because it *is* the division, and for a tree with no root.
+    pub fn top_level_ancestor(&self, node: NodeId) -> Option<NodeId> {
+        let root = self.root()?;
+        let mut current = node;
+        loop {
+            // The root has no parent, so this ends: either at a child of the root, or by
+            // running out on `node` being the root itself.
+            let parent = self.parent(current)?;
+            if parent == root {
+                return Some(current);
+            }
+            current = parent;
+        }
+    }
+
     /// Every node that is inside a stowed subtree, and so is not on screen at all.
     ///
     /// A split that was put away as a unit draws one bar for whatever it contains (see

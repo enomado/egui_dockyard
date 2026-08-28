@@ -416,12 +416,16 @@ impl<'tree, Tab> DockArea<'tree, Tab> {
     ///
     /// The last of those is the case that turns up in practice — a side made of several leaves,
     /// where collapsing them one by one frees no space at all. So this knob also enables the
-    /// gesture for the other spelling: **the secondary-button modifier plus a leaf's collapse
-    /// arrow puts that leaf's parent split away as a unit** (see
+    /// gesture for the other spelling: **the secondary-button modifier plus the collapse arrow
+    /// of any leaf in a side puts that whole side away as a unit** (see
     /// [`SplitNode::stowed`](crate::SplitNode::stowed)). The side becomes one strip with one
     /// arrow, its insides are left exactly as they are for when it comes back, and the arrow on
-    /// the strip brings it back. Held on that arrow in turn, the modifier walks one level out
-    /// again, which is how a side of three leaves goes away in two clicks.
+    /// the strip brings it back.
+    ///
+    /// "The side" is the child of the root the leaf belongs to — not the leaf's parent — so the
+    /// gesture means the same thing from any leaf in it, however deeply the side is split
+    /// inside. On a leaf that is *itself* a side the modifier adds nothing: the plain arrow
+    /// already folds such a leaf into a strip, which is the same picture.
     ///
     /// Behind this knob because the layout is: with it off, a side stowed under a horizontal
     /// split would draw one bar and leave the rest of its column belonging to no node — the very

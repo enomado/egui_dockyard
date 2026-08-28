@@ -242,11 +242,17 @@ fn two_collapsed_siblings_keep_their_columns() {
     assert_eq!(side_strip_of(&layout, right), None);
 }
 
-/// A collapsed *split* beside a column keeps the column — strips are for leaves.
+/// A collapsed — but not *stowed* — split beside a column keeps the column.
 ///
 /// A collapsed split is a stack of collapsed leaves, i.e. rows of tab bars. A strip is one tab
 /// bar thick measured the other way, so those rows have nowhere to be drawn; the subtree keeps
 /// its column and each of its leaves stays a row, exactly as without the knob.
+///
+/// Since `SplitNode::stowed` there is a second way for a split to be collapsed, and it *does*
+/// become a strip (`a_side_can_be_stowed.rs`) — because a side put away as a unit draws one bar
+/// for whatever it contains, so there are no rows to fit. The two are told apart by how they got
+/// that way, not by how they look to `is_collapsed`, and this test is the half that says the
+/// leaf-at-a-time spelling still keeps its column.
 #[test]
 fn a_collapsed_split_beside_a_column_keeps_the_column() {
     let style = style();

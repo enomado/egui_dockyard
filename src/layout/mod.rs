@@ -240,6 +240,24 @@ impl DockLayout {
         }
     }
 
+    /// Drop everything known about a node, because it is not on screen this frame.
+    ///
+    /// Different from [`Self::retain_live`], which is about nodes that no longer *exist*: this
+    /// one is for a node that exists and was deliberately not laid out — the inside of a stowed
+    /// side. Both end in the same place, and they have to: an entry left behind by the last
+    /// frame is not a stale rectangle nobody looks at. Everything downstream is written to ask
+    /// the layout rather than work the answer out again, so a leftover entry *is* the answer.
+    /// A tab body would be drawn inside the strip, and the junction handles — which flatten a
+    /// chain of splits by their rectangles, several levels down from the separator being drawn
+    /// — would place handles inside it from where the subtree used to be.
+    ///
+    /// So "not laid out" is spelled as no entry at all, which is exactly what a node that has
+    /// never been shown looks like, and every reader already handles that.
+    #[inline]
+    pub(crate) fn forget(&mut self, path: NodePath) {
+        self.nodes.remove(&path);
+    }
+
     /// Record the body rectangle of a leaf.
     ///
     /// The rectangle is expected to have been recorded already by the same pass; if not

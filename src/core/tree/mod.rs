@@ -42,7 +42,7 @@ pub(crate) mod transpose;
 
 use std::{
     cmp::max,
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     fmt,
     ops::{Index, IndexMut},
 };
@@ -328,6 +328,33 @@ impl<Tab> Tree<Tab> {
             }
         }
         order
+    }
+
+    /// Every node that is inside a stowed subtree, and so is not on screen at all.
+    ///
+    /// A split that was put away as a unit draws one bar for whatever it contains (see
+    /// [`SplitNode::stowed`]), so everything below it has no rectangle this frame: not a
+    /// smaller one, none. The layout pass asks this once and then lays out — and forgets —
+    /// accordingly.
+    ///
+    /// The stowed split itself is **not** in the set: it is the bar, and it very much has a
+    /// rectangle. What is in the set is its subtree, however deep, including the insides of a
+    /// side stowed inside another one.
+    ///
+    /// Built on the same parents-before-children order as [`Self::breadth_first`], which is what
+    /// lets "inside a stowed side" propagate downwards in one pass.
+    pub fn stowed_away(&self) -> HashSet<NodeId> {
+        let mut hidden = HashSet::new();
+        for id in self.breadth_first() {
+            // Either this node is itself put away, or an ancestor was and this one inherited it
+            // — the children are hidden the same way round.
+            if (hidden.contains(&id) || self[id].is_stowed())
+                && let Some(children) = self.children(id)
+            {
+                hidden.extend(children);
+            }
+        }
+        hidden
     }
 
     /// Returns an iterator over all tabs in the tree.

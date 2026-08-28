@@ -617,12 +617,23 @@ impl<Tab> DockArea<'_, Tab> {
         // nothing below changes the shape of the tree.
         let order = self.dock_state[surf_index].breadth_first();
 
+        // What is inside a side that was put away: not on screen this frame, at any depth.
+        // Asked of the tree once, because it is a question about the tree — and answered
+        // before the layout runs rather than during it, so that the two later passes read the
+        // same set as the first.
+        let hidden = self.dock_state[surf_index].stowed_away();
+
         // First compute all rect sizes in the node graph.
         let pixels_per_point = ui.ctx().pixels_per_point();
         let max_rect = self.allocate_area_for_root_node(ui, surf_index);
         for node in order.iter().copied() {
             let path = NodePath::new(surf_index, node);
-            if self.dock_state[path].is_parent() {
+            if hidden.contains(&node) {
+                // The one thing the pass does with a hidden node, and it is not "nothing":
+                // last frame's rectangle has to go, or drawing — which asks the layout instead
+                // of deciding for itself — will keep finding the subtree where it used to be.
+                self.layout.forget(path);
+            } else if self.dock_state[path].is_parent() {
                 self.compute_rect_sizes(pixels_per_point, path, max_rect);
             }
         }
@@ -701,6 +712,16 @@ impl<Tab> DockArea<'_, Tab> {
     /// to bring the geometry map back in step with the new shape right there — see the note
     /// on staleness in that function.
     fn compute_rect_sizes(&mut self, pixels_per_point: f32, path: NodePath, max_rect: Rect) {
+        // A side put away as a unit is one bar for whatever it contains: there are no children
+        // to cut it into, and therefore no line between them. Said out loud rather than left to
+        // the branch not running, because "no divider" is an answer that has to *arrive* — the
+        // entry outlives the frame, so a split that stops answering keeps the line it drew
+        // before it was stowed, lying across the strip it has become.
+        if self.dock_state[path].is_stowed() {
+            self.layout.set_divider(path, None);
+            return;
+        }
+
         let [left_path, right_path] = self.child_paths(path);
         let cut = self.cut_split(pixels_per_point, path, max_rect);
 
@@ -712,6 +733,19 @@ impl<Tab> DockArea<'_, Tab> {
         if let Some((child, side)) = cut.side_strip {
             self.layout.set_side_strip(child, side);
         }
+    }
+
+    /// Whether this child, being collapsed, can be squeezed into a strip one tab bar wide.
+    ///
+    /// Two things can: a **leaf**, because a collapsed leaf *is* a single tab bar, and a split
+    /// that was **stowed** — put away as a unit, which draws one bar for whatever it contains
+    /// (see [`SplitNode::stowed`](crate::SplitNode::stowed)). What cannot is a split that is
+    /// merely fully collapsed, one leaf at a time: that is rows of tab bars, and rows do not fit
+    /// in a strip. The distinction is the whole reason stowing is state of its own rather than
+    /// "all my leaves happen to be collapsed" — the two look alike to
+    /// [`Node::is_collapsed`](crate::Node::is_collapsed) and differ exactly here.
+    fn fits_in_a_strip(&self, path: NodePath) -> bool {
+        self.dock_state[path].is_leaf() || self.dock_state[path].is_stowed()
     }
 
     /// How this split is cut this frame: the two children, the divider if there is one to draw,
@@ -795,8 +829,7 @@ impl<Tab> DockArea<'_, Tab> {
         //
         // Three conditions, and each one is what keeps the hole from coming back:
         //
-        // * only a **leaf** — a collapsed split is rows of tab bars, and rows do not fit in a
-        //   strip a tab bar wide;
+        // * only something that **fits in a strip** — see `fits_in_a_strip`;
         // * only when the **sibling is open** — squeeze both and the width they gave up has
         //   nobody to go to, which is the hole again;
         // * only with the knob on, because this reverses a decision users' layouts already
@@ -805,9 +838,9 @@ impl<Tab> DockArea<'_, Tab> {
             && self.dock_state[path.surface][path.node].is_horizontal()
             && let Some(side) = {
                 let left_strips =
-                    left_collapsed && !right_collapsed && self.dock_state[left_path].is_leaf();
+                    left_collapsed && !right_collapsed && self.fits_in_a_strip(left_path);
                 let right_strips =
-                    right_collapsed && !left_collapsed && self.dock_state[right_path].is_leaf();
+                    right_collapsed && !left_collapsed && self.fits_in_a_strip(right_path);
                 match (left_strips, right_strips) {
                     (true, false) => Some(SideStrip::Left),
                     (false, true) => Some(SideStrip::Right),

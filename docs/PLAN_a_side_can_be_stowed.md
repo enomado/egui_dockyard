@@ -1,8 +1,8 @@
 # Plan: a side can be stowed
 
-**Status: stage 1 of 5 done** — the model, commit `e71f06e`, pushed. Stages 2–5 (layout, the
-strip itself, the gesture, the oracles) are open and described below. Entry point for whoever
-picks this up: this file, then [`SplitNode::stowed`](../src/core/tree/node/split.rs),
+**Status: stages 1–2 of 5 done** — the model (`e71f06e`) and the layout. Stages 3–5 (the strip
+itself, the gesture, the oracles for those two) are open and described below. Entry point for
+whoever picks this up: this file, then [`SplitNode::stowed`](../src/core/tree/node/split.rs),
 `Tree::set_split_stowed`, and the sibling plan
 [a collapsed leaf can hide sideways](PLAN_a_collapsed_leaf_can_hide_sideways.md), which this
 extends and whose boundaries it removes.
@@ -61,17 +61,31 @@ asserted by `the_generator_reaches_what_the_properties_assume`, and
 `round_trip_keeps_a_subtree_stowed_and_its_insides_untouched` states the whole point of the
 decision above — the subtree comes back stowed, one row, insides untouched.
 
-### 2. Layout and traversal
+### 2. Layout and traversal — **done, `<stage 2>`**
 
-* `cut_split`: the sideways branch currently requires the collapsed child to be a **leaf**
-  (`is_leaf()`). It becomes "collapsed, leaf or stowed split". The `SplitCut` shape means the
-  divider question is answered by construction.
-* The subtree of a stowed split must not be laid out or drawn at all. Today all three passes in
-  `show_surface` walk one flat `breadth_first` order; they need to skip a stowed subtree — a set
-  of hidden ids collected during the layout pass, since parents come before children there.
-  Watch for: an inner split of a stowed side would otherwise get a divider *inside the strip*.
-* A stowed side under a *vertical* parent is a single bar, not a strip — that already follows
-  from the row count being 1, but it is an assertion worth writing.
+`fits_in_a_strip` replaces the inline `is_leaf()` in the sideways branch of `cut_split`: a
+collapsed leaf *or* a stowed split, and the comment says why a merely fully-collapsed split
+still cannot. `Tree::stowed_away` answers "what is inside a side that was put away", at any
+depth, off the same parents-before-children order the layout already walks.
+
+The subtree is not skipped by the two drawing passes — it is **taken off the map**. Pass one
+lays out what is on screen and calls `DockLayout::forget` on what is not; drawing already asks
+the layout instead of deciding for itself, so "no entry" is the answer it needs, and it is the
+same answer a node that was never shown gives. Skipping in passes two and three as well would
+have been a guard that cannot be made to fail. `compute_rect_sizes` still *says* a stowed split
+has no divider rather than falling silent, because entries outlive their frame: a split that
+stops answering keeps the line it drew before it was stowed, lying across the strip it has
+become.
+
+What the third bullet of the old plan wanted — a stowed side under a *vertical* parent is one
+bar, not a strip — needed no code: it is `update_split_collapsed` answering 1 arriving at the
+existing collapsed-rows branch. It is an assertion now.
+
+Oracles: `tests/a_side_can_be_stowed.rs`, five of them, each verified by mutation —
+`fits_in_a_strip` back to `is_leaf()`, the `forget` removed, the `set_divider(None)` removed.
+The one that catches a leftover entry asks it of a context that has already drawn the side
+**open**; from a fresh context the subtree has no entries and every assertion passes without the
+layout doing anything.
 
 ### 3. The strip for a subtree
 

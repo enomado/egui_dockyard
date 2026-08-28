@@ -64,12 +64,16 @@ enum NodeOut<'a, Tab> {
         fraction: f32,
         fully_collapsed: bool,
         collapsed_leaf_count: i32,
+        /// Unlike the two above, this one is **read back**: a stowed subtree is a decision the
+        /// user made, not a number derived from the leaves. See `SplitNode::stowed`.
+        stowed: bool,
         children: [Box<NodeOut<'a, Tab>>; 2],
     },
     Horizontal {
         fraction: f32,
         fully_collapsed: bool,
         collapsed_leaf_count: i32,
+        stowed: bool,
         children: [Box<NodeOut<'a, Tab>>; 2],
     },
 }
@@ -100,11 +104,13 @@ fn node_out<Tab>(tree: &Tree<Tab>, id: NodeId) -> NodeOut<'_, Tab> {
             let fraction = split.fraction;
             let fully_collapsed = split.fully_collapsed;
             let collapsed_leaf_count = split.collapsed_leaf_count;
+            let stowed = split.stowed;
             if node.is_vertical() {
                 NodeOut::Vertical {
                     fraction,
                     fully_collapsed,
                     collapsed_leaf_count,
+                    stowed,
                     children,
                 }
             } else {
@@ -112,6 +118,7 @@ fn node_out<Tab>(tree: &Tree<Tab>, id: NodeId) -> NodeOut<'_, Tab> {
                     fraction,
                     fully_collapsed,
                     collapsed_leaf_count,
+                    stowed,
                     children,
                 }
             }
@@ -210,10 +217,17 @@ enum NodeIn<Tab> {
     // numbers follow from `Leaf::collapsed`, which is read.
     Vertical {
         fraction: f32,
+        /// Genuine state, so unlike its neighbours on disk it is read rather than recomputed.
+        /// `default` covers every file written before stowing existed: those subtrees were not
+        /// put away, which is exactly what `false` says.
+        #[serde(default)]
+        stowed: bool,
         children: [Box<NodeIn<Tab>>; 2],
     },
     Horizontal {
         fraction: f32,
+        #[serde(default)]
+        stowed: bool,
         children: [Box<NodeIn<Tab>>; 2],
     },
 }
@@ -323,14 +337,30 @@ impl<Tab> Tree<Tab> {
                     collapsed,
                 ))
             }
-            NodeIn::Vertical { fraction, children } | NodeIn::Horizontal { fraction, children } => {
+            NodeIn::Vertical {
+                fraction,
+                stowed,
+                children,
+            }
+            | NodeIn::Horizontal {
+                fraction,
+                stowed,
+                children,
+            } => {
                 let [left, right] = children;
                 let left = self.build(*left);
                 let right = self.build(*right);
                 match (left, right) {
                     (Some(left), Some(right)) => {
-                        Some(self.adopt_split(vertical, [left, right], fraction))
+                        let id = self.adopt_split(vertical, [left, right], fraction);
+                        // Before the collapsing sweep the caller runs afterwards, which reads
+                        // this to decide the split's row count.
+                        self[id].set_stowed(stowed);
+                        Some(id)
                     }
+                    // A split that lost a child is not a split any more, and the survivor takes
+                    // its place — so there is nothing left to be stowed, and `stowed` is dropped
+                    // rather than carried onto a node that never had it.
                     (Some(only), None) | (None, Some(only)) => Some(only),
                     (None, None) => None,
                 }
@@ -682,6 +712,50 @@ mod tests {
             .filter_map(|id| back[id].get_split().map(|split| split.fraction))
             .collect();
         assert_eq!(fractions, vec![0.25, 0.75]);
+    }
+
+    /// A stowed subtree is state, so it survives a save — and the leaves inside it come back
+    /// exactly as they were, which is the entire reason stowing is a field of its own rather
+    /// than "collapse everything inside".
+    ///
+    /// The collapsing numbers around it are *not* state and are recomputed on load; this
+    /// asserts the row count lands on 1 as well, because that is the number the layout reads
+    /// and it is derived from a field that now has to be read back before the sweep runs.
+    #[test]
+    fn round_trip_keeps_a_subtree_stowed_and_its_insides_untouched() {
+        let mut tree = sample();
+        let root = tree.root().unwrap();
+        let [_, right] = tree[root].get_split().unwrap().children();
+        // A leaf collapsed *inside* what is about to be put away: the state that "collapse
+        // every leaf" would have destroyed and cannot tell apart afterwards.
+        let [inner_top, _] = tree[right].get_split().unwrap().children();
+        tree.set_leaf_collapsed(inner_top, true);
+        tree.set_split_stowed(right, true);
+
+        let json = serde_json::to_string(&tree).unwrap();
+        let back: Tree<String> = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.validate(), Ok(()));
+        assert_eq!(shape(&back), shape(&tree));
+
+        let root = back.root().unwrap();
+        let [_, right] = back[root].get_split().unwrap().children();
+        assert!(back[right].is_stowed(), "the subtree came back put away");
+        assert_eq!(
+            back[right].collapsed_leaf_count(),
+            1,
+            "one bar, one row — recomputed on load from the field that was read back"
+        );
+
+        let [inner_top, inner_bottom] = back[right].get_split().unwrap().children();
+        assert!(
+            back[inner_top].is_collapsed(),
+            "the leaf that was collapsed inside is still collapsed"
+        );
+        assert!(
+            !back[inner_bottom].is_collapsed(),
+            "and the one that was not, is not — stowing did not touch either"
+        );
     }
 
     /// The focus history is state, so it has to survive a save. It is written as positions

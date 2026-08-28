@@ -96,10 +96,35 @@ impl<Tab> Node<Tab> {
 
     /// Returns `true` if the node is collapsed, otherwise `false`.
     #[inline(always)]
+    /// Whether this node shows a bar instead of its contents — which is the question every
+    /// caller here is really asking, and why a stowed split answers yes as readily as one whose
+    /// leaves were collapsed one by one. How it got that way is [`SplitNode::stowed`]'s
+    /// business, and matters only when bringing it back.
     pub fn is_collapsed(&self) -> bool {
         match self {
             Node::Leaf(leaf) => leaf.collapsed,
-            Node::Horizontal(split) | Node::Vertical(split) => split.fully_collapsed,
+            Node::Horizontal(split) | Node::Vertical(split) => {
+                split.stowed || split.fully_collapsed
+            }
+        }
+    }
+
+    /// Whether this node is a split that was put away as a unit — see [`SplitNode::stowed`].
+    ///
+    /// Always `false` for a leaf: a leaf has nothing inside to keep, so collapsing it is the
+    /// whole of what can happen to it.
+    pub fn is_stowed(&self) -> bool {
+        match self {
+            Node::Leaf(_) => false,
+            Node::Horizontal(split) | Node::Vertical(split) => split.stowed,
+        }
+    }
+
+    /// Puts this split away as a unit, or brings it back. No-op on a leaf.
+    pub(crate) fn set_stowed(&mut self, stowed: bool) {
+        match self {
+            Node::Leaf(_) => {}
+            Node::Horizontal(split) | Node::Vertical(split) => split.stowed = stowed,
         }
     }
 

@@ -21,9 +21,29 @@ pub struct SplitNode {
     pub fraction: f32,
 
     /// Whether all subnodes are collapsed.
+    ///
+    /// Derived from the two children, and **not** the same question as [`Self::stowed`]: this
+    /// one is "everything inside happens to be collapsed", arrived at one leaf at a time.
     pub fully_collapsed: bool,
 
+    /// Whether this split was put away **as a unit** — the whole subtree hidden behind one
+    /// arrow, rather than each of its leaves collapsed in turn.
+    ///
+    /// Genuine state, and the only collapsing state a split has of its own: everything else
+    /// here is derived from the children. That is the point of it. Putting a side away could
+    /// have been expressed as "collapse all of its leaves", which needs no new field — but then
+    /// bringing it back has nothing to bring back *to*, and a leaf the user had collapsed inside
+    /// it days ago would return expanded. A subtree that is stowed keeps its insides exactly as
+    /// they were, for the same reason a hidden half keeps its `fraction`.
+    ///
+    /// Serialized (`#[serde(default)]`), so layouts written before this existed load as "not
+    /// stowed", which is what they were.
+    pub stowed: bool,
+
     /// The number of collapsed leaf subnodes.
+    ///
+    /// One for a [`stowed`](Self::stowed) split whatever it contains: it draws a single bar,
+    /// so a single row is what it costs. See `Tree::update_split_collapsed`.
     pub collapsed_leaf_count: i32,
 }
 
@@ -43,6 +63,7 @@ impl SplitNode {
             children,
             fraction,
             fully_collapsed: false,
+            stowed: false,
             collapsed_leaf_count: 0,
         }
     }

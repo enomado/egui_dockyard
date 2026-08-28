@@ -56,6 +56,7 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         (0u8..8, 0u8..4).prop_map(|(leaf, tab)| Op::SetActive { leaf, tab }),
         (0u8..8).prop_map(|leaf| Op::Focus { leaf }),
         (0u8..8).prop_map(|leaf| Op::ToggleCollapsed { leaf }),
+        (0u8..8).prop_map(|split| Op::ToggleStowed { split }),
         Just(Op::PushToFocused),
         (0u8..8, 0u8..4).prop_map(|(leaf, tab)| Op::Detach { leaf, tab }),
         (0u8..3).prop_map(|tabs| Op::AddWindow { tabs }),
@@ -178,7 +179,11 @@ proptest! {
                 for id in tree.breadth_first() {
                     let Some(split) = tree[id].get_split() else { continue };
                     let [left, right] = split.children();
-                    let expected_count = if tree[id].is_horizontal() {
+                    // A stowed split draws one bar for whatever it contains, so it costs one
+                    // row — the children's counts stop being the question.
+                    let expected_count = if split.stowed {
+                        1
+                    } else if tree[id].is_horizontal() {
                         tree[left].collapsed_leaf_count().max(tree[right].collapsed_leaf_count())
                     } else {
                         tree[left].collapsed_leaf_count() + tree[right].collapsed_leaf_count()
@@ -330,6 +335,7 @@ fn the_generator_reaches_what_the_properties_assume() {
     let mut cross_surface_moves = 0usize;
     let mut tabs_lived_in_windows = 0usize;
     let mut collapsed_trees = 0usize;
+    let mut stowed_splits = 0usize;
     let mut copying_sweeps = 0usize;
 
     for seed in 0u64..32 {
@@ -375,6 +381,15 @@ fn the_generator_reaches_what_the_properties_assume() {
                     .filter_map(|(_, surface)| surface.node_tree())
                     .any(|tree| tree.collapsed_leaf_count() > 0),
             );
+            // A subtree actually put away — the only scene in which the stowed branch of the
+            // row-count formula is the one that answers. Collapsing leaves cannot reach it,
+            // however many are collapsed, which is why it is counted separately from the
+            // line above.
+            stowed_splits += usize::from(
+                dock_state
+                    .iter_all_nodes()
+                    .any(|(_, node)| node.is_stowed()),
+            );
             copying_sweeps += usize::from(rebuilds_identities(op));
         }
     }
@@ -399,6 +414,11 @@ fn the_generator_reaches_what_the_properties_assume() {
         collapsed_trees > 0,
         "nothing was ever collapsed — every count `collapsed_counts_stay_derived` compares \
          would be zero on both sides"
+    );
+    assert!(
+        stowed_splits > 0,
+        "no subtree was ever stowed — the stowed branch of the row count in \
+         `collapsed_counts_stay_derived` was never the one that answered"
     );
     assert!(
         copying_sweeps > 0,

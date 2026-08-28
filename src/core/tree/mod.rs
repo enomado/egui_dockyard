@@ -901,6 +901,30 @@ impl<Tab> Tree<Tab> {
         self.node_update_collapsed(node);
     }
 
+    /// Puts a whole split away behind one arrow, or brings it back — see
+    /// [`SplitNode::stowed`](crate::SplitNode::stowed).
+    ///
+    /// Nothing inside is touched, which is the difference from collapsing each of its leaves:
+    /// a subtree comes back exactly as it went away.
+    ///
+    /// # Panics
+    ///
+    /// If `node` is not a split. Stowing is a decision about a *subtree*; a leaf has no insides
+    /// to keep, and asking this of one is a caller confusing it with
+    /// [`Self::set_leaf_collapsed`].
+    pub fn set_split_stowed(&mut self, node: NodeId, stowed: bool) {
+        assert!(
+            self[node].is_parent(),
+            "set_split_stowed on a node that is not a split: stowing puts a subtree away, and a \
+             leaf has none — use set_leaf_collapsed"
+        );
+        self[node].set_stowed(stowed);
+        // The split's own bookkeeping first — its row count is now 1 (or back to its children's)
+        // — and then every ancestor, which is what `node_update_collapsed` walks.
+        self.update_split_collapsed(node);
+        self.node_update_collapsed(node);
+    }
+
     /// Sets the collapsing state of the [`Tree`].
     pub(crate) fn set_collapsed(&mut self, collapsed: bool) {
         self.collapsed = collapsed;
@@ -937,9 +961,13 @@ impl<Tab> Tree<Tab> {
             .expect("update_split_collapsed on a node that is not a split");
         let left_count = self[left].collapsed_leaf_count();
         let right_count = self[right].collapsed_leaf_count();
+        // A stowed split draws one bar for the whole subtree, so it costs one row whatever is
+        // inside — asked first, because the arithmetic below is about a subtree that is *shown*.
+        let count = if self[split].is_stowed() {
+            1
         // A horizontal split stacks its children side by side, so the collapsed rows
         // overlap; a vertical one stacks them, so they add up.
-        let count = if self[split].is_horizontal() {
+        } else if self[split].is_horizontal() {
             max(left_count, right_count)
         } else {
             left_count + right_count

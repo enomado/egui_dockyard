@@ -96,6 +96,16 @@ pub enum Op {
         /// Which live leaf.
         leaf: u8,
     },
+    /// Put a whole split away behind one arrow, or bring it back — the Shift half of the
+    /// collapse button.
+    ///
+    /// A separate op rather than a flag on the one above, because it is a decision about a
+    /// *subtree* and touches nothing inside it: the two reach different states, and a property
+    /// about the row count of a stowed split cannot be reached by collapsing leaves at all.
+    ToggleStowed {
+        /// Which live split.
+        split: u8,
+    },
     /// Push a tab to the focused leaf. One of the two ops that can rebuild an emptied dock.
     PushToFocused,
     /// Pull a tab out into its own window — the gesture that creates a surface by hand.
@@ -171,6 +181,7 @@ pub fn tab_count_rule(op: Op) -> TabCountRule {
         | Op::SetActive { .. }
         | Op::Focus { .. }
         | Op::ToggleCollapsed { .. }
+        | Op::ToggleStowed { .. }
         | Op::Remap => TabCountRule::Unchanged,
     }
 }
@@ -372,6 +383,24 @@ pub fn apply(state: &mut DockState<u32>, op: Op, next_tab: &mut u32) -> Option<A
             let collapsed = state[path].is_collapsed();
             state[path.surface].set_leaf_collapsed(path.node, !collapsed);
             // Collapsing hides a leaf's tabs; it does not touch which tabs are where.
+            vec![]
+        }
+
+        Op::ToggleStowed { split } => {
+            // Splits, unlike leaves, are not in `live` — a dock can be all leaf and have none,
+            // in which case the step is skipped rather than aimed somewhere else.
+            let splits: Vec<NodePath> = state
+                .iter_all_nodes()
+                .filter(|(_, node)| node.is_parent())
+                .map(|(path, _)| path)
+                .collect();
+            if splits.is_empty() {
+                return None;
+            }
+            let path = splits[usize::from(split) % splits.len()];
+            let stowed = state[path].is_stowed();
+            state[path.surface].set_split_stowed(path.node, !stowed);
+            // Putting a subtree away hides tabs; it does not move any.
             vec![]
         }
 

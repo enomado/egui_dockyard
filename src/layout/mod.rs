@@ -79,6 +79,28 @@ pub struct NodeGeometry {
     /// the width would turn that into a strip behind their back. The layout pass knows the
     /// answer — it is the one that made the decision — so it says so here.
     pub side_strip: Option<SideStrip>,
+
+    /// Where this split's divider ended up: the line drawn between the two children and,
+    /// expanded a little, the one the user grabs to move the boundary. [`None`] for anything
+    /// that is not a split, and for a split the pass did **not** cut at its ratio.
+    ///
+    /// That second case is the whole reason this lives here rather than being re-derived by
+    /// drawing. A collapsed half is given exactly the strip it needs and the divider is put
+    /// *beside* it, so there is no line at the ratio: one drawn there would lie across the
+    /// sibling, over space that child owns — visible, grabbable, moving nothing. Worse,
+    /// grabbing a divider *writes* the ratio, which is precisely what the hidden half is
+    /// keeping for when it comes back.
+    ///
+    /// The pass already computes this rectangle in every branch; it used to throw it away and
+    /// let drawing work it out again, together with a "is there one at all?" rule that then had
+    /// to be repeated everywhere and drifted the moment a branch was added. Now the branch that
+    /// cuts the split is the one that says what it cut, and the field is not optional to fill:
+    /// see `SplitCut` in `show/mod.rs`.
+    ///
+    /// Note that a divider always occupies *space* — the layout leaves `separator.width`
+    /// between a strip and its sibling either way. [`None`] means there is no line to paint or
+    /// to hit-test, not that the two children are flush.
+    pub divider: Option<Rect>,
 }
 
 /// Geometry of every node of a [`DockState`], as computed by the last layout pass.
@@ -140,6 +162,14 @@ impl DockLayout {
             .and_then(|geometry| geometry.side_strip)
     }
 
+    /// Where this split's divider was drawn this frame, or [`None`] if it has none — see
+    /// [`NodeGeometry::divider`] for what "none" means and why the answer is stored rather
+    /// than worked out by whoever asks.
+    #[inline]
+    pub fn divider(&self, path: NodePath) -> Option<Rect> {
+        self.nodes.get(&path).and_then(|geometry| geometry.divider)
+    }
+
     /// Number of nodes with known geometry.
     #[inline]
     pub fn len(&self) -> usize {
@@ -154,12 +184,22 @@ impl DockLayout {
 
     /// Record the rectangle of a node, keeping any viewport already known for it.
     ///
-    /// Clears [`NodeGeometry::side_strip`], which is the whole reason that flag is safe to
-    /// keep here. Entries outlive the frame that wrote them (see the module docs), so a flag
-    /// that were only ever *set* would survive the leaf being expanded again and draw a strip
-    /// forever. Every laid-out node gets its rectangle written on every pass, so clearing it
-    /// here means the flag can only ever describe this frame: the sideways path re-asserts it
-    /// immediately after, and nothing else has to remember to take it back.
+    /// Clears [`NodeGeometry::side_strip`], which is the whole reason that flag is safe to keep
+    /// here. Entries outlive the frame that wrote them (see the module docs), so a flag that were
+    /// only ever *set* would survive the leaf being expanded again and draw a strip forever.
+    /// Every laid-out node gets its rectangle written on every pass, so clearing it here means
+    /// the flag can only ever describe this frame: the sideways path re-asserts it immediately
+    /// after, and nothing else has to remember to take it back.
+    ///
+    /// [`NodeGeometry::divider`] is deliberately **not** cleared here, and the asymmetry is the
+    /// point rather than an oversight. `set_side_strip` is called only when there *is* a strip,
+    /// so its absence has to be spelled somewhere; [`Self::set_divider`] takes an [`Option`] and
+    /// is called for every split on every pass, so the absence of a divider is itself an answer
+    /// that arrives. The only other way an entry could go stale is the node ceasing to be a
+    /// split — and a split does not become a leaf, it is *removed* and the surviving child takes
+    /// its place, after which [`Self::retain_live`] drops the entry. Clearing here as well would
+    /// be a guard against nothing, which is worse than none: it cannot be made to fail, so it
+    /// would read as load-bearing forever.
     #[inline]
     pub(crate) fn set_rect(&mut self, path: NodePath, rect: Rect) {
         self.nodes
@@ -172,7 +212,21 @@ impl DockLayout {
                 rect,
                 viewport: None,
                 side_strip: None,
+                divider: None,
             });
+    }
+
+    /// Record where this split's divider was cut, or that it has none.
+    ///
+    /// Takes an [`Option`] rather than being a "set it if there is one" call, and that is the
+    /// point: every branch of the layout pass answers this question, so the answer arrives here
+    /// whichever way it came out. A setter that could simply not be called would put the branch
+    /// that forgets back on the map.
+    #[inline]
+    pub(crate) fn set_divider(&mut self, path: NodePath, divider: Option<Rect>) {
+        if let Some(geometry) = self.nodes.get_mut(&path) {
+            geometry.divider = divider;
+        }
     }
 
     /// Mark a leaf as a sideways collapsed strip against `side`.
@@ -200,6 +254,7 @@ impl DockLayout {
                 rect: viewport,
                 viewport: Some(viewport),
                 side_strip: None,
+                divider: None,
             });
     }
 

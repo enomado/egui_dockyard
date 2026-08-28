@@ -1425,8 +1425,15 @@ impl Sim {
     /// focus move nobody had asked for.
     ///
     /// Splits whose children abut with no gap are left out, and so are the ones whose separator
-    /// the dock does not draw at all (a vertical split with a collapsed child): a press there is
-    /// not "a separator grab that did nothing", it is a press on whatever lies underneath.
+    /// the dock does not draw at all: a press there is not "a separator grab that did nothing",
+    /// it is a press on whatever lies underneath.
+    ///
+    /// Which splits those are is **asked of the dock**, through `DockLayout::divider`, and not
+    /// restated here. This harness used to carry its own copy of the rule ("a vertical split with
+    /// a collapsed child"), which was true when it was written and silently wrong the moment a
+    /// second way to cut a split without a divider was added — the same drift, in a fourth place,
+    /// that the crate's own copies suffered. A sweep that reproduces the rule cannot catch the
+    /// rule being wrong.
     fn separators(&self) -> Vec<(NodePath, Pos2, f32)> {
         let layout = self.layout();
         self.state
@@ -1437,12 +1444,7 @@ impl Sim {
 
                 let [first, second] = self.state[path.surface].children(path.node)?;
                 let child_path = |child: NodeId| NodePath::new(path.surface, child);
-                if vertical
-                    && (self.state[child_path(first)].is_collapsed()
-                        || self.state[child_path(second)].is_collapsed())
-                {
-                    return None;
-                }
+                layout.divider(path)?;
 
                 let before = layout.get(child_path(first))?.rect;
                 let after = layout.get(child_path(second))?.rect;

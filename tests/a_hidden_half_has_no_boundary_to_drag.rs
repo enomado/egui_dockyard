@@ -229,6 +229,28 @@ fn dragging_where_the_divider_was_does_nothing() {
     );
 }
 
+/// A split that is drawn has a divider recorded for it, and a leaf never does.
+///
+/// Cheap, and it is what makes the `None` in the test above mean something: without it, a
+/// `divider` field that was simply never filled would satisfy every "there is no line here"
+/// assertion in this file.
+#[test]
+fn only_a_split_has_a_divider() {
+    let sim = Sim::two_columns();
+    let path = |node| NodePath::new(SurfaceIndex::main(), node);
+
+    assert!(
+        sim.layout().divider(path(sim.parent)).is_some(),
+        "the split was cut at its ratio, so there is a line between its children"
+    );
+    assert_eq!(
+        sim.layout().divider(path(sim.left)),
+        None,
+        "a leaf divides nothing"
+    );
+    assert_eq!(sim.layout().divider(path(sim.right)), None);
+}
+
 /// The positive control. Without it every assertion above would also pass if the drag simply
 /// never reached the dock — wrong coordinates, too few frames, a press that never became a
 /// drag — and the file would be pinning nothing at all.

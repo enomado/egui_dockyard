@@ -19,8 +19,7 @@ use crate::dock_area::tab_removal::ForcedRemoval;
 use crate::layout::{DockLayout, SideStrip};
 use crate::tab_viewer::OnCloseResponse;
 use crate::{
-    AllowedSplits, DockArea, Node, OverlayType, SeparatorStyle, Style, SurfaceIndex,
-    TabDestination, TabViewer,
+    AllowedSplits, DockArea, Node, OverlayType, Style, SurfaceIndex, TabDestination, TabViewer,
     utils::{expand_to_pixel, fade_dock_style, map_to_pixel},
 };
 
@@ -694,13 +693,36 @@ impl<Tab> DockArea<'_, Tab> {
     }
 
     /// Write the rectangles of `path`'s two children into [`Self::layout`], cutting them out
-    /// of the rectangle already recorded for `path` itself.
+    /// of the rectangle already recorded for `path` itself — along with *where the split was
+    /// cut*, which is what everything downstream reads instead of working it out again.
     ///
     /// Takes `pixels_per_point` rather than a [`Ui`] because it is also called from
     /// [`Self::transpose_cross_split`], which edits the tree in the middle of a pass and has
     /// to bring the geometry map back in step with the new shape right there — see the note
     /// on staleness in that function.
     fn compute_rect_sizes(&mut self, pixels_per_point: f32, path: NodePath, max_rect: Rect) {
+        let [left_path, right_path] = self.child_paths(path);
+        let cut = self.cut_split(pixels_per_point, path, max_rect);
+
+        self.layout.set_rect(left_path, cut.children[0]);
+        self.layout.set_rect(right_path, cut.children[1]);
+        // Unconditional, both of them: a branch cannot leave a stale answer behind by saying
+        // nothing, because `SplitCut` made it say something.
+        self.layout.set_divider(path, cut.divider);
+        if let Some((child, side)) = cut.side_strip {
+            self.layout.set_side_strip(child, side);
+        }
+    }
+
+    /// How this split is cut this frame: the two children, the divider if there is one to draw,
+    /// and which child (if any) became a sideways strip.
+    ///
+    /// One value with three fields rather than three branches that each write what they
+    /// remember to: adding a fourth way to cut a split now means filling this in, and the
+    /// compiler says so. The bug that motivated the shape was exactly the other arrangement —
+    /// a branch was added here, and the "is there a divider?" rule, written out separately in
+    /// the code that draws, kept answering for the branches that existed when it was written.
+    fn cut_split(&mut self, pixels_per_point: f32, path: NodePath, max_rect: Rect) -> SplitCut {
         assert!(self.dock_state[path].is_parent());
 
         let style = self.style.as_ref().unwrap();
@@ -751,9 +773,13 @@ impl<Tab> DockArea<'_, Tab> {
             let right = rect
                 .intersect(Rect::everything_below(right_separator_border))
                 .intersect(max_rect);
-            self.layout.set_rect(left_path, left);
-            self.layout.set_rect(right_path, right);
-            return;
+            return SplitCut {
+                children: [left, right],
+                // Cut at the strip's edge, not at the ratio — so the line the ratio names is
+                // not a boundary between anything, and there is nothing to draw or to grab.
+                divider: None,
+                side_strip: None,
+            };
         }
 
         // The mirror of the case above, one axis over: a leaf collapsed *sideways* gives up
@@ -812,18 +838,19 @@ impl<Tab> DockArea<'_, Tab> {
             let right = rect
                 .intersect(Rect::everything_right_of(right_separator_border))
                 .intersect(max_rect);
-            self.layout.set_rect(left_path, left);
-            self.layout.set_rect(right_path, right);
-            // After `set_rect`, which is what clears the previous frame's answer.
-            self.layout.set_side_strip(
-                if side == SideStrip::Left {
-                    left_path
-                } else {
-                    right_path
-                },
-                side,
-            );
-            return;
+            return SplitCut {
+                children: [left, right],
+                // Same as the case above, one axis over.
+                divider: None,
+                side_strip: Some((
+                    if side == SideStrip::Left {
+                        left_path
+                    } else {
+                        right_path
+                    },
+                    side,
+                )),
+            };
         }
 
         duplicate! {
@@ -863,10 +890,24 @@ impl<Tab> DockArea<'_, Tab> {
                     let right = rect.intersect(Rect::[<everything_ right_of>](right_separator_border)).intersect(max_rect);
                 }
 
-                self.layout.set_rect(left_path, left);
-                self.layout.set_rect(right_path, right);
+                // The line between the two borders just computed, across the whole of the
+                // node the other way. This is the *only* derivation of it in the crate now:
+                // it used to be worked out here for the children's sake, thrown away, and
+                // then worked out a second time by `separator_rect` for drawing — two copies
+                // of one arithmetic, which the comment there already warned had drifted once.
+                let mut divider = rect;
+                divider.min.dim_point = left_separator_border;
+                divider.max.dim_point = right_separator_border;
+
+                return SplitCut {
+                    children: [left, right],
+                    divider: Some(divider),
+                    side_strip: None,
+                };
             }
         }
+
+        unreachable!("a parent node is either horizontal or vertical, and this one is a parent")
     }
 
     /// The rectangle the divider of the split at `path` is drawn in — and, expanded by
@@ -874,89 +915,23 @@ impl<Tab> DockArea<'_, Tab> {
     /// grabbed by.
     ///
     /// `None` where there is no divider on screen to speak of: a node that is not a split, one
-    /// the layout pass has no rectangle for, or a split cut at a strip's edge rather than at its
-    /// ratio — see [`Self::separator_is_suppressed`], which `show_separator` asks the same
-    /// question of before it draws or hit-tests anything.
+    /// the layout pass has no rectangle for, or a split it cut at a strip's edge rather than at
+    /// its ratio. See [`NodeGeometry::divider`](crate::NodeGeometry::divider) for that last one.
     ///
-    /// A function, and the only derivation of this rectangle in the crate, for the reason
-    /// [`split_rect`] gives: the drawn divider, the rectangle it is grabbed by, and anything
-    /// that needs to know where it *is* have to name the same line. The third of those is new —
-    /// the cross-split button is sized by how close the nearest other divider is (see
-    /// `DockArea::toggle_room`) — and re-deriving it there would have been the third copy of an
-    /// arithmetic that has already drifted once.
-    /// Whether this split has no divider on screen this frame.
+    /// A lookup rather than a derivation, and that is the whole point of the field. The painted
+    /// divider, the rectangle it is grabbed by, the cross-split button sized by how close the
+    /// nearest other divider is (`DockArea::toggle_room`) and the sweep in `tests/dst.rs` all
+    /// have to name the same line, and the way to make that true is for one place to decide
+    /// where it is. That place is the layout pass, which cannot avoid deciding: cutting the two
+    /// children *is* choosing the line between them. It used to compute the line, throw it away,
+    /// and leave this function to compute it again from the ratio — along with a separate rule
+    /// for whether there was one at all, which is the copy that drifted when the sideways branch
+    /// was added.
     ///
-    /// A divider is drawn *at the split's ratio*, and that is only honest while the layout pass
-    /// cut the split at that ratio too. Both collapsed cases cut it somewhere else — at the edge
-    /// of the strip the collapsed side shrank to — so a divider drawn at the ratio would be a
-    /// line lying across a child that owns the space under it: visible, grabbable, and attached
-    /// to nothing. Worse, grabbing it *writes* the ratio, so the fraction the collapsed side is
-    /// keeping for when it expands would be edited while it is not even on screen.
-    ///
-    /// The two cases are asked differently on purpose:
-    ///
-    /// * **vertical** — read off the tree, because the layout branch is unconditional there: any
-    ///   collapsed child is squeezed into rows;
-    /// * **horizontal** — read off the *layout*, because whether a leaf became a strip is a
-    ///   decision with three conditions (the knob, a leaf rather than a split, an open sibling)
-    ///   and `compute_rect_sizes` is the one that makes it. Re-deriving those conditions here
-    ///   would be a second copy that drifts — which is exactly the bug this function fixes: the
-    ///   sideways branch was added to the layout, and this predicate, then written out twice
-    ///   inline, kept answering only for the vertical half.
-    fn separator_is_suppressed(&self, path: NodePath) -> bool {
-        let [left, right] = self.child_paths(path);
-
-        if self.dock_state[path].is_vertical()
-            && (self.dock_state[left].is_collapsed() || self.dock_state[right].is_collapsed())
-        {
-            return true;
-        }
-
-        self.layout.side_strip(left).is_some() || self.layout.side_strip(right).is_some()
-    }
-
-    pub(super) fn separator_rect(
-        &self,
-        path: NodePath,
-        separator: &SeparatorStyle,
-        pixels_per_point: f32,
-    ) -> Option<Rect> {
-        let node = &self.dock_state[path.surface][path.node];
-        let split = node.get_split()?;
-        let fraction = split.fraction;
-        let horizontal = node.is_horizontal();
-
-        if self.separator_is_suppressed(path) {
-            return None;
-        }
-
-        let rect = split_rect(self.layout.rect(path)?, pixels_per_point);
-        let (near, range) = if horizontal {
-            (rect.min.x, rect.width())
-        } else {
-            (rect.min.y, rect.height())
-        };
-        let midpoint = SeparatorBand::new(fraction, range, separator.extra).midpoint(near, range);
-        let low = map_to_pixel(
-            midpoint - separator.width * 0.5,
-            pixels_per_point,
-            f32::round,
-        );
-        let high = map_to_pixel(
-            midpoint + separator.width * 0.5,
-            pixels_per_point,
-            f32::round,
-        );
-
-        let mut drawn = rect;
-        if horizontal {
-            drawn.min.x = low;
-            drawn.max.x = high;
-        } else {
-            drawn.min.y = low;
-            drawn.max.y = high;
-        }
-        Some(drawn)
+    /// It also answers quietly for a path that names nothing, where indexing the tree here used
+    /// to panic (`no node 0.1 in this tree`, from a leaf closed mid-gesture at DST seed 1).
+    pub(super) fn separator_rect(&self, path: NodePath) -> Option<Rect> {
+        self.layout.divider(path)
     }
 
     fn show_separator(
@@ -968,12 +943,13 @@ impl<Tab> DockArea<'_, Tab> {
     ) {
         assert!(self.dock_state[path.surface][path.node].is_parent());
 
-        // A split the layout pass cut at a strip's edge has no divider to show or to grab —
-        // one question, asked in one place, because it used to be asked in two and the second
-        // copy was a case behind (see `separator_is_suppressed`).
-        if self.separator_is_suppressed(path) {
+        // Where the divider is *this frame*, as the layout pass recorded it — `None` when it
+        // cut the split at a strip's edge instead of at its ratio, and then there is nothing
+        // here to paint or to hit-test. Asking the geometry rather than re-deriving the rule is
+        // what keeps this from falling behind the next branch added to the layout.
+        let Some(drawn) = self.separator_rect(path) else {
             return;
-        }
+        };
 
         // Cloned out of `style` up front, and not where they are used: `style` may be borrowed
         // from `self.style`, while everything below that *writes* — `nudge_split`, the junction
@@ -987,13 +963,6 @@ impl<Tab> DockArea<'_, Tab> {
         // The frame this pass is, which is how a gesture in the field is told alive from stale —
         // see `DragInFlight::pass`.
         let pass = ui.ctx().cumulative_pass_nr();
-
-        // Where the divider is *this frame* — one derivation, shared with everything else that
-        // needs to know (see `separator_rect`). The collapsed cases it answers `None` for have
-        // already returned above.
-        let drawn = self
-            .separator_rect(path, &separator_style, pixels_per_point)
-            .expect("a separator is only drawn for a split the layout pass just cut");
 
         duplicate! {
             [
@@ -1349,6 +1318,32 @@ fn split_rect(node_rect: Rect, pixels_per_point: f32) -> Rect {
 /// lists go stale — but [`TreeViolation::SplitFractionOutOfRange`](crate::TreeViolation), which
 /// catches the arithmetic that answers outside the interval it was measuring, wherever it is
 /// written from.
+/// Everything the layout pass decided about one split, in one value.
+///
+/// The type exists to make a branch unable to stay silent. Cutting a split answers three
+/// questions at once — where the two children go, whether there is a divider between them and
+/// where, and whether one of them became a sideways strip — and they are *one* decision: the
+/// branch that gives a collapsed half exactly the strip it needs is the same branch that thereby
+/// leaves no line at the ratio. When each answer was written separately, wherever that branch
+/// happened to end, adding a branch meant remembering all three, and the sideways one remembered
+/// two. As fields, the compiler remembers for you.
+///
+/// Deliberately not `Option<Rect>` per child or a builder: there is no half-cut split, and
+/// nothing here is allowed to be "left as it was".
+#[derive(Clone, Copy, Debug)]
+struct SplitCut {
+    /// Rectangles of the two children, in [`DockArea::child_paths`] order.
+    children: [Rect; 2],
+
+    /// The line between them, or [`None`] if this cut left none — see
+    /// [`NodeGeometry::divider`](crate::NodeGeometry::divider).
+    divider: Option<Rect>,
+
+    /// The child squeezed to a sideways strip, and which edge it was pressed against, when this
+    /// cut made one.
+    side_strip: Option<(NodePath, SideStrip)>,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct SeparatorBand {
     /// Lowest fraction a gesture may write.

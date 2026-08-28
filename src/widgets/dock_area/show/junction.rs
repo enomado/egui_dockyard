@@ -513,13 +513,7 @@ impl<Tab> DockArea<'_, Tab> {
     /// one-sided distance, so at the limit the handle reaches half way to what it must not
     /// cover. Nothing in the default style comes near either bound — `separator.extra` keeps
     /// every part 175 px long, against a 38 px handle at its widest.
-    fn handle_room(
-        &self,
-        junctions: &Junctions,
-        index: usize,
-        separator: &SeparatorStyle,
-        pixels_per_point: f32,
-    ) -> f32 {
+    fn handle_room(&self, junctions: &Junctions, index: usize) -> f32 {
         let Junction { kind, center } = junctions.at[index];
         let surface = junctions.outer.surface;
         let own: Vec<NodeId> = std::iter::once(junctions.outer.node)
@@ -535,7 +529,7 @@ impl<Tab> DockArea<'_, Tab> {
                 continue;
             }
             let path = NodePath::new(surface, node);
-            let Some(divider) = self.separator_rect(path, separator, pixels_per_point) else {
+            let Some(divider) = self.separator_rect(path) else {
                 continue;
             };
             room = room.min(square_gap(divider, center));
@@ -701,15 +695,17 @@ impl<Tab> DockArea<'_, Tab> {
         state: &mut State,
     ) -> Grip {
         let pass = ui.ctx().cumulative_pass_nr();
-        let pixels_per_point = ui.ctx().pixels_per_point();
 
         // The subject can leave the tree under the hand — a leaf closed mid-gesture takes the
-        // splits above it with it — and this is where that is noticed. Asked of the tree *before*
-        // the geometry, because `separator_rect` indexes the node rather than looking it up and
-        // panics on a path that names nothing (`no node 0.1 in this tree`, which is how the sweep
-        // reported this at seed 1, step 16). Nothing is drawn and nothing is reported; the field's
-        // own liveness filter drops the gesture a pass later, which is the one divergence the
-        // harness checks rather than exempts.
+        // splits above it with it — and this is where that is noticed. It used to have to be
+        // asked of the tree *before* the geometry, because `separator_rect` indexed the node and
+        // panicked on a path that names nothing (`no node 0.1 in this tree`, which is how the
+        // sweep reported this at seed 1, step 16); now that it is a lookup in the geometry map,
+        // a dead path simply has no divider and the two `else` arms below cover it. The explicit
+        // check stays because it says what this is *about* — the subject died — rather than
+        // leaving that meaning to be inferred from a missing rectangle. Nothing is drawn and
+        // nothing is reported; the field's own liveness filter drops the gesture a pass later,
+        // which is the one divergence the harness checks rather than exempts.
         let divider = arms.first();
         if self.dock_state.node(outer).is_err()
             || arms
@@ -719,10 +715,10 @@ impl<Tab> DockArea<'_, Tab> {
         {
             return Grip::Idle;
         }
-        let Some(outer_rect) = self.separator_rect(outer, style, pixels_per_point) else {
+        let Some(outer_rect) = self.separator_rect(outer) else {
             return Grip::Idle;
         };
-        let Some(divider_rect) = self.separator_rect(divider, style, pixels_per_point) else {
+        let Some(divider_rect) = self.separator_rect(divider) else {
             return Grip::Idle;
         };
         // One coordinate from each line, which is what a junction *is* — and not the intersection
@@ -921,7 +917,7 @@ impl<Tab> DockArea<'_, Tab> {
         // scale: a junction with no space for the whole button offers no handle, and the
         // separators there are grabbed the ordinary way.
         let widest = toggle.widest();
-        let room = self.handle_room(junctions, index, style, ui.ctx().pixels_per_point());
+        let room = self.handle_room(junctions, index);
         if widest <= 0.0 || room < widest {
             return Grip::Idle;
         }

@@ -65,7 +65,16 @@ impl<Tab> DockArea<'_, Tab> {
         // a row of names scrolled along x, and there is no x to scroll along here. Asked, not
         // guessed from how narrow the rectangle is — see `NodeGeometry::side_strip`.
         if let Some(side) = self.layout.side_strip(path) {
-            self.side_strip(ui, path, fade_style.map(|(style, _)| style), side);
+            self.collapsed_bar(
+                ui,
+                path,
+                fade_style.map(|(style, _)| style),
+                Some(side),
+                DockMutation::SetLeafCollapsed {
+                    path,
+                    collapsed: false,
+                },
+            );
         } else {
             let tabbar_rect = self.tab_bar(
                 ui,
@@ -252,7 +261,18 @@ impl<Tab> DockArea<'_, Tab> {
             }
 
             if self.show_leaf_collapse_buttons {
-                self.tab_collapse(ui, path, tabbar_outer_rect, fade_style, collapsed, None)
+                self.tab_collapse(
+                    ui,
+                    path,
+                    tabbar_outer_rect,
+                    fade_style,
+                    collapsed,
+                    None,
+                    DockMutation::SetLeafCollapsed {
+                        path,
+                        collapsed: !collapsed,
+                    },
+                )
             }
 
             (tabs_ui.min_rect().width(), tab_hovered)
@@ -773,19 +793,28 @@ impl<Tab> DockArea<'_, Tab> {
         }
     }
 
-    /// Draws a leaf that was collapsed sideways: a strip of tab-bar background with the expand
-    /// arrow at the top of it, and no body.
+    /// Draws something that is collapsed down to one arrow and nothing else: a leaf squeezed
+    /// sideways into a strip, or a whole side stowed away.
+    ///
+    /// One function for both, because they draw the same thing. What differs is what the arrow
+    /// *means*, and that arrives as `on_toggle` rather than being worked out from the node —
+    /// the two edits address different kinds of node (`set_leaf_collapsed` panics on a split)
+    /// and only whoever put the arrow here knows which one this is.
+    ///
+    /// `side` is [`None`] when the parent is a vertical split: the collapsed thing spends height
+    /// there, so what it gets is an ordinary horizontal bar and the arrow points the usual way.
     ///
     /// The arrow is drawn whatever [`DockArea::show_leaf_collapse_buttons`] says. That knob is
     /// about the button on a *tab bar*, where hiding it leaves the tabs themselves to click
-    /// on; a strip has nothing else in it, so hiding the arrow there would leave the leaf with
-    /// no way back except in code.
-    fn side_strip(
+    /// on; a bar like this has nothing else in it, so hiding the arrow there would leave no way
+    /// back except in code.
+    fn collapsed_bar(
         &mut self,
         ui: &mut Ui,
         path: NodePath,
         fade_style: Option<&Style>,
-        side: SideStrip,
+        side: Option<SideStrip>,
+        on_toggle: DockMutation,
     ) {
         let style = fade_style.unwrap_or_else(|| self.style.as_ref().unwrap());
         let bar_height = style.tab_bar.height;
@@ -797,13 +826,68 @@ impl<Tab> DockArea<'_, Tab> {
 
         // `tab_collapse` cuts its button out of the top-left of what it is given, one
         // `TAB_COLLAPSE_BUTTON_SIZE` wide and as tall as the rectangle — so handing it the top
-        // `tab_bar.height` of the strip gives exactly the same square as on a tab bar, and the
-        // click goes down the same queued `SetLeafCollapsed` path.
+        // `tab_bar.height` of the strip gives exactly the same square as on a tab bar. A
+        // horizontal bar is already exactly that tall, so the same expression covers it.
         let button_rect = Rect::from_min_size(strip_rect.min, vec2(strip_rect.width(), bar_height));
-        self.tab_collapse(ui, path, button_rect, fade_style, true, Some(side));
+        self.tab_collapse(ui, path, button_rect, fade_style, true, side, on_toggle);
+    }
+
+    /// Draws a side that was stowed: the bar above, standing for a whole subtree.
+    ///
+    /// A stowed split never goes through [`Self::show_leaf`] — it is not a leaf, it has no tabs
+    /// to put in a bar, and this frame its subtree is not on the geometry map at all. So the
+    /// entry point is its own, and it lives here rather than with the splits because what it
+    /// draws *is* the leaf's strip; only the meaning of the click differs.
+    ///
+    /// One arrow for the whole side, and no per-leaf marks in it: those would need vertical text
+    /// or icons in something one tab bar wide, which is a different feature and one to build when
+    /// someone asks for it.
+    pub(super) fn show_stowed_split(
+        &mut self,
+        ui: &mut Ui,
+        path: NodePath,
+        fade_style: Option<&Style>,
+    ) {
+        debug_assert!(self.dock_state[path].is_stowed());
+
+        // No rectangle means not on screen — a side stowed inside another stowed side. The same
+        // early return as `show_leaf`, and it is the same statement: drawing shows what the
+        // layout pass laid out.
+        let Some(rect) = self.layout.rect(path) else {
+            return;
+        };
+        if rect.width() <= 0.0 || rect.height() <= 0.0 {
+            return;
+        }
+        let side = self.layout.side_strip(path);
+
+        let ui = &mut ui.new_child(
+            UiBuilder::new()
+                .max_rect(rect)
+                .layout(Layout::top_down_justified(Align::Min))
+                .id_salt((path.node, "node")),
+        );
+        ui.spacing_mut().item_spacing = Vec2::ZERO;
+        clip_to(ui, rect);
+
+        self.collapsed_bar(
+            ui,
+            path,
+            fade_style,
+            side,
+            DockMutation::SetSplitStowed {
+                path,
+                stowed: false,
+            },
+        );
     }
 
     /// Draws the collapse button.
+    ///
+    /// `on_toggle` is what a primary click asks for. Handed in rather than built here, because
+    /// the same button appears on a leaf's tab bar, on a leaf squeezed into a strip and on a
+    /// whole side stowed away, and those are three different edits to three different things.
+    #[allow(clippy::too_many_arguments)]
     fn tab_collapse(
         &mut self,
         ui: &mut Ui,
@@ -812,6 +896,7 @@ impl<Tab> DockArea<'_, Tab> {
         fade_style: Option<&Style>,
         collapsed: bool,
         side_strip: Option<SideStrip>,
+        on_toggle: DockMutation,
     ) {
         let rect = Rect::from_min_max(
             tabbar_outer_rect.left_top(),
@@ -872,13 +957,10 @@ impl<Tab> DockArea<'_, Tab> {
             if on_secondary_button {
                 self.window_request_toggle_minimized(path.surface);
             } else {
-                // Queued, not applied: the leaf whose collapsed flag this flips is the one
-                // being drawn, and its body is still ahead in this pass. See `DockMutation`
-                // for the one-frame shift this buys and the shape that would remove it.
-                self.mutations.push(DockMutation::SetLeafCollapsed {
-                    path,
-                    collapsed: !collapsed,
-                });
+                // Queued, not applied: what this flips belongs to the node being drawn, and the
+                // rest of that node is still ahead in this pass. See `DockMutation` for the
+                // one-frame shift this buys and the shape that would remove it.
+                self.mutations.push(on_toggle);
             }
         }
 

@@ -273,6 +273,7 @@ impl<Tab> DockArea<'_, Tab> {
             DockMutation::Focus(path) => Some(*path),
             DockMutation::Activate(_)
             | DockMutation::SetLeafCollapsed { .. }
+            | DockMutation::SetSplitStowed { .. }
             | DockMutation::SetLeafScroll { .. }
             | DockMutation::SetSplitFraction { .. }
             | DockMutation::SetWindowMinimized { .. }
@@ -339,6 +340,19 @@ impl<Tab> DockArea<'_, Tab> {
                         self.dock_state[path.surface].set_leaf_collapsed(path.node, collapsed);
                         // Reads the collapsed flag it has just written, plus this pass's
                         // geometry, to remember the height an expand has to restore.
+                        self.window_update_collapsed(path);
+                        self.events.push(DockEvent::LayoutCommitted);
+                    }
+                }
+                DockMutation::SetSplitStowed { path, stowed } => {
+                    // Asked of `is_stowed`, not of `is_collapsed`: a side whose leaves all
+                    // happen to be collapsed is collapsed without being stowed, and answering
+                    // the wrong question here would drop the request that puts it away.
+                    if self.dock_state[path].is_stowed() != stowed {
+                        self.dock_state[path.surface].set_split_stowed(path.node, stowed);
+                        // Same reason as for a collapsed leaf: in a floating window this is what
+                        // the window's height follows, and stowing changes whether the root of
+                        // that window is collapsed.
                         self.window_update_collapsed(path);
                         self.events.push(DockEvent::LayoutCommitted);
                     }
@@ -638,11 +652,15 @@ impl<Tab> DockArea<'_, Tab> {
             }
         }
 
-        // Then, draw the bodies of each leaves.
+        // Then, draw the bodies of each leaves — and the bar of each side that was put away,
+        // which is the one thing drawn for a node that is not a leaf. Its subtree was left off
+        // the map above, so the bar is all there is of it this frame.
         for node in order.iter().copied() {
             let path = NodePath::new(surf_index, node);
             if self.dock_state[path].is_leaf() {
                 self.show_leaf(ui, state, path, tab_viewer, fade_style);
+            } else if self.dock_state[path].is_stowed() {
+                self.show_stowed_split(ui, path, fade_style.map(|(style, _)| style));
             }
         }
 

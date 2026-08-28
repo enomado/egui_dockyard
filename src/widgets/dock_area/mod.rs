@@ -129,6 +129,20 @@ pub(in crate::widgets::dock_area) enum DockMutation {
         path: NodePath,
         collapsed: bool,
     },
+    /// Put a whole split away behind one arrow, or bring it back — see
+    /// [`SplitNode::stowed`](crate::SplitNode::stowed).
+    ///
+    /// A separate variant rather than [`SetLeafCollapsed`](Self::SetLeafCollapsed) with a split's
+    /// path, because it is a different edit on a different kind of node: collapsing is a decision
+    /// about one leaf, and stowing is a decision about a subtree that leaves every leaf inside it
+    /// alone. `set_leaf_collapsed` panics on a split for exactly that reason.
+    ///
+    /// Costs the one frame described above, on the same grounds as `SetLeafCollapsed`: the arrow
+    /// that asks is drawn on the very bar the answer changes.
+    SetSplitStowed {
+        path: NodePath,
+        stowed: bool,
+    },
     /// Scroll position of a leaf's tab bar, in points.
     ///
     /// Queued **without** the one-frame shift described above, and that is a property of the

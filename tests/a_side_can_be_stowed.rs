@@ -25,7 +25,9 @@
 //!   stowed split (1, whatever it contains) arriving at the layout;
 //! * and it all comes back.
 
-use egui::{CentralPanel, Context, Id, Pos2, RawInput, Rect, Ui, Vec2, WidgetText};
+use egui::{
+    CentralPanel, Context, Event, Id, PointerButton, Pos2, RawInput, Rect, Ui, Vec2, WidgetText,
+};
 use egui_dockyard::{
     DockArea, DockLayout, DockState, Node, NodeId, NodePath, SideStrip, Split, Style, SurfaceIndex,
     TabViewer,
@@ -38,7 +40,13 @@ const DOCK_ID: &str = "a_side_can_be_stowed";
 /// exact comparison would be reporting the snapping rather than the property.
 const TOLERANCE: f32 = 0.5;
 
-struct Viewer;
+/// Records which tab bodies were drawn, so a frame can be asked what it *painted* rather than
+/// what the tree said afterwards. "Nothing inside a stowed side is drawn" is a statement about
+/// the frame, and the tree cannot answer it: the leaves are still there, still expanded.
+#[derive(Default)]
+struct Viewer {
+    drawn: Vec<String>,
+}
 
 impl TabViewer for Viewer {
     type Tab = String;
@@ -48,6 +56,7 @@ impl TabViewer for Viewer {
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {
+        self.drawn.push(tab.clone());
         ui.label(tab.as_str());
     }
 }
@@ -64,28 +73,74 @@ fn path(node: NodeId) -> NodePath {
     NodePath::new(SurfaceIndex::main(), node)
 }
 
-/// A few headless frames in a context of your own, for when the *same* context has to see two
-/// states in a row — the geometry map lives in its memory and outlives a frame, which is the
-/// only way "the entry from before is gone" can be asked at all.
-fn frames(ctx: &Context, state: &mut DockState<String>, style: &Style, sideways: bool) {
-    let id = Id::new(DOCK_ID);
-    for _ in 0..4 {
-        let input = RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SCREEN)),
-            ..Default::default()
-        };
-        let mut output = ctx.run_ui(input, |ui| {
-            CentralPanel::default().show(ui, |ui| {
-                DockArea::new(state)
-                    .id(id)
-                    .style(style.clone())
-                    .show_leaf_collapse_buttons(true)
-                    .collapse_sideways(sideways)
-                    .show_inside(ui, &mut Viewer);
-            });
+/// One headless frame carrying `events`, answering with the tab bodies it painted.
+fn frame(
+    ctx: &Context,
+    state: &mut DockState<String>,
+    style: &Style,
+    sideways: bool,
+    events: Vec<Event>,
+) -> Vec<String> {
+    let mut viewer = Viewer::default();
+    let input = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SCREEN)),
+        events,
+        ..Default::default()
+    };
+    let mut output = ctx.run_ui(input, |ui| {
+        CentralPanel::default().show(ui, |ui| {
+            DockArea::new(state)
+                .id(Id::new(DOCK_ID))
+                .style(style.clone())
+                .show_leaf_collapse_buttons(true)
+                .collapse_sideways(sideways)
+                .show_inside(ui, &mut viewer);
         });
-        output.textures_delta.clear();
+    });
+    output.textures_delta.clear();
+    viewer.drawn
+}
+
+/// A few quiet frames in a context of your own, for when the *same* context has to see two
+/// states in a row — the geometry map lives in its memory and outlives a frame, which is the
+/// only way "the entry from before is gone" can be asked at all. Answers with what the last of
+/// them painted, once the layout has settled.
+fn frames(
+    ctx: &Context,
+    state: &mut DockState<String>,
+    style: &Style,
+    sideways: bool,
+) -> Vec<String> {
+    let mut drawn = Vec::new();
+    for _ in 0..4 {
+        drawn = frame(ctx, state, style, sideways, Vec::new());
     }
+    drawn
+}
+
+/// Press and release at `at`, answering with what the *release* frame painted — the frame that
+/// answers the click, and still paints the picture the click asked to change (see
+/// `a_click_that_changes_a_leaf_lands_next_frame.rs`).
+fn click(
+    ctx: &Context,
+    state: &mut DockState<String>,
+    style: &Style,
+    sideways: bool,
+    at: Pos2,
+) -> Vec<String> {
+    for pressed in [true, false] {
+        let event = Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let drawn = frame(ctx, state, style, sideways, vec![event]);
+        if !pressed {
+            return drawn;
+        }
+    }
+    unreachable!("the release frame returns")
 }
 
 fn layout_of(ctx: &Context) -> DockLayout {
@@ -394,6 +449,90 @@ fn bringing_a_stowed_side_back_lays_its_insides_out_again() {
     assert!(
         layout.divider(path(scene.side)).is_some(),
         "and its two children have a boundary between them again"
+    );
+}
+
+/// Nothing inside a stowed side is drawn.
+///
+/// The frame has to be asked, not the tree: the leaves inside are still there and still
+/// expanded — that is the whole point of stowing as a unit — so `is_collapsed` on any of them
+/// says no. What changed is that they are not on screen, and only what was painted can say so.
+#[test]
+fn nothing_inside_a_stowed_side_is_drawn() {
+    let style = style();
+    let mut scene = a_side_beside_a_column(false);
+    let ctx = Context::default();
+
+    let drawn = frames(&ctx, &mut scene.state, &style, true);
+    assert_eq!(
+        drawn.len(),
+        3,
+        "all three leaves draw a body before the side is put away, or the scene below proves \
+         nothing: painted {drawn:?}"
+    );
+
+    scene
+        .state
+        .main_surface_mut()
+        .set_split_stowed(scene.side, true);
+    let drawn = frames(&ctx, &mut scene.state, &style, true);
+
+    assert_eq!(
+        drawn,
+        vec!["open".to_owned()],
+        "a stowed side painted {drawn:?}: its leaves are expanded and its subtree is off the \
+         map, so anything drawn for them landed on top of the strip or of its sibling"
+    );
+    // And the leaves really are untouched — this is not "everything got collapsed".
+    for node in scene.inside {
+        assert!(
+            !scene.state[path(node)].is_collapsed(),
+            "stowing collapsed a leaf inside the side, which is the spelling this feature exists \
+             to avoid: it would come back expanded"
+        );
+    }
+}
+
+/// The arrow on the strip brings the side back.
+///
+/// One arrow for the whole side, and it is the same `tab_collapse` button as everywhere else —
+/// given the split's path, and queuing the edit that suits a split. Which is the point of the
+/// click going through a mutation the caller hands in: `set_leaf_collapsed` panics on a split,
+/// so a button that decided for itself would have had to learn what it was sitting on.
+#[test]
+fn the_arrow_on_a_stowed_side_brings_it_back() {
+    let style = style();
+    let mut scene = a_side_beside_a_column(false);
+    scene
+        .state
+        .main_surface_mut()
+        .set_split_stowed(scene.side, true);
+    let ctx = Context::default();
+    frames(&ctx, &mut scene.state, &style, true);
+
+    // The arrow sits at the top of the strip, one `TAB_COLLAPSE_BUTTON_SIZE` square — which is
+    // the strip's whole width. Its exact size is private to the crate; 8 px in is comfortably
+    // inside it.
+    let strip = rect_of(&layout_of(&ctx), scene.side);
+    let target = Pos2::new(strip.left() + 8.0, strip.top() + style.tab_bar.height / 2.0);
+
+    let during = click(&ctx, &mut scene.state, &style, true, target);
+    assert_eq!(
+        during,
+        vec!["open".to_owned()],
+        "the frame the click is answered in still paints the side away, as every other queued \
+         edit does — see a_click_that_changes_a_leaf_lands_next_frame.rs"
+    );
+    assert!(
+        !scene.state[path(scene.side)].is_stowed(),
+        "clicking the arrow on the strip did not bring the side back"
+    );
+
+    let drawn = frames(&ctx, &mut scene.state, &style, true);
+    assert_eq!(
+        drawn.len(),
+        3,
+        "the next repaint shows the side again, insides and all: painted {drawn:?}"
     );
 }
 

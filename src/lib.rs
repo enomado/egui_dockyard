@@ -243,7 +243,7 @@
 #[allow(deprecated)]
 pub use crate::core::*;
 pub use egui;
-pub use layout::{DockLayout, NodeGeometry};
+pub use layout::{DockLayout, NodeGeometry, SideStrip};
 pub use style::*;
 pub use translations::*;
 pub use tree::*;

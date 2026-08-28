@@ -44,6 +44,21 @@ use egui::{Context, Id, Rect};
 
 use crate::{DockState, NodePath};
 
+/// Which edge of its own split a collapsed leaf was pressed against, when the layout pass
+/// shrank it sideways instead of into a row.
+///
+/// Left and right, and no `Top` / `Bottom`, because collapsing into a *row* is the older
+/// behaviour and needs no marker: a collapsed leaf under a vertical split is a tab bar, which
+/// is what a leaf draws anyway. Only the sideways case draws something else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SideStrip {
+    /// The strip is the left edge of its split; the sibling took the width to its right.
+    Left,
+
+    /// The strip is the right edge of its split; the sibling took the width to its left.
+    Right,
+}
+
 /// Where a single node ended up on screen during the last layout pass.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NodeGeometry {
@@ -54,6 +69,16 @@ pub struct NodeGeometry {
     /// and only for leaves that actually rendered a body this frame (a collapsed or
     /// zero-sized leaf has no viewport).
     pub viewport: Option<Rect>,
+
+    /// Set when this leaf was collapsed *sideways* — squeezed to a narrow vertical strip
+    /// against one edge of its split, with the sibling taking the width it gave up.
+    ///
+    /// Drawing reads this rather than deciding for itself, and that is the point: "is this
+    /// leaf a strip?" must not be answered by looking at how narrow the rectangle came out.
+    /// A leaf can be narrow because the user dragged the separator, and a rule phrased on
+    /// the width would turn that into a strip behind their back. The layout pass knows the
+    /// answer — it is the one that made the decision — so it says so here.
+    pub side_strip: Option<SideStrip>,
 }
 
 /// Geometry of every node of a [`DockState`], as computed by the last layout pass.
@@ -106,6 +131,15 @@ impl DockLayout {
         self.nodes.get(&path).and_then(|geometry| geometry.viewport)
     }
 
+    /// Which edge this leaf was collapsed against, or [`None`] if it is not a sideways
+    /// collapsed strip this frame.
+    #[inline]
+    pub fn side_strip(&self, path: NodePath) -> Option<SideStrip> {
+        self.nodes
+            .get(&path)
+            .and_then(|geometry| geometry.side_strip)
+    }
+
     /// Number of nodes with known geometry.
     #[inline]
     pub fn len(&self) -> usize {
@@ -119,15 +153,37 @@ impl DockLayout {
     }
 
     /// Record the rectangle of a node, keeping any viewport already known for it.
+    ///
+    /// Clears [`NodeGeometry::side_strip`], which is the whole reason that flag is safe to
+    /// keep here. Entries outlive the frame that wrote them (see the module docs), so a flag
+    /// that were only ever *set* would survive the leaf being expanded again and draw a strip
+    /// forever. Every laid-out node gets its rectangle written on every pass, so clearing it
+    /// here means the flag can only ever describe this frame: the sideways path re-asserts it
+    /// immediately after, and nothing else has to remember to take it back.
     #[inline]
     pub(crate) fn set_rect(&mut self, path: NodePath, rect: Rect) {
         self.nodes
             .entry(path)
-            .and_modify(|geometry| geometry.rect = rect)
+            .and_modify(|geometry| {
+                geometry.rect = rect;
+                geometry.side_strip = None;
+            })
             .or_insert(NodeGeometry {
                 rect,
                 viewport: None,
+                side_strip: None,
             });
+    }
+
+    /// Mark a leaf as a sideways collapsed strip against `side`.
+    ///
+    /// Called by the layout pass right after [`Self::set_rect`] for the same node, which is
+    /// what clears any previous frame's answer.
+    #[inline]
+    pub(crate) fn set_side_strip(&mut self, path: NodePath, side: SideStrip) {
+        if let Some(geometry) = self.nodes.get_mut(&path) {
+            geometry.side_strip = Some(side);
+        }
     }
 
     /// Record the body rectangle of a leaf.
@@ -143,6 +199,7 @@ impl DockLayout {
             .or_insert(NodeGeometry {
                 rect: viewport,
                 viewport: Some(viewport),
+                side_strip: None,
             });
     }
 

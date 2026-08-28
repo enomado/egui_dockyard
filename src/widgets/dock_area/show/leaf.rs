@@ -10,6 +10,7 @@ use egui::{
 use crate::NodePath;
 use crate::dock_area::ids::tab_widget_id;
 use crate::dock_area::tab_removal::{ForcedRemoval, TabRemoval};
+use crate::layout::SideStrip;
 use crate::tab_viewer::OnCloseResponse;
 use crate::{
     DockArea, Style, SurfaceIndex, TabAddAlign, TabIndex, TabStyle, TabViewer,
@@ -60,24 +61,31 @@ impl<Tab> DockArea<'_, Tab> {
         if self.dock_state[path].tabs_count() == 0 {
             return;
         }
-        let tabbar_rect = self.tab_bar(
-            ui,
-            state,
-            path,
-            tab_viewer,
-            fade_style.map(|(style, _)| style),
-            collapsed,
-        );
-        self.tab_body(
-            ui,
-            state,
-            path,
-            tab_viewer,
-            spacing,
-            tabbar_rect,
-            fade_style,
-            collapsed,
-        );
+        // A leaf the layout pass squeezed sideways draws a strip and no tab bar: a tab bar is
+        // a row of names scrolled along x, and there is no x to scroll along here. Asked, not
+        // guessed from how narrow the rectangle is — see `NodeGeometry::side_strip`.
+        if let Some(side) = self.layout.side_strip(path) {
+            self.side_strip(ui, path, fade_style.map(|(style, _)| style), side);
+        } else {
+            let tabbar_rect = self.tab_bar(
+                ui,
+                state,
+                path,
+                tab_viewer,
+                fade_style.map(|(style, _)| style),
+                collapsed,
+            );
+            self.tab_body(
+                ui,
+                state,
+                path,
+                tab_viewer,
+                spacing,
+                tabbar_rect,
+                fade_style,
+                collapsed,
+            );
+        }
 
         let leaf = self.dock_state[path]
             .get_leaf()
@@ -244,7 +252,7 @@ impl<Tab> DockArea<'_, Tab> {
             }
 
             if self.show_leaf_collapse_buttons {
-                self.tab_collapse(ui, path, tabbar_outer_rect, fade_style, collapsed)
+                self.tab_collapse(ui, path, tabbar_outer_rect, fade_style, collapsed, None)
             }
 
             (tabs_ui.min_rect().width(), tab_hovered)
@@ -765,6 +773,36 @@ impl<Tab> DockArea<'_, Tab> {
         }
     }
 
+    /// Draws a leaf that was collapsed sideways: a strip of tab-bar background with the expand
+    /// arrow at the top of it, and no body.
+    ///
+    /// The arrow is drawn whatever [`DockArea::show_leaf_collapse_buttons`] says. That knob is
+    /// about the button on a *tab bar*, where hiding it leaves the tabs themselves to click
+    /// on; a strip has nothing else in it, so hiding the arrow there would leave the leaf with
+    /// no way back except in code.
+    fn side_strip(
+        &mut self,
+        ui: &mut Ui,
+        path: NodePath,
+        fade_style: Option<&Style>,
+        side: SideStrip,
+    ) {
+        let style = fade_style.unwrap_or_else(|| self.style.as_ref().unwrap());
+        let bar_height = style.tab_bar.height;
+        let corner_radius = style.tab_bar.corner_radius;
+        let bg_fill = style.tab_bar.bg_fill;
+
+        let (strip_rect, _response) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+        ui.painter().rect_filled(strip_rect, corner_radius, bg_fill);
+
+        // `tab_collapse` cuts its button out of the top-left of what it is given, one
+        // `TAB_COLLAPSE_BUTTON_SIZE` wide and as tall as the rectangle — so handing it the top
+        // `tab_bar.height` of the strip gives exactly the same square as on a tab bar, and the
+        // click goes down the same queued `SetLeafCollapsed` path.
+        let button_rect = Rect::from_min_size(strip_rect.min, vec2(strip_rect.width(), bar_height));
+        self.tab_collapse(ui, path, button_rect, fade_style, true, Some(side));
+    }
+
     /// Draws the collapse button.
     fn tab_collapse(
         &mut self,
@@ -773,6 +811,7 @@ impl<Tab> DockArea<'_, Tab> {
         tabbar_outer_rect: Rect,
         fade_style: Option<&Style>,
         collapsed: bool,
+        side_strip: Option<SideStrip>,
     ) {
         let rect = Rect::from_min_max(
             tabbar_outer_rect.left_top(),
@@ -812,6 +851,8 @@ impl<Tab> DockArea<'_, Tab> {
         if on_secondary_button {
             // Collapse the entire window
             Self::draw_chevron_down(ui, style, color, arrow_rect);
+        } else if let Some(side) = side_strip {
+            Self::draw_side_arrow(side, ui, color, arrow_rect);
         } else {
             // Draw arrow.
             Self::draw_arrow(collapsed, ui, color, arrow_rect);
@@ -939,6 +980,30 @@ impl<Tab> DockArea<'_, Tab> {
                     arrow_rect.right_top(),
                     arrow_rect.center_bottom(),
                 ]
+            },
+            color,
+            Stroke::NONE,
+        ));
+    }
+
+    /// The arrow of a sideways collapsed strip, pointing at the space the leaf will expand
+    /// into — which is away from the edge it is pressed against, and therefore the one thing
+    /// the strip's own side has to be known for.
+    fn draw_side_arrow(side: SideStrip, ui: &mut Ui, color: Color32, arrow_rect: Rect) {
+        ui.painter().add(Shape::convex_polygon(
+            match side {
+                // Against the left edge: expands rightwards.
+                SideStrip::Left => vec![
+                    arrow_rect.left_top(),
+                    arrow_rect.right_center(),
+                    arrow_rect.left_bottom(),
+                ],
+                // Against the right edge: expands leftwards.
+                SideStrip::Right => vec![
+                    arrow_rect.right_top(),
+                    arrow_rect.left_center(),
+                    arrow_rect.right_bottom(),
+                ],
             },
             color,
             Stroke::NONE,

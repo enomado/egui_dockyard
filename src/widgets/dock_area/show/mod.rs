@@ -16,7 +16,7 @@ use super::{
 };
 use crate::NodePath;
 use crate::dock_area::tab_removal::ForcedRemoval;
-use crate::layout::DockLayout;
+use crate::layout::{DockLayout, SideStrip};
 use crate::tab_viewer::OnCloseResponse;
 use crate::{
     AllowedSplits, DockArea, Node, OverlayType, SeparatorStyle, Style, SurfaceIndex,
@@ -756,6 +756,76 @@ impl<Tab> DockArea<'_, Tab> {
             return;
         }
 
+        // The mirror of the case above, one axis over: a leaf collapsed *sideways* gives up
+        // its width instead of its height, and the sibling column takes it.
+        //
+        // Why this is opt-in and the case above is not: collapsing spends height, so under a
+        // vertical split the sibling above or below simply grows into it. Under a horizontal
+        // one it cannot — the space freed is a column, and a leaf shrunk to a bar would leave
+        // an area with no tab bar, no body and no owner. That is why a collapsed leaf beside a
+        // column keeps its column by default (`a_collapsed_leaf_is_one_row.rs` pins it). This
+        // path is the other answer to the same problem: spend *width*, which the sibling
+        // column can take, so there is nothing left over to belong to nobody.
+        //
+        // Three conditions, and each one is what keeps the hole from coming back:
+        //
+        // * only a **leaf** — a collapsed split is rows of tab bars, and rows do not fit in a
+        //   strip a tab bar wide;
+        // * only when the **sibling is open** — squeeze both and the width they gave up has
+        //   nobody to go to, which is the hole again;
+        // * only with the knob on, because this reverses a decision users' layouts already
+        //   depend on.
+        if self.collapse_sideways
+            && self.dock_state[path.surface][path.node].is_horizontal()
+            && let Some(side) = {
+                let left_strips =
+                    left_collapsed && !right_collapsed && self.dock_state[left_path].is_leaf();
+                let right_strips =
+                    right_collapsed && !left_collapsed && self.dock_state[right_path].is_leaf();
+                match (left_strips, right_strips) {
+                    (true, false) => Some(SideStrip::Left),
+                    (false, true) => Some(SideStrip::Right),
+                    // Neither, or (impossible: the two are exclusive by construction) both.
+                    _ => None,
+                }
+            }
+        {
+            let rect = split_rect(parent_rect, pixels_per_point);
+
+            // Same arithmetic as the collapsed rows above, and for the same reason: the strip
+            // is given exactly what it needs, and the divider goes *beside* it rather than
+            // through it. Take half the divider out of a strip that is already exactly one
+            // arrow wide and the arrow no longer fits in what it was given.
+            let (near, far) = if side == SideStrip::Left {
+                let strip_end = rect.min.x + collapsed_strip_width(style);
+                (strip_end, strip_end + style.separator.width)
+            } else {
+                let strip_start = rect.max.x - collapsed_strip_width(style);
+                (strip_start - style.separator.width, strip_start)
+            };
+
+            let left_separator_border = map_to_pixel(near, pixels_per_point, f32::round);
+            let right_separator_border = map_to_pixel(far, pixels_per_point, f32::round);
+            let left = rect
+                .intersect(Rect::everything_left_of(left_separator_border))
+                .intersect(max_rect);
+            let right = rect
+                .intersect(Rect::everything_right_of(right_separator_border))
+                .intersect(max_rect);
+            self.layout.set_rect(left_path, left);
+            self.layout.set_rect(right_path, right);
+            // After `set_rect`, which is what clears the previous frame's answer.
+            self.layout.set_side_strip(
+                if side == SideStrip::Left {
+                    left_path
+                } else {
+                    right_path
+                },
+                side,
+            );
+            return;
+        }
+
         duplicate! {
             [
                 orientation   dim_point  dim_size  left_of    right_of;
@@ -1156,6 +1226,20 @@ pub(super) fn collapsed_strip_height(rows: i32, style: &Style) -> f32 {
         return 0.0;
     }
     rows as f32 * style.tab_bar.height + (rows - 1) as f32 * style.separator.width
+}
+
+/// How wide a leaf collapsed sideways is: one tab bar's worth, turned on its side.
+///
+/// A tab bar's height and not a width of its own, so that a strip is exactly as thick as the
+/// row a leaf collapses to under a vertical split — the same gesture, the same thickness,
+/// whichever way the parent happens to be split. At the default style that is 24 px, which is
+/// also [`Style::TAB_COLLAPSE_BUTTON_SIZE`], so the expand arrow fits a strip exactly.
+///
+/// No `columns` parameter, unlike [`collapsed_strip_height`]: strips do not stack. Only a
+/// collapsed leaf whose sibling is open becomes one, so there is never more than a single
+/// strip against either edge of a split.
+pub(super) fn collapsed_strip_width(style: &Style) -> f32 {
+    style.tab_bar.height
 }
 
 /// How far inside its own rectangle a surface has to start drawing to leave the border it

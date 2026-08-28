@@ -4,6 +4,23 @@
 
 ### Added
 
+- **A collapsed leaf can hide sideways** — `DockArea::collapse_sideways`, off by default and
+  experimental. Collapsing spends *height*: a collapsed leaf is a tab bar and nothing else. Under
+  a horizontal split there was nobody to spend it on — the sibling is a column beside it — so a
+  leaf shrunk to a bar would have left an area with no tab bar, no body and no owner, and the
+  dock instead let it keep its whole column. With this on, such a leaf gives up its **width**
+  instead: it shrinks to a strip one tab bar thick with an expand arrow, and the sibling column
+  takes the width at once, so nothing is left over.
+
+  The direction is never stored — it is read off the parent split. A leaf dragged into a vertical
+  split goes back to collapsing into a row, and transposing a split turns its strips the other
+  way by itself. Nothing new is serialized either, so turning the knob back off restores the old
+  layout with no migration of saved trees.
+
+  Only a collapsed *leaf* whose sibling is open becomes a strip. Two collapsed siblings keep
+  their columns, because the width they gave up would have nobody to go to; so does a collapsed
+  *split*, whose subtree is rows of tab bars that do not fit in a strip.
+
 - **One drag resizes the panels around a tee.** Where a divider ends on the line between a
   split's two children — a "T" of three panels — the dock offers a small handle, and dragging it
   moves *both* separators that meet there at once: the line that runs through, and the one that

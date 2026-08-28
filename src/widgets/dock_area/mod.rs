@@ -39,6 +39,7 @@ pub struct DockArea<'tree, Tab> {
     show_window_collapse_buttons: bool,
     show_leaf_close_all_buttons: bool,
     show_leaf_collapse_buttons: bool,
+    collapse_sideways: bool,
     show_junction_handles: bool,
     show_secondary_button_hint: bool,
     secondary_button_modifiers: Modifiers,
@@ -219,6 +220,7 @@ impl<'tree, Tab> DockArea<'tree, Tab> {
             show_window_collapse_buttons: true,
             show_leaf_close_all_buttons: true,
             show_leaf_collapse_buttons: true,
+            collapse_sideways: false,
             show_junction_handles: true,
             show_secondary_button_hint: true,
             secondary_button_modifiers: Modifiers::SHIFT,
@@ -375,6 +377,29 @@ impl<'tree, Tab> DockArea<'tree, Tab> {
     #[inline(always)]
     pub fn show_leaf_collapse_buttons(mut self, show_leaf_collapse_buttons: bool) -> Self {
         self.show_leaf_collapse_buttons = show_leaf_collapse_buttons;
+        self
+    }
+
+    /// Lets a collapsed leaf hide **sideways**, into a narrow vertical strip against one edge
+    /// of its split, instead of keeping its whole column. By default it's `false`.
+    ///
+    /// **Experimental.** Collapsing has always meant "give up your body and be a tab bar",
+    /// which spends *height* — so under a horizontal split there was nobody to give the height
+    /// to, and a collapsed leaf kept its column rather than leave a hole belonging to no node.
+    /// With this on, such a leaf gives up its *width* instead: it shrinks to a strip with an
+    /// expand arrow, and the sibling column immediately takes the width, so no hole appears.
+    ///
+    /// The direction is not stored anywhere — it is read off the parent split, so a leaf
+    /// dragged into a vertical split goes back to collapsing into a row, and transposing a
+    /// split turns its strips the other way by itself. Nothing new is serialized either:
+    /// turning this back off restores the old layout with no migration of saved trees.
+    ///
+    /// Only a collapsed *leaf* whose sibling is open collapses sideways. Two collapsed
+    /// siblings keep their columns (there would be nobody to take the width), and so does a
+    /// collapsed *split*, whose subtree is rows of tab bars that do not fit in a strip.
+    #[inline(always)]
+    pub fn collapse_sideways(mut self, collapse_sideways: bool) -> Self {
+        self.collapse_sideways = collapse_sideways;
         self
     }
 }

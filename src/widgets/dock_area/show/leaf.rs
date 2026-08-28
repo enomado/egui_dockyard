@@ -918,6 +918,14 @@ impl<Tab> DockArea<'_, Tab> {
 
         // Whether we're on "secondary button mode" due to modifier keys
         let on_secondary_button = self.is_on_secondary_button(path.surface, ui, &response);
+        // …and, where that mode does not apply, whether the same modifier turns this arrow into
+        // "put my whole side away". The window action wins where both could fire: it is the
+        // older meaning of the modifier, and it only exists on a floating surface at all.
+        let stow_target = if on_secondary_button {
+            None
+        } else {
+            self.stow_target(path, ui, &response)
+        };
 
         let color = if response.hovered() || response.has_focus() {
             ui.painter().rect_filled(
@@ -936,6 +944,8 @@ impl<Tab> DockArea<'_, Tab> {
         if on_secondary_button {
             // Collapse the entire window
             Self::draw_chevron_down(ui, style, color, arrow_rect);
+        } else if stow_target.is_some() {
+            Self::draw_stow_arrow(ui, color, arrow_rect);
         } else if let Some(side) = side_strip {
             Self::draw_side_arrow(side, ui, color, arrow_rect);
         } else {
@@ -956,6 +966,11 @@ impl<Tab> DockArea<'_, Tab> {
         if response.clicked() {
             if on_secondary_button {
                 self.window_request_toggle_minimized(path.surface);
+            } else if let Some(target) = stow_target {
+                self.mutations.push(DockMutation::SetSplitStowed {
+                    path: target,
+                    stowed: true,
+                });
             } else {
                 // Queued, not applied: what this flips belongs to the node being drawn, and the
                 // rest of that node is still ahead in this pass. See `DockMutation` for the
@@ -1019,6 +1034,63 @@ impl<Tab> DockArea<'_, Tab> {
                     .matches_logically(self.secondary_button_modifiers)
             })
             && (response.hovered() || response.has_focus() || response.is_pointer_button_down_on())
+    }
+
+    /// The split this collapse arrow would put away while the modifier is held, or [`None`] if
+    /// the gesture does not apply here.
+    ///
+    /// The target is the **parent** of whatever the arrow sits on, and that is the whole idea:
+    /// the direction of a collapse has never been a property of the button — the ordinary arrow
+    /// already folds a leaf into a row or into a strip depending on the parent — so stowing is
+    /// the same rule one level up, not a new control. Held on the arrow of a side that is
+    /// already stowed, it walks outwards again, which is how a side of three leaves is put away
+    /// in two clicks.
+    ///
+    /// The same modifier as the secondary button, deliberately: one meaning, "the bigger version
+    /// of this action", and a user who rebinds it rebinds both. Hovering is required for the same
+    /// reason it is there — otherwise every arrow in the dock would change its icon the moment
+    /// the key went down.
+    ///
+    /// Behind [`DockArea::collapse_sideways`] because the layout is: with the knob off a side
+    /// stowed under a horizontal split would draw one bar and leave the rest of its column to
+    /// nobody, which is exactly the hole that knob exists to avoid.
+    fn stow_target(&self, path: NodePath, ui: &mut Ui, response: &Response) -> Option<NodePath> {
+        if !self.collapse_sideways
+            || !ui.input(|i| {
+                i.modifiers
+                    .matches_logically(self.secondary_button_modifiers)
+            })
+            || !(response.hovered() || response.has_focus() || response.is_pointer_button_down_on())
+        {
+            return None;
+        }
+        // A root node has no side to be part of, so the modifier means nothing on it and the
+        // arrow keeps its ordinary meaning.
+        let parent = self.dock_state[path.surface].parent(path.node)?;
+        Some(NodePath::new(path.surface, parent))
+    }
+
+    /// The arrow of "put my whole side away": the ordinary collapse triangle, doubled.
+    ///
+    /// Doubled rather than a glyph of its own, because the gesture is not a different action —
+    /// it is the same fold one level up, and the icon says so: what the plain arrow does to this
+    /// leaf, this one does to everything beside it.
+    fn draw_stow_arrow(ui: &mut Ui, color: Color32, arrow_rect: Rect) {
+        // Two triangles stacked along the arrow's own axis, each half as tall, with a pixel
+        // between them so they read as two at the size this is drawn.
+        let half = arrow_rect.height() * 0.5;
+        for step in 0..2 {
+            let top = arrow_rect.top() + half * step as f32;
+            let cell = Rect::from_min_max(
+                pos2(arrow_rect.left(), top),
+                pos2(arrow_rect.right(), top + half - 1.0),
+            );
+            ui.painter().add(Shape::convex_polygon(
+                vec![cell.left_top(), cell.right_top(), cell.center_bottom()],
+                color,
+                Stroke::NONE,
+            ));
+        }
     }
 
     fn draw_close_window_symbol(ui: &mut Ui, stroke_color: Color32, close_all_rect: Rect) {

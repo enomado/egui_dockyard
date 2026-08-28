@@ -1,8 +1,10 @@
 # Plan: a side can be stowed
 
-**Status: stages 1–2 of 5 done** — the model (`e71f06e`) and the layout. Stages 3–5 (the strip
-itself, the gesture, the oracles for those two) are open and described below. Entry point for
-whoever picks this up: this file, then [`SplitNode::stowed`](../src/core/tree/node/split.rs),
+**Status: all five stages done in code** — the model (`e71f06e`), the layout, the strip, the
+gesture, the oracles. What is left is **acceptance by clicking**, in an application: the sweep in
+`tests/dst.rs` still cannot collapse or stow anything, so no automated gate has ever *made* the
+gesture on a real layout. See "What is left" at the bottom. Entry point for whoever picks this
+up: this file, then [`SplitNode::stowed`](../src/core/tree/node/split.rs),
 `Tree::set_split_stowed`, and the sibling plan
 [a collapsed leaf can hide sideways](PLAN_a_collapsed_leaf_can_hide_sideways.md), which this
 extends and whose boundaries it removes.
@@ -87,31 +89,43 @@ The one that catches a leftover entry asks it of a context that has already draw
 **open**; from a fresh context the subtree has no entries and every assertion passes without the
 layout doing anything.
 
-### 3. The strip for a subtree
+### 3. The strip for a subtree — **done, `<stage 3>`**
 
-`side_strip` lives in `show/leaf.rs` and is reached from `show_leaf`. A stowed split is not a
-leaf and never goes through `show_leaf`, so the drawing has to move to where a split can reach
-it. The arrow itself is the existing `tab_collapse`, given the split's path; its click has to
-queue "unstow" rather than `SetLeafCollapsed`, which means a new `DockMutation` variant.
+`side_strip` became `collapsed_bar`: the same drawing serves a leaf squeezed sideways and a
+whole side put away, because it is the same picture — one arrow on a tab bar's background and
+nothing else. Under a vertical parent the side gets a horizontal bar instead, and the rectangle
+handed to the button covers that with the same expression.
 
-### 4. The gesture
+What differs is what the arrow *means*, so `tab_collapse` takes the mutation a primary click
+queues rather than building one: `set_leaf_collapsed` panics on a split, and stowing leaves every
+leaf inside alone, so a button that decided for itself would have had to learn what it was
+sitting on. `DockMutation::SetSplitStowed` is that second edit. A stowed split gets its own entry
+point in the second pass (`show_stowed_split`) — the one thing drawn for a node that is not a
+leaf.
 
-Shift + collapse arrow stows the parent split; the arrow draws a different icon while the
-modifier is held. Note `is_on_secondary_button` is false on the main surface today (that is
-where the "collapse the window" action lives, which only applies to floating ones) — so the
-modifier is free there, but the code path has to be reached at all.
+### 4. The gesture — **done, `<stage 4>`**
 
-### 5. Oracles for 2–4
+`stow_target` answers "what would this arrow put away while the modifier is held": the **parent**
+of whatever it sits on, or nothing. Held on the arrow of a side that is already stowed it walks
+one level out again, which is how a side of three leaves goes away in two clicks — the leaf's
+parent is only part of such a side, and it takes a second click to reach the whole.
 
-* the side becomes a strip and the sibling takes the width — the subtree version of
-  `a_collapsed_leaf_beside_a_column_becomes_a_strip`;
-* nothing inside a stowed side is drawn, and no divider appears inside the strip;
-* the side comes back with its insides as they were (the model half is already pinned; this is
-  the drawn half);
-* the positive control: with the knob off, a stowed side keeps its column;
-* the two v1 boundary tests have to be revisited — `a_collapsed_split_beside_a_column_keeps_the_column`
-  states the old decision and will need to say "a collapsed but *not stowed* split", which is
-  still true and still worth pinning.
+The same modifier as the secondary button, so a user who rebinds it rebinds both, and the window
+action wins where both could fire (it is the older meaning, and only exists on a floating
+surface). The icon is the ordinary collapse triangle doubled: the gesture is not a different
+action, it is the same fold one level up.
+
+Gated on `collapse_sideways` along with the layout, and that is a decision, not tidiness: with
+the knob off a side stowed under a horizontal split draws one bar and leaves the rest of its
+column to nobody — offering the gesture there would be offering the hole.
+
+### 5. Oracles for 2–4 — **done, with each stage**
+
+Written with the stage they judge rather than afterwards; all in `tests/a_side_can_be_stowed.rs`,
+ten of them. Everything the old list asked for is stated: the strip and the sibling taking the
+width, nothing inside laid out or drawn, no divider inside the strip, the round trip, the knob
+off as a positive control, and both meanings of the one button. `a_collapsed_split_beside_a_column_keeps_the_column`
+now says "collapsed but *not stowed*" and explains which half it is.
 
 ## Verification
 
@@ -132,8 +146,17 @@ is no CI in this repository to catch it for you.
 `cargo update -p egui_dockyard` there. A `[patch]` pointing at a local path is not an option:
 the path is outside that repository and breaks every cargo command on another machine.
 
-## What is left beyond this plan
+## What is left
 
-* The `Collapse` step in `tests/dst.rs` (from the sibling plan) — the sweep still cannot collapse
-  or stow anything, so this whole class is unreachable to it by construction.
+* **Acceptance by clicking**, which is the open item: turn the knob on in `bur/rust_app` and put
+  the right-hand side away. The tests here make the gesture through synthetic events at a
+  computed point, which says the wiring works; it does not say the icon reads as anything, that
+  the strip is comfortable to hit, or that walking one level out per click is what a hand
+  expects on a side of three leaves. That last one is the decision most likely to come back:
+  decision 3 says the target is the leaf's *parent*, which for a three-leaf side is only part of
+  it.
+* The `Collapse` / stow step in `tests/dst.rs` (from the sibling plan) — the sweep still cannot
+  collapse or stow anything, so this whole class is unreachable to it by construction. The
+  proptest generator *can* (`Op::ToggleStowed`, and `the_generator_reaches_what_the_properties_assume`
+  says so), but that judges the tree, not a frame.
 * Per-leaf marks in a stowed strip, if anyone asks (decision 2).

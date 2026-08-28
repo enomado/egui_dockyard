@@ -24,9 +24,15 @@
 //! * under a *vertical* parent it is one bar rather than a strip, which is the row count of a
 //!   stowed split (1, whatever it contains) arriving at the layout;
 //! * and it all comes back.
+//!
+//! The gesture is here too, because it is one button with two meanings — the modifier turns a
+//! leaf's collapse arrow into "put my parent away" — and a button like that needs both meanings
+//! pinned, or the modifier could be ignored, or read the wrong way round, and everything above
+//! would still pass.
 
 use egui::{
-    CentralPanel, Context, Event, Id, PointerButton, Pos2, RawInput, Rect, Ui, Vec2, WidgetText,
+    CentralPanel, Context, Event, Id, Modifiers, PointerButton, Pos2, RawInput, Rect, Ui, Vec2,
+    WidgetText,
 };
 use egui_dockyard::{
     DockArea, DockLayout, DockState, Node, NodeId, NodePath, SideStrip, Split, Style, SurfaceIndex,
@@ -81,10 +87,28 @@ fn frame(
     sideways: bool,
     events: Vec<Event>,
 ) -> Vec<String> {
+    frame_with(ctx, state, style, sideways, events, Modifiers::NONE)
+}
+
+/// The same, with modifier keys held down for the whole frame.
+///
+/// Announced as a `ModifiersChanged` event rather than set on the input, because that is what
+/// egui listens to — and because it *sticks*: `InputState` carries the modifiers over from the
+/// last frame, so every frame here says what is held, including `NONE` to let go.
+fn frame_with(
+    ctx: &Context,
+    state: &mut DockState<String>,
+    style: &Style,
+    sideways: bool,
+    events: Vec<Event>,
+    modifiers: Modifiers,
+) -> Vec<String> {
     let mut viewer = Viewer::default();
+    let mut held = vec![Event::ModifiersChanged(modifiers)];
+    held.extend(events);
     let input = RawInput {
         screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SCREEN)),
-        events,
+        events: held,
         ..Default::default()
     };
     let mut output = ctx.run_ui(input, |ui| {
@@ -118,29 +142,40 @@ fn frames(
     drawn
 }
 
-/// Press and release at `at`, answering with what the *release* frame painted — the frame that
-/// answers the click, and still paints the picture the click asked to change (see
-/// `a_click_that_changes_a_leaf_lands_next_frame.rs`).
+/// Press and release at `at` with `modifiers` held, answering with what the *release* frame
+/// painted — the frame that answers the click, and still paints the picture the click asked to
+/// change (see `a_click_that_changes_a_leaf_lands_next_frame.rs`).
+///
+/// The modifiers go on the frame as a whole and not only on the event: the button reads them off
+/// the input state, the way a key that is *held* is read, not off the click that arrives.
 fn click(
     ctx: &Context,
     state: &mut DockState<String>,
     style: &Style,
     sideways: bool,
     at: Pos2,
+    modifiers: Modifiers,
 ) -> Vec<String> {
     for pressed in [true, false] {
         let event = Event::PointerButton {
             pos: at,
             button: PointerButton::Primary,
             pressed,
-            modifiers: Default::default(),
+            modifiers,
         };
-        let drawn = frame(ctx, state, style, sideways, vec![event]);
+        let drawn = frame_with(ctx, state, style, sideways, vec![event], modifiers);
         if !pressed {
             return drawn;
         }
     }
     unreachable!("the release frame returns")
+}
+
+/// The top-left corner of a node's own collapse arrow. Its exact size is private to the crate;
+/// 8 px in is comfortably inside it, and clear of the tab-bar margin.
+fn collapse_arrow_of(layout: &DockLayout, node: NodeId, style: &Style) -> Pos2 {
+    let rect = rect_of(layout, node);
+    Pos2::new(rect.left() + 8.0, rect.top() + style.tab_bar.height / 2.0)
 }
 
 fn layout_of(ctx: &Context) -> DockLayout {
@@ -510,13 +545,18 @@ fn the_arrow_on_a_stowed_side_brings_it_back() {
     let ctx = Context::default();
     frames(&ctx, &mut scene.state, &style, true);
 
-    // The arrow sits at the top of the strip, one `TAB_COLLAPSE_BUTTON_SIZE` square — which is
-    // the strip's whole width. Its exact size is private to the crate; 8 px in is comfortably
-    // inside it.
-    let strip = rect_of(&layout_of(&ctx), scene.side);
-    let target = Pos2::new(strip.left() + 8.0, strip.top() + style.tab_bar.height / 2.0);
+    // The arrow sits at the top of the strip, which is one `TAB_COLLAPSE_BUTTON_SIZE` square
+    // wide — the same place as on any tab bar.
+    let target = collapse_arrow_of(&layout_of(&ctx), scene.side, &style);
 
-    let during = click(&ctx, &mut scene.state, &style, true, target);
+    let during = click(
+        &ctx,
+        &mut scene.state,
+        &style,
+        true,
+        target,
+        Modifiers::NONE,
+    );
     assert_eq!(
         during,
         vec!["open".to_owned()],
@@ -533,6 +573,111 @@ fn the_arrow_on_a_stowed_side_brings_it_back() {
         drawn.len(),
         3,
         "the next repaint shows the side again, insides and all: painted {drawn:?}"
+    );
+}
+
+/// The modifier turns a leaf's collapse arrow into "put my whole side away".
+///
+/// The target is the leaf's **parent**, which is the same rule the arrow already follows one
+/// level down: what a collapse does — a row or a strip — has never been a property of the
+/// button, it is read off the parent. There is no second button to find.
+#[test]
+fn the_modifier_turns_the_arrow_into_stow_my_side() {
+    let style = style();
+    let mut scene = a_side_beside_a_column(false);
+    let ctx = Context::default();
+    frames(&ctx, &mut scene.state, &style, true);
+
+    let target = collapse_arrow_of(&layout_of(&ctx), scene.inside[0], &style);
+    click(
+        &ctx,
+        &mut scene.state,
+        &style,
+        true,
+        target,
+        Modifiers::SHIFT,
+    );
+
+    assert!(
+        scene.state[path(scene.side)].is_stowed(),
+        "the modified click was supposed to put the leaf's parent away"
+    );
+    assert!(
+        !scene.state[path(scene.inside[0])].is_collapsed(),
+        "and to leave the leaf it was made on alone — a side that comes back with one of its \
+         leaves collapsed is the spelling this feature exists to avoid"
+    );
+
+    let drawn = frames(&ctx, &mut scene.state, &style, true);
+    assert_eq!(
+        drawn,
+        vec!["open".to_owned()],
+        "the side is away on the next repaint: painted {drawn:?}"
+    );
+}
+
+/// Without the modifier, the very same arrow only collapses the leaf.
+///
+/// The positive control of the gesture: it is one button with two meanings, so both have to be
+/// pinned or the modifier could be ignored — or read the wrong way round — and every assertion
+/// above would still pass.
+#[test]
+fn without_the_modifier_the_same_arrow_only_collapses_the_leaf() {
+    let style = style();
+    let mut scene = a_side_beside_a_column(false);
+    let ctx = Context::default();
+    frames(&ctx, &mut scene.state, &style, true);
+
+    let target = collapse_arrow_of(&layout_of(&ctx), scene.inside[0], &style);
+    click(
+        &ctx,
+        &mut scene.state,
+        &style,
+        true,
+        target,
+        Modifiers::NONE,
+    );
+
+    assert!(
+        scene.state[path(scene.inside[0])].is_collapsed(),
+        "a plain click on a leaf's collapse arrow collapses that leaf"
+    );
+    assert!(
+        !scene.state[path(scene.side)].is_stowed(),
+        "and puts nothing away: the side is still there"
+    );
+}
+
+/// With `collapse_sideways` off the modifier does nothing, and the arrow keeps its one meaning.
+///
+/// The gesture is behind the same knob as the layout because it has to be: a side stowed under a
+/// horizontal split with the knob off would draw one bar and leave the rest of its column to
+/// nobody. Offering the gesture there would be offering the hole.
+#[test]
+fn the_knob_off_leaves_the_modifier_meaningless() {
+    let style = style();
+    let mut scene = a_side_beside_a_column(false);
+    let ctx = Context::default();
+    frames(&ctx, &mut scene.state, &style, false);
+
+    let target = collapse_arrow_of(&layout_of(&ctx), scene.inside[0], &style);
+    click(
+        &ctx,
+        &mut scene.state,
+        &style,
+        false,
+        target,
+        Modifiers::SHIFT,
+    );
+
+    assert!(
+        !scene.state[path(scene.side)].is_stowed(),
+        "with the knob off the modifier put a side away anyway, and the side it put away has a \
+         column with one bar in it and nothing under that"
+    );
+    assert!(
+        scene.state[path(scene.inside[0])].is_collapsed(),
+        "the arrow keeps its ordinary meaning instead"
     );
 }
 

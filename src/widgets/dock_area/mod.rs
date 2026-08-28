@@ -411,6 +411,28 @@ impl<'tree, Tab> DockArea<'tree, Tab> {
     /// Only a collapsed *leaf* whose sibling is open collapses sideways. Two collapsed
     /// siblings keep their columns (there would be nobody to take the width), and so does a
     /// collapsed *split*, whose subtree is rows of tab bars that do not fit in a strip.
+    ///
+    /// # Putting a whole side away
+    ///
+    /// The last of those is the case that turns up in practice — a side made of several leaves,
+    /// where collapsing them one by one frees no space at all. So this knob also enables the
+    /// gesture for the other spelling: **the secondary-button modifier plus a leaf's collapse
+    /// arrow puts that leaf's parent split away as a unit** (see
+    /// [`SplitNode::stowed`](crate::SplitNode::stowed)). The side becomes one strip with one
+    /// arrow, its insides are left exactly as they are for when it comes back, and the arrow on
+    /// the strip brings it back. Held on that arrow in turn, the modifier walks one level out
+    /// again, which is how a side of three leaves goes away in two clicks.
+    ///
+    /// Behind this knob because the layout is: with it off, a side stowed under a horizontal
+    /// split would draw one bar and leave the rest of its column belonging to no node — the very
+    /// hole described above. And on a *floating* surface the same modifier already means
+    /// "collapse the whole window", which keeps its meaning, so the gesture is one for the main
+    /// surface unless [`secondary_button_on_modifier`](Self::secondary_button_on_modifier) is
+    /// off.
+    ///
+    /// Stowing is the one thing here that *is* serialized, because it is a decision rather than
+    /// something derived from the leaves; a tree saved before it existed loads as not stowed,
+    /// which is what it was.
     #[inline(always)]
     pub fn collapse_sideways(mut self, collapse_sideways: bool) -> Self {
         self.collapse_sideways = collapse_sideways;

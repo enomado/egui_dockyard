@@ -63,7 +63,7 @@ asserted by `the_generator_reaches_what_the_properties_assume`, and
 `round_trip_keeps_a_subtree_stowed_and_its_insides_untouched` states the whole point of the
 decision above — the subtree comes back stowed, one row, insides untouched.
 
-### 2. Layout and traversal — **done, `<stage 2>`**
+### 2. Layout and traversal — **done, `d40bde3`**
 
 `fits_in_a_strip` replaces the inline `is_leaf()` in the sideways branch of `cut_split`: a
 collapsed leaf *or* a stowed split, and the comment says why a merely fully-collapsed split
@@ -89,7 +89,7 @@ The one that catches a leftover entry asks it of a context that has already draw
 **open**; from a fresh context the subtree has no entries and every assertion passes without the
 layout doing anything.
 
-### 3. The strip for a subtree — **done, `<stage 3>`**
+### 3. The strip for a subtree — **done, `454a0fc`**
 
 `side_strip` became `collapsed_bar`: the same drawing serves a leaf squeezed sideways and a
 whole side put away, because it is the same picture — one arrow on a tab bar's background and
@@ -103,7 +103,7 @@ sitting on. `DockMutation::SetSplitStowed` is that second edit. A stowed split g
 point in the second pass (`show_stowed_split`) — the one thing drawn for a node that is not a
 leaf.
 
-### 4. The gesture — **done, `<stage 4>`**
+### 4. The gesture — **done, `d2299d1`**
 
 `stow_target` answers "what would this arrow put away while the modifier is held": the **parent**
 of whatever it sits on, or nothing. Held on the arrow of a side that is already stowed it walks

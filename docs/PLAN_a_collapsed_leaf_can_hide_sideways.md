@@ -1,11 +1,13 @@
 # Plan: a collapsed leaf can hide sideways
 
-**Status: done** — commit `195e60b`, on `main` and **not pushed yet**; acceptance by clicking is
-still outstanding (see "What is left"). Entry point for whoever picks this up — read this file,
-then the sideways branch of
-[src/widgets/dock_area/show/mod.rs](../src/widgets/dock_area/show/mod.rs) (`compute_rect_sizes`),
-[`NodeGeometry::side_strip`](../src/layout/mod.rs), and
-[tests/a_collapsed_leaf_can_hide_sideways.rs](../tests/a_collapsed_leaf_can_hide_sideways.rs).
+**Status: done and in use** — feature `195e60b`, artefact fix `1d5ccee`, refactor `50c3fe0`, all
+pushed. Accepted by clicking in an application (`bur/rust_app`, which turns the knob on in its
+`DockArea`); what that acceptance found is the "Afterwards" section below, and it is worth
+reading before the rest. Entry point for whoever picks this up — this file, then `cut_split` in
+[src/widgets/dock_area/show/mod.rs](../src/widgets/dock_area/show/mod.rs),
+[`NodeGeometry::side_strip` and `::divider`](../src/layout/mod.rs), and the two test files
+([hide_sideways](../tests/a_collapsed_leaf_can_hide_sideways.rs),
+[no_boundary_to_drag](../tests/a_hidden_half_has_no_boundary_to_drag.rs)).
 
 **Where it comes from.** Стас saw "hiding into the side" in `egui_tiles` and wanted the same
 here. The scouting pass found **it is not there**: not in 0.17.1, not in the open PRs; what
@@ -118,14 +120,48 @@ cargo test                                           # the whole crate
 
 Last run (2026-08-28, after `195e60b`): 5 / 2 / 121 passed, whole suite 24 binaries, 0 failed.
 
+## Afterwards: what clicking found, and what it cost to fix (`1d5ccee`, `50c3fe0`)
+
+The first person to use this in an application saw **a stick you can drag, painted over the
+panels, attached to nothing**: the sibling had taken the width correctly, and the split's divider
+was still there, drawn at the *ratio* — across the sibling, over space that child owns.
+
+Everything in this file was green while that was true, and that is the part worth keeping. The
+tests here state where the two children **land**, and a divider lying across a child moves
+nobody's rectangle. What it silently costs is the other thing the ratio is for: grabbing a
+divider *writes* `SplitNode::fraction`, and that fraction is exactly what the hidden half keeps
+for when it comes back — so the gesture edited the width of a leaf that was not on screen.
+
+Cause: "does this split have a divider?" was written out **twice**, inline, both phrased on
+`is_vertical()`. The sideways branch was added to the layout without either copy hearing about
+it. A third copy lived in `tests/dst.rs`, so the sweep could not have caught it either.
+
+The fix that stuck was not a third condition but removing the question. The layout pass already
+computes the divider's rectangle in every branch — cutting the children *is* choosing the line
+between them — so `cut_split` now returns a `SplitCut { children, divider, side_strip }` and one
+place writes it to the geometry map. Drawing, the junction handles and the DST sweep all *read*
+`DockLayout::divider`. A new branch cannot forget: the field is not optional.
+
+Two things learned, both by mutation:
+
+* **Aim the oracle at the ratio, not at the presence of a line.** The first mutation put a
+  divider at the *strip's edge* and survived — the drag test aims where the divider was when
+  both halves were open. That is the right target (it is the bug), but the distinction has to be
+  deliberate: a divider at the strip's edge is a plausible future design, not a regression.
+* **A guard that cannot be made to fail is worse than none.** `set_rect` also cleared the
+  divider, by analogy with `side_strip`. Dropping it killed no test, and the reason turned out
+  to be sound — `set_divider` is called for every split every pass, and a split that loses a
+  child is *removed* rather than turned into a leaf. So it was deleted rather than kept as
+  decoration, and the asymmetry with `side_strip` written down where it would otherwise read as
+  an oversight.
+
 ## What is left
 
-* **Acceptance by clicking, on Стас.** `cargo run --example hello`, tick "Collapse sideways
-  (experimental)" — collapse the left leaf, check the sibling took the width, expand with the
-  arrow.
-* **Not pushed.** `bur/rust_app` vendors this crate over git
-  (`egui_dock = { git = ".../egui_dockyard" }`), so the change reaches the application only after
-  a push and a lock update. Not needed for this task.
+* **A `Collapse` step in `tests/dst.rs`.** The sweep cannot collapse a leaf at all — there is no
+  such step — so this whole class is unreachable to it *by construction*, and its silence
+  through the artefact above meant nothing. Needs the step, an outcome counter, and refusals
+  ("nothing to collapse"), which is a session of its own rather than an add-on.
+* The two backlog items below, untouched.
 
 ## Backlog
 

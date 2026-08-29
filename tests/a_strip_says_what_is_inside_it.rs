@@ -261,6 +261,45 @@ fn a_stowed_side_names_every_leaf_inside_it() {
     );
 }
 
+/// A side stowed under a *vertical* parent is a horizontal bar, and it names its tabs the plain
+/// way round — no quarter turn, because there is nothing to turn for.
+///
+/// The other axis of the same code, and the one the vertical scenes cannot speak for: `side` is
+/// `None` here, which is how the layout says "this is a bar". An implementation that turned every
+/// name would draw this one sideways in something one tab bar *tall*.
+#[test]
+fn a_bar_names_its_tabs_the_plain_way_round() {
+    let style = style();
+
+    let mut state = DockState::new(vec![tab("top")]);
+    let top = state.main_surface().root().unwrap();
+    let [_, first] = state.split(path(top), Split::Below, 0.5, Node::leaf(tab("Tuning")));
+    state.split(path(first), Split::Right, 0.5, Node::leaf(tab("Debug")));
+    let side = state
+        .main_surface()
+        .parent(first)
+        .expect("the two side-by-side leaves have a parent");
+    state.main_surface_mut().set_split_stowed(side, true);
+
+    let ctx = Context::default();
+    let painted = frames(&ctx, &mut state, &style);
+    let bar_rect = rect_of(&layout_of(&ctx), side);
+    let names = names_in(&painted, bar_rect);
+
+    assert_eq!(
+        texts(&names),
+        vec!["Tuning", "Debug"],
+        "a bar should name what is inside it, left to right"
+    );
+    for name in &names {
+        assert_eq!(
+            name.angle, 0.0,
+            "{:?} was turned on its side in a bar one tab bar tall",
+            name.text
+        );
+    }
+}
+
 /// Clicking a name brings the panel back *and* makes that tab the one showing.
 ///
 /// The tab clicked is deliberately not the active one: an implementation that only expands would

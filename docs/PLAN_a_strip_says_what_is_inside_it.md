@@ -94,6 +94,8 @@ arrow's own square is untouched — it is allocated first and the names start be
 ### 4. Oracles — `tests/a_strip_says_what_is_inside_it.rs`
 
 * a collapsed-sideways leaf's strip carries its own tabs' names;
+* a side stowed under a *vertical* parent — a bar, not a strip — names its tabs the plain way
+  round, which is the only oracle for the horizontal axis of the same code;
 * a stowed side's strip carries the names of every leaf inside it, in tree order — the scene is a
   side of **three** leaves, for the same reason the stowing plan's gesture scene is;
 * clicking a name brings the panel back **and makes that tab active** — asserted on the tab that
@@ -111,6 +113,7 @@ states is removed. Five mutations, all killed, and each by the tests that should
 | the walk keeps only the first child | `a_stowed_side_names_every_leaf_inside_it` alone |
 | `Truncate` → `Extend` | the truncation oracle **and** the no-room one |
 | the minimum name length is dropped | `a_name_with_no_room_left_is_not_drawn` — the last name spills past the strip |
+| the quarter turn is applied to a *bar* as well | `a_bar_names_its_tabs_the_plain_way_round` alone |
 
 `the_arrow_brings_the_panel_back_as_it_was` survived every one of them, which is what it is for:
 the arrow's own meaning is not this feature's to change.

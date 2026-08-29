@@ -26,19 +26,28 @@ fn tab_body_id(dock_area_id: Id, path: NodePath, tab_id: Id) -> Id {
     dock_area_id.with((path.surface, "surface")).with(tab_id)
 }
 
-/// The shortest a name in a strip may be squeezed before the strip gives up on it.
+/// The least text a squeezed name needs before it stops being a name.
 ///
 /// Truncation can always make a name fit, which is exactly why a lower bound is needed: without
-/// one, a strip holding forty tabs would be forty ellipses saying nothing at all. So the bound is
-/// what it takes for a *name* to survive the squeeze — room for a few letters ahead of the
-/// ellipsis, rather than merely room for the ellipsis itself.
-const STRIP_MIN_NAME_LENGTH: f32 = 48.0;
+/// one, forty tabs would be forty ellipses saying nothing at all. So the bound is what it takes
+/// for a *name* to survive the squeeze — room for four or five characters ahead of the ellipsis,
+/// enough that `Geology` comes out as `Geol…` rather than as the bare mark.
+///
+/// A tab bar and a strip both stop here; what differs is what each has to add around the text
+/// (padding at both ends, and a close button in a tab).
+const MIN_SQUEEZED_TEXT: f32 = 40.0;
+
+/// The shortest a name in a strip may be squeezed before the strip gives up on it.
+const STRIP_MIN_NAME_LENGTH: f32 = MIN_SQUEEZED_TEXT + 2.0 * STRIP_NAME_PADDING;
 
 /// Breathing room at each end of a name, along the strip.
 const STRIP_NAME_PADDING: f32 = 4.0;
 
-/// What a strip draws in place of the names it had no room for.
-const STRIP_OVERFLOW: &str = "…";
+/// Breathing room at each end of a tab's name, and how far its text sits from the tab's edge.
+const TAB_TEXT_PADDING: f32 = 8.0;
+
+/// What a strip or a tab bar draws in place of the names it had no room for.
+const OVERFLOW_MARK: &str = "…";
 
 /// Lays a strip's name out into `room` along the strip, truncating it with an ellipsis.
 ///
@@ -139,21 +148,88 @@ fn fit_strip_names(naturals: &[f32], gaps: &[f32], available: f32, ellipsis: f32
     if overflow {
         budget -= ellipsis;
     }
+    let budget = budget;
 
-    // Water filling: shortest first, each taking an equal share of what is left or its own
-    // length, whichever is less. Handing a short name's surplus back to those still waiting is
-    // what makes the result even, and what keeps a name from being padded out past its text.
-    let mut order: Vec<usize> = (0..shown).collect();
+    StripFit {
+        lengths: share_room(&naturals[..shown], budget),
+        overflow,
+    }
+}
+
+/// The mark a tab bar draws when it is not showing every tab it has.
+fn tab_mark_galley(ui: &Ui) -> Arc<Galley> {
+    WidgetText::from(OVERFLOW_MARK).into_galley(ui, None, f32::INFINITY, TextStyle::Button)
+}
+
+/// How wide each tab of a bar gets to be, and whether the bar has to admit it is not showing
+/// all of them.
+struct TabBarFit {
+    /// One width per tab, in bar order. Every tab gets one: a tab bar drops nothing, because it
+    /// scrolls, and a tab that scrolled off is still reachable.
+    widths: Vec<f32>,
+    /// Set when the tabs do not fit even squeezed. The bar then keeps `mark` px at its right end
+    /// for the ellipsis, which says there is more here than is on screen.
+    mark: Option<f32>,
+}
+
+/// Shares `available` out between tabs wanting `wants`, never squeezing one below its `floor`.
+///
+/// A tab bar squeezes for the same reason a strip does, and stops for a different one. Where a
+/// strip runs out of room it *drops* names, because there is nothing else it could do with them;
+/// a bar scrolls, so every tab keeps a width and what does not fit stays reachable by the wheel.
+/// The mark at the end is what says so — without it a bar that is scrolled to the left looks
+/// exactly like a bar with nothing more to show.
+///
+/// `fixed` is the room the gaps between tabs take, which no tab can be given. `ellipsis` is what
+/// the mark itself needs; it is charged to the same width, so the mark never lands on a tab.
+fn fit_tab_widths(
+    wants: &[f32],
+    floors: &[f32],
+    fixed: f32,
+    available: f32,
+    ellipsis: f32,
+) -> TabBarFit {
+    debug_assert_eq!(wants.len(), floors.len());
+
+    // `floor` is a floor, not a width: a tab whose name is shorter than the minimum keeps its own
+    // width instead of being padded out to a minimum it does not need.
+    let widths: Vec<f32> = share_room(wants, available - fixed)
+        .into_iter()
+        .zip(floors)
+        .map(|(share, floor)| share.max(*floor))
+        .collect();
+
+    // `share_room` never hands out more than the budget, so the only way a bar overflows is a
+    // floor holding a tab up — which is also why the mark is not paid for out of the shares.
+    // Reducing the budget would move the tabs that are *above* their floor, and at this point
+    // there are none: it is the floors that are over the budget. The room for the mark comes off
+    // the width the bar shows instead, in `tab_bar`, so it never lands on a tab.
+    let mark = (widths.iter().sum::<f32>() + fixed > available).then_some(ellipsis);
+    TabBarFit { widths, mark }
+}
+
+/// Shares `budget` out between claims wanting `naturals`, evenly but never past what each wants.
+///
+/// Water filling: shortest claim first, each taking an equal share of what is left or its own
+/// length, whichever is less. Handing a short claim's surplus back to those still waiting is what
+/// makes the result even — one long name cannot starve four short ones — and what keeps a short
+/// name from being padded out past its own text.
+///
+/// Claims may come back with less than they asked for; that is the whole point, and what the
+/// caller does about it (truncate, drop, leave to a scrollbar) is the caller's own rule.
+fn share_room(naturals: &[f32], budget: f32) -> Vec<f32> {
+    let mut order: Vec<usize> = (0..naturals.len()).collect();
     order.sort_by(|left, right| naturals[*left].total_cmp(&naturals[*right]));
-    let mut lengths = vec![0.0; shown];
-    let mut waiting = shown;
+
+    let mut shares = vec![0.0; naturals.len()];
+    let mut left = budget;
+    let mut waiting = naturals.len();
     for index in order {
-        lengths[index] = naturals[index].min(budget / waiting as f32);
-        budget -= lengths[index];
+        shares[index] = naturals[index].min(left / waiting as f32);
+        left -= shares[index];
         waiting -= 1;
     }
-
-    StripFit { lengths, overflow }
+    shares
 }
 
 /// One tab as a strip names it: what to draw, and what a click on it asks for.
@@ -303,6 +379,13 @@ impl<Tab> DockArea<'_, Tab> {
             available_width -= Style::TAB_COLLAPSE_BUTTON_SIZE;
         }
 
+        // How the width is shared out among the tabs, worked out before any of them is drawn —
+        // and, when they do not all fit, the room the mark saying so takes at the right end.
+        let fit = self.tab_widths(ui, path, tab_viewer, fade_style, available_width);
+        if let Some(mark) = fit.mark {
+            available_width -= mark;
+        }
+
         let (actual_width, tab_hovered) = {
             let leaf = self
                 .dock_state
@@ -342,21 +425,33 @@ impl<Tab> DockArea<'_, Tab> {
             // its tab bar must show a *cut* tab bar.
             clip_to(tabs_ui, clip_rect);
 
-            // Desired size for tabs in "expanded" mode.
-            let prefered_width = style
-                .tab_bar
-                .fill_tab_bar
-                .then_some(available_width / (leaf.len() as f32));
-
             let tab_hovered = self.tabs(
                 tabs_ui,
                 state,
                 path,
                 tab_viewer,
                 tabbar_outer_rect,
-                prefered_width,
+                &fit.widths,
                 fade_style,
             );
+
+            // The mark for the tabs that did not fit, in the room reserved for it above so that
+            // it never lands on a tab. Outside `tabs_ui`, and so outside the scroll: it says the
+            // bar is not showing everything it has, which stays true wherever the bar is
+            // scrolled to. A mark and not a tab — there is no one tab behind it to click.
+            if let Some(mark) = fit.mark {
+                let style = fade_style.unwrap_or_else(|| self.style.as_ref().unwrap());
+                let galley = tab_mark_galley(ui);
+                let slot = Rect::from_min_size(
+                    pos2(clip_rect.right(), tabbar_outer_rect.top()),
+                    vec2(mark, tabbar_outer_rect.height()),
+                );
+                ui.painter().add(TextShape::new(
+                    slot.center() - galley.size() / 2.0,
+                    galley,
+                    style.tab.inactive.text_color,
+                ));
+            }
 
             // Draw hline from tab end to edge of tab bar.
             let px = ui.ctx().pixels_per_point().recip();
@@ -439,6 +534,73 @@ impl<Tab> DockArea<'_, Tab> {
         tabbar_outer_rect
     }
 
+    /// How wide each tab in this leaf's bar gets to be, given the room the bar has.
+    ///
+    /// Asked before anything is drawn, because how the width is shared out is a question about
+    /// the whole bar: a tab cannot be given its share out of whatever is left when the bar
+    /// reaches it, which is what "wide as its name, and the rest scrolls off" amounted to.
+    ///
+    /// What a tab *wants* is its name laid out in full, plus padding, plus its close button, and
+    /// never less than the style's own `minimum_width`. What it can be squeezed to is that same
+    /// furniture around [`MIN_SQUEEZED_TEXT`] — or its own width, if it is already narrower.
+    fn tab_widths(
+        &self,
+        ui: &Ui,
+        path: NodePath,
+        tab_viewer: &mut impl TabViewer<Tab = Tab>,
+        fade: Option<&Style>,
+        available_width: f32,
+    ) -> TabBarFit {
+        let style = fade.unwrap_or_else(|| self.style.as_ref().unwrap());
+        let leaf = self
+            .dock_state
+            .leaf(path)
+            .expect("This node must be a leaf");
+
+        let mut wants = Vec::with_capacity(leaf.len());
+        let mut floors = Vec::with_capacity(leaf.len());
+        let mut fixed = 0.0;
+        for index in 0..leaf.len() {
+            let tab_index = TabIndex(index);
+            let tab = &leaf[tab_index];
+            let tab_style = tab_viewer
+                .tab_style_override(tab, &style.tab)
+                .unwrap_or_else(|| style.tab.clone());
+
+            let close = if self.show_close_buttons && tab_viewer.is_closeable(tab) {
+                Style::TAB_CLOSE_BUTTON_SIZE.min(style.tab_bar.height)
+            } else {
+                0.0
+            };
+            let furniture = close + 2.0 * TAB_TEXT_PADDING;
+            let text = tab_viewer
+                .title(tab)
+                .into_galley(ui, None, f32::INFINITY, TextStyle::Button)
+                .size()
+                .x;
+
+            let want = (text + furniture).at_least(tab_style.minimum_width.unwrap_or(0.0));
+            wants.push(want);
+            floors.push(want.min(furniture + MIN_SQUEEZED_TEXT));
+            if index != 0 {
+                fixed += tab_style.spacing;
+            }
+        }
+
+        // `fill_tab_bar` is the same question asked from the other side: it says a tab may be
+        // *widened* to an equal share when there is room going spare. Expressed as a want rather
+        // than as a second rule, so that a bar which is both filled and overfull still squeezes.
+        if style.tab_bar.fill_tab_bar && !wants.is_empty() {
+            let equal = (available_width - fixed) / wants.len() as f32;
+            for want in &mut wants {
+                *want = want.at_least(equal);
+            }
+        }
+
+        let ellipsis = tab_mark_galley(ui).size().x + 2.0 * TAB_TEXT_PADDING;
+        fit_tab_widths(&wants, &floors, fixed, available_width, ellipsis)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn tabs(
         &mut self,
@@ -447,7 +609,7 @@ impl<Tab> DockArea<'_, Tab> {
         path: NodePath,
         tab_viewer: &mut impl TabViewer<Tab = Tab>,
         tabbar_outer_rect: Rect,
-        preferred_width: Option<f32>,
+        widths: &[f32],
         fade: Option<&Style>,
     ) -> bool {
         let mut tab_hovered = false;
@@ -532,7 +694,7 @@ impl<Tab> DockArea<'_, Tab> {
                             is_active && Some(path) == focused,
                             is_active,
                             is_being_dragged,
-                            preferred_width,
+                            widths[tab_index.0],
                             show_close_button,
                             fade,
                         )
@@ -577,7 +739,7 @@ impl<Tab> DockArea<'_, Tab> {
                     is_active && Some(path) == focused,
                     is_active,
                     is_being_dragged,
-                    preferred_width,
+                    widths[tab_index.0],
                     show_close_button,
                     fade,
                 );
@@ -1075,7 +1237,7 @@ impl<Tab> DockArea<'_, Tab> {
             .iter()
             .map(|name| strip_length(&strip_galley(ui, name.title.clone(), f32::INFINITY)))
             .collect();
-        let overflow = strip_galley(ui, STRIP_OVERFLOW.into(), f32::INFINITY);
+        let overflow = strip_galley(ui, OVERFLOW_MARK.into(), f32::INFINITY);
         let fit = fit_strip_names(&naturals, &gaps, end - start, strip_length(&overflow));
 
         let mut cursor = start;
@@ -1601,26 +1763,27 @@ impl<Tab> DockArea<'_, Tab> {
         focused: bool,
         active: bool,
         is_being_dragged: bool,
-        preferred_width: Option<f32>,
+        tab_width: f32,
         show_close_button: bool,
         fade: Option<&Style>,
     ) -> (Response, Option<Response>) {
         let style = fade.unwrap_or_else(|| self.style.as_ref().unwrap());
-        let galley = label.into_galley(ui, None, f32::INFINITY, TextStyle::Button);
-        let x_spacing = 8.0;
-        let text_width = galley.size().x + 2.0 * x_spacing;
+        let x_spacing = TAB_TEXT_PADDING;
         let close_button_size = if show_close_button {
             Style::TAB_CLOSE_BUTTON_SIZE.min(style.tab_bar.height)
         } else {
             0.0
         };
 
-        // Compute total width of the tab bar.
-        let minimum_width = tab_style
-            .minimum_width
-            .unwrap_or(0.0)
-            .at_least(text_width + close_button_size);
-        let tab_width = preferred_width.unwrap_or(0.0).at_least(minimum_width);
+        // The width was decided for the bar as a whole (`tab_widths`), so the name is laid out
+        // into what this tab was given rather than the other way round: `Truncate` cuts it with
+        // an ellipsis when the bar had to squeeze, and changes nothing when it did not.
+        let galley = label.into_galley(
+            ui,
+            Some(TextWrapMode::Truncate),
+            (tab_width - close_button_size - 2.0 * x_spacing).max(0.0),
+            TextStyle::Button,
+        );
 
         let (_, tab_rect) = ui.allocate_space(vec2(tab_width, ui.available_height()));
         let mut response = ui.interact(tab_rect, id, Sense::click_and_drag());
@@ -1937,7 +2100,7 @@ impl<Tab> DockArea<'_, Tab> {
 
 #[cfg(test)]
 mod tests {
-    use super::{STRIP_MIN_NAME_LENGTH, fit_strip_names, tab_body_id};
+    use super::{STRIP_MIN_NAME_LENGTH, fit_strip_names, fit_tab_widths, tab_body_id};
     use crate::{DockState, NodePath, SurfaceIndex};
     use egui::Id;
 
@@ -2007,6 +2170,61 @@ mod tests {
 
         assert!(fit.lengths.is_empty());
         assert!(!fit.overflow);
+    }
+
+    /// A bar shares its width out between the tabs rather than serving them in order until it
+    /// runs out: three tabs wanting 300 px each get a third of the bar apiece.
+    #[test]
+    fn a_full_bar_squeezes_its_tabs() {
+        let fit = fit_tab_widths(&[300.0; 3], &[72.0; 3], 0.0, 300.0, ELLIPSIS);
+
+        assert_eq!(fit.widths, vec![100.0, 100.0, 100.0]);
+        assert!(fit.mark.is_none(), "squeezed, but all three are on screen");
+    }
+
+    /// No tab is squeezed past the point where its name stops being a name, even if that is what
+    /// it would take to fit them all — the bar scrolls, so the tabs past the edge are not lost.
+    #[test]
+    fn a_tab_is_not_squeezed_below_its_floor() {
+        let fit = fit_tab_widths(&[300.0, 300.0], &[72.0, 72.0], 0.0, 100.0, ELLIPSIS);
+
+        assert_eq!(fit.widths, vec![72.0, 72.0], "held up by the floor");
+        assert_eq!(
+            fit.mark,
+            Some(ELLIPSIS),
+            "144 px of tabs in a 100 px bar: the bar has to say so"
+        );
+    }
+
+    /// A tab whose name is short keeps its own width instead of being padded to the floor, and
+    /// hands what it does not need to the tab beside it.
+    #[test]
+    fn a_short_tab_keeps_its_own_width() {
+        let fit = fit_tab_widths(&[30.0, 300.0], &[30.0, 72.0], 0.0, 200.0, ELLIPSIS);
+
+        assert_eq!(fit.widths, vec![30.0, 170.0]);
+        assert!(fit.mark.is_none());
+    }
+
+    /// A bar with room to spare gives every tab what it asked for and says nothing.
+    #[test]
+    fn a_bar_with_room_to_spare_marks_nothing() {
+        let fit = fit_tab_widths(&[100.0, 100.0], &[72.0, 72.0], 0.0, 400.0, ELLIPSIS);
+
+        assert_eq!(fit.widths, vec![100.0, 100.0], "nothing to squeeze");
+        assert!(fit.mark.is_none());
+    }
+
+    /// The gaps between tabs are not the tabs' to share: they come off the width first.
+    #[test]
+    fn the_gaps_between_tabs_are_not_shared_out() {
+        let fit = fit_tab_widths(&[300.0, 300.0], &[72.0, 72.0], 20.0, 220.0, ELLIPSIS);
+
+        assert_eq!(fit.widths, vec![100.0, 100.0]);
+        assert!(
+            fit.mark.is_none(),
+            "200 px of tabs and 20 px of gap fit a 220 px bar exactly"
+        );
     }
 
     /// The hairlines between leaves come out of the strip's length like everything else.

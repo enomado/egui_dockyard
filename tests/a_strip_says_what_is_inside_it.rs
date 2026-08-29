@@ -37,6 +37,10 @@ const DOCK_ID: &str = "a_strip_says_what_is_inside_it";
 /// be reporting the snapping rather than the property.
 const TOLERANCE: f32 = 0.5;
 
+/// The mark a strip draws in place of the names it had no room for. A *truncated name* also ends
+/// in this character, which is why every assertion about the mark compares the whole text.
+const ELLIPSIS: &str = "…";
+
 struct Viewer;
 
 impl TabViewer for Viewer {
@@ -409,12 +413,52 @@ fn a_name_too_long_for_the_strip_is_truncated_into_it() {
     );
 }
 
-/// Names that have no room left are not drawn at all, and nothing is drawn outside the strip.
+/// A strip with more names than room squeezes *all* of them before dropping any.
 ///
-/// The scene is a short strip and more tabs than fit: what the last ones must *not* do is spill
-/// past the bottom of the panel.
+/// The scene is twelve names that cannot all be drawn in full and can all be drawn cut: an
+/// implementation that gives each name what it asks for until the room runs out draws about half
+/// of them and loses the rest without saying so.
 #[test]
-fn a_name_with_no_room_left_is_not_drawn() {
+fn names_are_squeezed_before_any_of_them_is_dropped() {
+    let style = style();
+    let mut state = DockState::new(vec![tab("open")]);
+    let open = state.main_surface().root().unwrap();
+    let tabs: Vec<String> = (0..12)
+        .map(|i| tab(&format!("Panel number {i} with a name of some length")))
+        .collect();
+    let [_, strip] = state.split(path(open), Split::Left, 0.5, Node::leaf_with(tabs));
+    state.main_surface_mut().set_leaf_collapsed(strip, true);
+
+    let ctx = Context::default();
+    let painted = frames(&ctx, &mut state, &style);
+    let strip_rect = rect_of(&layout_of(&ctx), strip);
+    let inside = names_in(&painted, strip_rect);
+
+    assert_eq!(
+        inside.len(),
+        12,
+        "every tab should still be named: {:?}",
+        texts(&inside)
+    );
+    assert!(
+        inside.iter().all(|name| name.text != ELLIPSIS),
+        "nothing was dropped, so nothing should stand in for it: {:?}",
+        texts(&inside)
+    );
+    assert!(
+        inside.iter().all(|name| name.text.ends_with('…')),
+        "names this long cannot fit twelve to a strip uncut: {:?}",
+        texts(&inside)
+    );
+}
+
+/// What the strip cannot hold even squeezed is stood for by an ellipsis at the end of it —
+/// never by silence, which would claim those tabs are not there at all.
+///
+/// The scene is forty tabs in one strip: no arrangement fits them, so some are dropped, and the
+/// mark that says so is the last thing drawn. Nothing spills past the bottom of the panel either.
+#[test]
+fn what_the_strip_cannot_hold_is_stood_for_by_an_ellipsis() {
     let style = style();
     let mut state = DockState::new(vec![tab("open")]);
     let open = state.main_surface().root().unwrap();
@@ -435,6 +479,16 @@ fn a_name_with_no_room_left_is_not_drawn() {
     assert!(
         !inside.is_empty(),
         "the strip should still name what it can"
+    );
+
+    // A bare ellipsis, and not merely a name that happens to end in one: the mark stands for the
+    // tabs that were dropped, so it carries no name of its own.
+    let last = inside.last().expect("the strip drew something");
+    assert_eq!(
+        last.text,
+        ELLIPSIS,
+        "the strip should end by saying there is more: {:?}",
+        texts(&inside)
     );
 
     // Nothing the strip drew may land outside it: `names_in` filters by rectangle, so this

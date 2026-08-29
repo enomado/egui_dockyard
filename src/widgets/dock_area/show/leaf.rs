@@ -1,10 +1,10 @@
-use std::{f32::consts::FRAC_PI_2, ops::RangeInclusive};
+use std::{f32::consts::FRAC_PI_2, ops::RangeInclusive, sync::Arc};
 
 use egui::{
-    Align, Align2, Button, Color32, CornerRadius, CursorIcon, Frame, Id, Key, LayerId, Layout,
-    NumExt, Order, Popup, PopupCloseBehavior, Rect, Response, ScrollArea, Sense, Shape, Stroke,
-    StrokeKind, TextStyle, TextWrapMode, Ui, UiBuilder, Vec2, WidgetText, emath::TSTransform,
-    epaint::TextShape, pos2, vec2,
+    Align, Align2, Button, Color32, CornerRadius, CursorIcon, Frame, Galley, Id, Key, LayerId,
+    Layout, NumExt, Order, Popup, PopupCloseBehavior, Rect, Response, ScrollArea, Sense, Shape,
+    Stroke, StrokeKind, TextStyle, TextWrapMode, Ui, UiBuilder, Vec2, WidgetText,
+    emath::TSTransform, epaint::TextShape, pos2, vec2,
 };
 
 use crate::NodePath;
@@ -24,6 +24,136 @@ use crate::{
 
 fn tab_body_id(dock_area_id: Id, path: NodePath, tab_id: Id) -> Id {
     dock_area_id.with((path.surface, "surface")).with(tab_id)
+}
+
+/// The shortest a name in a strip may be squeezed before the strip gives up on it.
+///
+/// Truncation can always make a name fit, which is exactly why a lower bound is needed: without
+/// one, a strip holding forty tabs would be forty ellipses saying nothing at all. So the bound is
+/// what it takes for a *name* to survive the squeeze — room for a few letters ahead of the
+/// ellipsis, rather than merely room for the ellipsis itself.
+const STRIP_MIN_NAME_LENGTH: f32 = 48.0;
+
+/// Breathing room at each end of a name, along the strip.
+const STRIP_NAME_PADDING: f32 = 4.0;
+
+/// What a strip draws in place of the names it had no room for.
+const STRIP_OVERFLOW: &str = "…";
+
+/// Lays a strip's name out into `room` along the strip, truncating it with an ellipsis.
+///
+/// Pass `f32::INFINITY` to ask how long the name would like to be: `Truncate` only cuts at the
+/// width it is given, so one call answers both "how much does this name want" and "draw it this
+/// long", and the two can never disagree about where the cut falls.
+fn strip_galley(ui: &Ui, title: WidgetText, room: f32) -> Arc<Galley> {
+    title.into_galley(
+        ui,
+        Some(TextWrapMode::Truncate),
+        (room - 2.0 * STRIP_NAME_PADDING).max(0.0),
+        TextStyle::Button,
+    )
+}
+
+/// The room a laid-out name takes along the strip: its glyphs, plus padding at each end.
+fn strip_length(galley: &Galley) -> f32 {
+    galley.size().x + 2.0 * STRIP_NAME_PADDING
+}
+
+/// The rectangle a run of `length` along the strip takes, starting `cursor` along it.
+///
+/// A strip runs down the screen and a bar runs across it: everything a strip draws is the full
+/// width of one and the full height of the other, so only which axis is which differs.
+fn strip_slot(rect: Rect, vertical: bool, cursor: f32, length: f32) -> Rect {
+    if vertical {
+        Rect::from_min_size(pos2(rect.left(), cursor), vec2(rect.width(), length))
+    } else {
+        Rect::from_min_size(pos2(cursor, rect.top()), vec2(length, rect.height()))
+    }
+}
+
+/// Draws `galley` in the middle of `slot`, turned a quarter turn when the strip is vertical.
+///
+/// Anchored at the middle of the galley, so the turn happens about the text's own centre and
+/// lands it in the middle of the rectangle either way. Anticlockwise (`angle` counts clockwise),
+/// which is what makes the glyphs run bottom-to-top — the direction a side bar is read in.
+fn strip_text(ui: &Ui, slot: Rect, galley: Arc<Galley>, color: Color32, vertical: bool) {
+    let position = slot.center() - galley.size() / 2.0;
+    let mut text = TextShape::new(position, galley, color);
+    if vertical {
+        text = text.with_angle_and_anchor(-FRAC_PI_2, Align2::CENTER_CENTER);
+    }
+    ui.painter().add(text);
+}
+
+/// How the names of a strip share the room it has.
+struct StripFit {
+    /// What each drawn name gets, in list order. Shorter than the list of names when the strip
+    /// could not hold them all even squeezed — the rest are what `overflow` stands for.
+    lengths: Vec<f32>,
+    /// Whether an ellipsis follows the names, standing for those that got no room at all.
+    overflow: bool,
+}
+
+/// Shares `available` out between names wanting `naturals`, each behind a fixed gap of `gaps`.
+///
+/// Two rules, in this order, and both of them answers to "the strip is shorter than its names":
+///
+/// 1. **Squeeze every name before dropping any.** The room goes round as evenly as the names
+///    allow: one shorter than its share keeps its own length and hands the difference back, so a
+///    single long title cannot starve four short ones. A name given less than it wants is drawn
+///    truncated, which is what says on screen that it was cut.
+/// 2. **What cannot be squeezed in is stood for by one ellipsis** — never by silence. A strip
+///    that simply stopped would be claiming the tabs past that point are not there. Names are
+///    dropped from the end, keeping the tree's order, once even [`STRIP_MIN_NAME_LENGTH`] apiece
+///    is more than the strip has.
+///
+/// `naturals` and `gaps` run in step; `ellipsis` is the room the ellipsis itself needs.
+fn fit_strip_names(naturals: &[f32], gaps: &[f32], available: f32, ellipsis: f32) -> StripFit {
+    debug_assert_eq!(naturals.len(), gaps.len());
+
+    // How many names get drawn at all. Each costs its gap plus the least it can be squeezed
+    // into — which for a name already shorter than the minimum is its own length, so a column of
+    // short names is not thinned out to honour a minimum none of them needs. While names are
+    // still left over, the ellipsis has to be paid for out of the same length.
+    let mut shown = 0;
+    let mut spent = 0.0;
+    while shown < naturals.len() {
+        let cost = gaps[shown] + naturals[shown].min(STRIP_MIN_NAME_LENGTH);
+        let tail = if shown + 1 < naturals.len() {
+            ellipsis
+        } else {
+            0.0
+        };
+        if spent + cost + tail > available {
+            break;
+        }
+        spent += cost;
+        shown += 1;
+    }
+
+    // Unless the strip is too short even for the ellipsis, in which case there is nothing honest
+    // left to draw — and drawing a cut-off ellipsis would be the same lie in smaller print.
+    let overflow = shown < naturals.len() && ellipsis <= available;
+
+    let mut budget = available - gaps[..shown].iter().sum::<f32>();
+    if overflow {
+        budget -= ellipsis;
+    }
+
+    // Water filling: shortest first, each taking an equal share of what is left or its own
+    // length, whichever is less. Handing a short name's surplus back to those still waiting is
+    // what makes the result even, and what keeps a name from being padded out past its text.
+    let mut order: Vec<usize> = (0..shown).collect();
+    order.sort_by(|left, right| naturals[*left].total_cmp(&naturals[*right]));
+    let mut lengths = vec![0.0; shown];
+    let mut waiting = shown;
+    for index in order {
+        lengths[index] = naturals[index].min(budget / waiting as f32);
+        budget -= lengths[index];
+        waiting -= 1;
+    }
+
+    StripFit { lengths, overflow }
 }
 
 /// One tab as a strip names it: what to draw, and what a click on it asks for.
@@ -881,16 +1011,6 @@ impl<Tab> DockArea<'_, Tab> {
         );
     }
 
-    /// The length a name has to be able to run for before it is worth drawing at all.
-    ///
-    /// Truncation can always make a name fit, which is exactly why a lower bound is needed:
-    /// without one, the tail of a full strip would be a column of ellipses saying nothing. A
-    /// name with less room than this is not drawn, and neither is anything after it.
-    const STRIP_MIN_NAME_LENGTH: f32 = 24.0;
-
-    /// Breathing room at each end of a name, along the strip.
-    const STRIP_NAME_PADDING: f32 = 4.0;
-
     /// Names the tabs that a strip stands for, along whatever the arrow left of it.
     ///
     /// A panel put away should not hide *which* panels went with it: the strip is already proof
@@ -901,6 +1021,10 @@ impl<Tab> DockArea<'_, Tab> {
     /// `expand` is what the arrow queues — "come back as you were". A click on a name asks for
     /// that *and* for the tab it names, so the panel returns showing what was clicked rather than
     /// whatever happened to be active when it went away.
+    ///
+    /// A strip is as long as the panel it stands beside and never longer, so the names have to
+    /// live within whatever that is: they are squeezed and truncated first, and what is still
+    /// left over is stood for by a single ellipsis at the end. See [`fit_strip_names`].
     fn strip_names(
         &mut self,
         ui: &mut Ui,
@@ -920,10 +1044,6 @@ impl<Tab> DockArea<'_, Tab> {
         } else {
             (rect.left(), rect.right())
         };
-        if end - start < Self::STRIP_MIN_NAME_LENGTH {
-            return;
-        }
-
         // Gathered before anything is drawn: the titles come from the consumer, which wants
         // `&mut tab_viewer` while the tree is borrowed, and painting wants `&mut self` back.
         let names = self.strip_name_list(tab_viewer, path, fade_style);
@@ -933,41 +1053,42 @@ impl<Tab> DockArea<'_, Tab> {
 
         let style = fade_style.unwrap_or_else(|| self.style.as_ref().unwrap());
         let hairline = style.separator.color_idle;
+        // The ellipsis is not a tab and cannot be clicked, so it is drawn in the plainest of the
+        // three tab colours rather than in one that would offer something it does not have.
+        let overflow_color = style.tab.inactive.text_color;
+        let line = ui.ctx().pixels_per_point().recip();
+
+        // What stands in front of each name: a hairline before the first name of every leaf but
+        // the first, so it lands between two groups rather than at the top of the strip.
+        let gaps: Vec<f32> = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| match index.checked_sub(1) {
+                Some(previous) if names[previous].leaf != name.leaf => line,
+                _ => 0.0,
+            })
+            .collect();
+        // What every name would like, asked before any of it is placed: how the room is shared
+        // out is a question about the whole list, and a name cannot be given its share out of
+        // what happens to be left when the list reaches it.
+        let naturals: Vec<f32> = names
+            .iter()
+            .map(|name| strip_length(&strip_galley(ui, name.title.clone(), f32::INFINITY)))
+            .collect();
+        let overflow = strip_galley(ui, STRIP_OVERFLOW.into(), f32::INFINITY);
+        let fit = fit_strip_names(&naturals, &gaps, end - start, strip_length(&overflow));
+
         let mut cursor = start;
-        let mut previous_leaf = None;
-
-        for name in names {
-            // The hairline goes *before* the first name of every leaf but the first, so it lands
-            // between two groups rather than at the top of the strip.
-            if previous_leaf.is_some_and(|leaf| leaf != name.leaf) {
-                let line = ui.ctx().pixels_per_point().recip();
-                let separator = if vertical {
-                    Rect::from_min_size(pos2(rect.left(), cursor), vec2(rect.width(), line))
-                } else {
-                    Rect::from_min_size(pos2(cursor, rect.top()), vec2(line, rect.height()))
-                };
+        for (index, name) in names.into_iter().take(fit.lengths.len()).enumerate() {
+            if gaps[index] > 0.0 {
+                let separator = strip_slot(rect, vertical, cursor, gaps[index]);
                 ui.painter().rect_filled(separator, 0.0, hairline);
-                cursor += line;
-            }
-            previous_leaf = Some(name.leaf);
-
-            let room = end - cursor;
-            if room < Self::STRIP_MIN_NAME_LENGTH {
-                break;
+                cursor += gaps[index];
             }
 
-            let galley = name.title.into_galley(
-                ui,
-                Some(TextWrapMode::Truncate),
-                room - 2.0 * Self::STRIP_NAME_PADDING,
-                TextStyle::Button,
-            );
-            let length = galley.size().x + 2.0 * Self::STRIP_NAME_PADDING;
-            let name_rect = if vertical {
-                Rect::from_min_size(pos2(rect.left(), cursor), vec2(rect.width(), length))
-            } else {
-                Rect::from_min_size(pos2(cursor, rect.top()), vec2(length, rect.height()))
-            };
+            let galley = strip_galley(ui, name.title, fit.lengths[index]);
+            let length = strip_length(&galley);
+            let name_rect = strip_slot(rect, vertical, cursor, length);
             cursor += length;
 
             let response = ui
@@ -987,16 +1108,7 @@ impl<Tab> DockArea<'_, Tab> {
             ui.painter()
                 .rect_filled(name_rect, tab_style.corner_radius, tab_style.bg_fill);
 
-            // Anchored at the middle of the galley, so the quarter turn happens about the text's
-            // own centre and lands it in the middle of the rectangle either way. Anticlockwise
-            // (`angle` counts clockwise), which is what makes the glyphs run bottom-to-top —
-            // the direction a side bar is read in.
-            let text_pos = name_rect.center() - galley.size() / 2.0;
-            let mut text = TextShape::new(text_pos, galley, tab_style.text_color);
-            if vertical {
-                text = text.with_angle_and_anchor(-FRAC_PI_2, Align2::CENTER_CENTER);
-            }
-            ui.painter().add(text);
+            strip_text(ui, name_rect, galley, tab_style.text_color, vertical);
 
             if response.clicked() {
                 // Two mutations, in this order, and both already exist: the panel comes back and
@@ -1006,6 +1118,15 @@ impl<Tab> DockArea<'_, Tab> {
                     .push(DockMutation::Activate((name.leaf, name.tab).into()));
                 self.mutations.push(expand.clone());
             }
+        }
+
+        if fit.overflow {
+            // One ellipsis for everything the strip could not hold, drawn along the strip like a
+            // name so that it reads as the list carrying on. It says the one thing a strip that
+            // simply stopped could not: that there is more here than is written. It is a mark and
+            // not a name — there is no single tab behind it for a click to bring back.
+            let slot = strip_slot(rect, vertical, cursor, strip_length(&overflow));
+            strip_text(ui, slot, overflow, overflow_color, vertical);
         }
     }
 
@@ -1816,9 +1937,89 @@ impl<Tab> DockArea<'_, Tab> {
 
 #[cfg(test)]
 mod tests {
-    use super::tab_body_id;
+    use super::{STRIP_MIN_NAME_LENGTH, fit_strip_names, tab_body_id};
     use crate::{DockState, NodePath, SurfaceIndex};
     use egui::Id;
+
+    /// What an ellipsis costs, near enough: these are tests of the sharing, not of a font.
+    const ELLIPSIS: f32 = 12.0;
+
+    fn no_gaps(count: usize) -> Vec<f32> {
+        vec![0.0; count]
+    }
+
+    /// Every name is squeezed before any of them is dropped: three names wanting 200 apiece get
+    /// a third of the strip each, rather than the first one taking it and the last going missing.
+    #[test]
+    fn a_short_strip_squeezes_its_names_rather_than_dropping_them() {
+        let fit = fit_strip_names(&[200.0, 200.0, 200.0], &no_gaps(3), 300.0, ELLIPSIS);
+
+        assert_eq!(fit.lengths, vec![100.0, 100.0, 100.0]);
+        assert!(!fit.overflow, "all three names fit, squeezed");
+    }
+
+    /// A name shorter than its share keeps its own length and hands the difference back.
+    ///
+    /// Splitting the room evenly would give the short name 70 px it cannot use and leave the two
+    /// long ones 30 px shorter each for nothing.
+    #[test]
+    fn a_short_name_gives_its_surplus_to_the_others() {
+        let fit = fit_strip_names(&[10.0, 200.0, 200.0], &no_gaps(3), 210.0, ELLIPSIS);
+
+        assert_eq!(fit.lengths, vec![10.0, 100.0, 100.0]);
+    }
+
+    /// A column of names that are all short is not thinned out to honour a minimum none of them
+    /// needs: what a name costs the strip is its own length when that is less than the minimum.
+    #[test]
+    fn short_names_are_not_dropped_to_honour_the_minimum() {
+        let naturals = vec![10.0; 20];
+        let fit = fit_strip_names(&naturals, &no_gaps(20), 210.0, ELLIPSIS);
+
+        assert_eq!(fit.lengths, naturals, "all twenty fit at their own length");
+        assert!(!fit.overflow);
+    }
+
+    /// What cannot be squeezed in is stood for by an ellipsis, and the room it needs comes out of
+    /// the same length rather than being taken on top of it.
+    #[test]
+    fn what_will_not_fit_is_stood_for_by_an_ellipsis() {
+        let available = 4.5 * STRIP_MIN_NAME_LENGTH;
+        let fit = fit_strip_names(&[200.0; 10], &no_gaps(10), available, ELLIPSIS);
+
+        assert!(
+            fit.overflow,
+            "ten names of 200 px cannot fit in {available}"
+        );
+        assert_eq!(fit.lengths.len(), 4, "as many as the minimum allows");
+        let drawn: f32 = fit.lengths.iter().sum();
+        assert!(
+            drawn + ELLIPSIS <= available,
+            "the ellipsis has to fit too: {drawn} + {ELLIPSIS} > {available}"
+        );
+    }
+
+    /// A strip too short even for the ellipsis draws nothing: a cut-off ellipsis would be the
+    /// same lie in smaller print.
+    #[test]
+    fn a_strip_too_short_for_the_ellipsis_says_nothing() {
+        let fit = fit_strip_names(&[200.0, 200.0], &no_gaps(2), ELLIPSIS / 2.0, ELLIPSIS);
+
+        assert!(fit.lengths.is_empty());
+        assert!(!fit.overflow);
+    }
+
+    /// The hairlines between leaves come out of the strip's length like everything else.
+    #[test]
+    fn a_gap_is_paid_for_out_of_the_strip() {
+        let available = 101.0;
+        let fit = fit_strip_names(&[100.0, 100.0], &[0.0, 1.0], available, ELLIPSIS);
+
+        assert_eq!(fit.lengths, vec![50.0, 50.0]);
+        assert!(!fit.overflow);
+        let drawn: f32 = fit.lengths.iter().sum::<f32>() + 1.0;
+        assert!(drawn <= available, "{drawn} px drawn into {available} px");
+    }
 
     #[test]
     fn tab_body_ids_differ_between_surfaces() {

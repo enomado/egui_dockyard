@@ -51,6 +51,11 @@ The last row is why this is two blanks and not three: a leaf collapsed into a *r
    show. **No scrolling**: the strip's own click means "bring me back", and a scroll gesture in
    something one tab bar wide would fight it for the same pixels. (Chosen by Стас over scrolling
    and over shrinking the font, 2026-08-29.)
+
+   **Revised 2026-08-30, after the feature was accepted by clicking** — see
+   [«a strip that runs out of room says so»](#a-strip-that-runs-out-of-room-says-so) below. What
+   this decision got wrong was not the truncation but the *order*: it let the first name take
+   whatever it wanted and then dropped the tail in silence.
 4. **Text runs bottom-to-top on both sides** (`TextShape::with_angle`, −90°), and the names run
    top-to-bottom down the strip. One rule, not one per side: mirroring the angle for a right-hand
    strip buys nothing a reader wants — the same head tilt reads both — and costs a branch that
@@ -132,3 +137,61 @@ glyphs actually laid out (`galley.rows[..].row.glyphs[..].chr`).
 * **No tooltip carrying the full name of a truncated one.** Worth doing, but it is a second
   hover behaviour on a surface whose hover already means something (decision 6), and it should be
   decided after the truncation has been seen in an application.
+
+## A strip that runs out of room says so
+
+Written 2026-08-30, after Стас accepted the names by clicking and asked for the one thing the
+first version did not do: *"if there is not enough room, write an ellipsis"*.
+
+Two rules, in this order, both in `fit_strip_names`:
+
+1. **Every name is squeezed before any name is dropped.** The strip's length is shared out as
+   evenly as the names allow — water filling: shortest first, each taking an equal share of what
+   is left or its own length, whichever is less, so a name shorter than its share hands the
+   difference back rather than sitting in padding. What a name is given, `Truncate` then cuts it
+   into, ellipsis and all. The old rule let the first name take everything it wanted, so a strip
+   of twelve panels showed three and lost nine.
+2. **What still will not fit is stood for by one ellipsis at the end** — never by silence, which
+   would claim those tabs are not there at all. Names are dropped from the end, keeping the
+   tree's order, once even `STRIP_MIN_NAME_LENGTH` apiece is more than the strip has.
+
+`STRIP_MIN_NAME_LENGTH` moved from 24 px to **48 px** in the same change, and the reason is the
+first rule: 24 px was a threshold for *drawing* a name and is nowhere near enough to *squeeze* one
+into — after the padding at each end it leaves 16 px, which is the ellipsis and nothing else. The
+bound has to be what it takes for a name to survive the squeeze, not what it takes for the mark to
+fit. At 48 px a squeezed name reads `Pane…`; a strip of 40 tabs shows 17 of them and then the
+mark.
+
+The ellipsis is a **mark, not a name**: it is not clickable, because there is no one tab behind it
+to bring back, and it is drawn in `tab.inactive.text_color` rather than in a colour that would
+offer something it does not have. It runs *along* the strip like a name, so it reads as the list
+carrying on.
+
+### Oracles
+
+Six on the arithmetic (`fit_strip_names` is a pure function, so these are unit tests next to it)
+and two on the screen, in `tests/a_strip_says_what_is_inside_it.rs`:
+
+* `names_are_squeezed_before_any_of_them_is_dropped` — twelve long names in one strip: all twelve
+  are drawn, all twelve are cut, and no mark appears because nothing was dropped;
+* `what_the_strip_cannot_hold_is_stood_for_by_an_ellipsis` — forty names: fewer than forty are
+  drawn, the **last thing drawn is a bare ellipsis** (compared whole, since a truncated name also
+  *ends* in one), and nothing spills outside the strip.
+
+Mutation-checked, six mutations, all killed:
+
+| Mutation | Killed by |
+|---|---|
+| a name costs the strip its full length (no squeezing) | `names_are_squeezed_…` on screen **and** 4 of the 6 unit oracles |
+| `overflow` is never set | `what_the_strip_cannot_hold_…` and its unit twin |
+| `overflow` is always set | 5 of 8 on screen — every scene that names its tabs exactly |
+| the minimum is charged even to names shorter than it | `short_names_are_not_dropped_to_honour_the_minimum` |
+| equal shares instead of water filling | `a_short_name_gives_its_surplus_to_the_others` |
+| the ellipsis is drawn without checking it fits | `a_strip_too_short_for_the_ellipsis_says_nothing` |
+
+**One mutation survived the screen and was killed only by a unit oracle**, which is worth writing
+down rather than patching: *not paying for the ellipsis out of the shared budget*. On screen the
+cursor advances by each galley's **actual** length, and truncation always leaves a galley shorter
+than the share it was given, so the slack absorbs the unpaid mark and the picture is identical.
+The overpayment is real arithmetic and a real bug in a scene with no slack — which is exactly the
+scene a unit test can state and a frame cannot.

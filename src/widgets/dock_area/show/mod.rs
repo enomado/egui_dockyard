@@ -660,7 +660,7 @@ impl<Tab> DockArea<'_, Tab> {
             if self.dock_state[path].is_leaf() {
                 self.show_leaf(ui, state, path, tab_viewer, fade_style);
             } else if self.dock_state[path].is_stowed() {
-                self.show_stowed_split(ui, path, fade_style.map(|(style, _)| style));
+                self.show_stowed_split(ui, path, tab_viewer, fade_style.map(|(style, _)| style));
             }
         }
 

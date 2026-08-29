@@ -1,10 +1,10 @@
-use std::ops::RangeInclusive;
+use std::{f32::consts::FRAC_PI_2, ops::RangeInclusive};
 
 use egui::{
     Align, Align2, Button, Color32, CornerRadius, CursorIcon, Frame, Id, Key, LayerId, Layout,
     NumExt, Order, Popup, PopupCloseBehavior, Rect, Response, ScrollArea, Sense, Shape, Stroke,
-    StrokeKind, TextStyle, Ui, UiBuilder, Vec2, WidgetText, emath::TSTransform, epaint::TextShape,
-    pos2, vec2,
+    StrokeKind, TextStyle, TextWrapMode, Ui, UiBuilder, Vec2, WidgetText, emath::TSTransform,
+    epaint::TextShape, pos2, vec2,
 };
 
 use crate::NodePath;
@@ -24,6 +24,24 @@ use crate::{
 
 fn tab_body_id(dock_area_id: Id, path: NodePath, tab_id: Id) -> Id {
     dock_area_id.with((path.surface, "surface")).with(tab_id)
+}
+
+/// One tab as a strip names it: what to draw, and what a click on it asks for.
+///
+/// Collected in full before any of it is drawn, because the titles and the per-tab style come
+/// from the consumer's `TabViewer` — which borrows it mutably — while drawing needs the
+/// `DockArea` mutably in turn.
+struct StripName {
+    /// The leaf this tab lives in — the one a click brings back to the front.
+    leaf: NodePath,
+    tab: TabIndex,
+    /// Widget address, so hover and focus stay with this name across frames.
+    id: Id,
+    /// Whether this is the tab its leaf is showing, which the strip keeps legible while the
+    /// panel is away.
+    active: bool,
+    style: TabStyle,
+    title: WidgetText,
 }
 
 impl<Tab> DockArea<'_, Tab> {
@@ -68,6 +86,7 @@ impl<Tab> DockArea<'_, Tab> {
             self.collapsed_bar(
                 ui,
                 path,
+                tab_viewer,
                 fade_style.map(|(style, _)| style),
                 Some(side),
                 DockMutation::SetLeafCollapsed {
@@ -812,6 +831,7 @@ impl<Tab> DockArea<'_, Tab> {
         &mut self,
         ui: &mut Ui,
         path: NodePath,
+        tab_viewer: &mut impl TabViewer<Tab = Tab>,
         fade_style: Option<&Style>,
         side: Option<SideStrip>,
         on_toggle: DockMutation,
@@ -829,7 +849,219 @@ impl<Tab> DockArea<'_, Tab> {
         // `tab_bar.height` of the strip gives exactly the same square as on a tab bar. A
         // horizontal bar is already exactly that tall, so the same expression covers it.
         let button_rect = Rect::from_min_size(strip_rect.min, vec2(strip_rect.width(), bar_height));
-        self.tab_collapse(ui, path, button_rect, fade_style, true, side, on_toggle);
+        self.tab_collapse(
+            ui,
+            path,
+            button_rect,
+            fade_style,
+            true,
+            side,
+            on_toggle.clone(),
+        );
+
+        // Everything the arrow did not take says *what* is put away here. Which end of the
+        // rectangle that is follows from the same fact as the button's own shape: a strip is a
+        // column with the square at its top, a bar is a row with the square at its left.
+        let names_rect = if side.is_some() {
+            Rect::from_min_max(
+                pos2(strip_rect.left(), strip_rect.top() + bar_height),
+                strip_rect.max,
+            )
+        } else {
+            Rect::from_min_max(
+                pos2(
+                    strip_rect.left() + Style::TAB_COLLAPSE_BUTTON_SIZE,
+                    strip_rect.top(),
+                ),
+                strip_rect.max,
+            )
+        };
+        self.strip_names(
+            ui, path, tab_viewer, fade_style, side, names_rect, on_toggle,
+        );
+    }
+
+    /// The length a name has to be able to run for before it is worth drawing at all.
+    ///
+    /// Truncation can always make a name fit, which is exactly why a lower bound is needed:
+    /// without one, the tail of a full strip would be a column of ellipses saying nothing. A
+    /// name with less room than this is not drawn, and neither is anything after it.
+    const STRIP_MIN_NAME_LENGTH: f32 = 24.0;
+
+    /// Breathing room at each end of a name, along the strip.
+    const STRIP_NAME_PADDING: f32 = 4.0;
+
+    /// Names the tabs that a strip stands for, along whatever the arrow left of it.
+    ///
+    /// A panel put away should not hide *which* panels went with it: the strip is already proof
+    /// that something is there, and a blank one is proof of nothing else. For a collapsed leaf
+    /// these are its own tabs; for a side stowed as a unit they are every leaf inside it, in tree
+    /// order, with a hairline between leaves so that three panels do not read as one long list.
+    ///
+    /// `expand` is what the arrow queues — "come back as you were". A click on a name asks for
+    /// that *and* for the tab it names, so the panel returns showing what was clicked rather than
+    /// whatever happened to be active when it went away.
+    fn strip_names(
+        &mut self,
+        ui: &mut Ui,
+        path: NodePath,
+        tab_viewer: &mut impl TabViewer<Tab = Tab>,
+        fade_style: Option<&Style>,
+        side: Option<SideStrip>,
+        rect: Rect,
+        expand: DockMutation,
+    ) {
+        // A strip runs down the screen and a bar runs across it. Everything below is written in
+        // terms of *along* and *across* so that the two share one set of arithmetic, and the axis
+        // is read from the layout's answer rather than guessed from which side is longer.
+        let vertical = side.is_some();
+        let (start, end) = if vertical {
+            (rect.top(), rect.bottom())
+        } else {
+            (rect.left(), rect.right())
+        };
+        if end - start < Self::STRIP_MIN_NAME_LENGTH {
+            return;
+        }
+
+        // Gathered before anything is drawn: the titles come from the consumer, which wants
+        // `&mut tab_viewer` while the tree is borrowed, and painting wants `&mut self` back.
+        let names = self.strip_name_list(tab_viewer, path, fade_style);
+        if names.is_empty() {
+            return;
+        }
+
+        let style = fade_style.unwrap_or_else(|| self.style.as_ref().unwrap());
+        let hairline = style.separator.color_idle;
+        let mut cursor = start;
+        let mut previous_leaf = None;
+
+        for name in names {
+            // The hairline goes *before* the first name of every leaf but the first, so it lands
+            // between two groups rather than at the top of the strip.
+            if previous_leaf.is_some_and(|leaf| leaf != name.leaf) {
+                let line = ui.ctx().pixels_per_point().recip();
+                let separator = if vertical {
+                    Rect::from_min_size(pos2(rect.left(), cursor), vec2(rect.width(), line))
+                } else {
+                    Rect::from_min_size(pos2(cursor, rect.top()), vec2(line, rect.height()))
+                };
+                ui.painter().rect_filled(separator, 0.0, hairline);
+                cursor += line;
+            }
+            previous_leaf = Some(name.leaf);
+
+            let room = end - cursor;
+            if room < Self::STRIP_MIN_NAME_LENGTH {
+                break;
+            }
+
+            let galley = name.title.into_galley(
+                ui,
+                Some(TextWrapMode::Truncate),
+                room - 2.0 * Self::STRIP_NAME_PADDING,
+                TextStyle::Button,
+            );
+            let length = galley.size().x + 2.0 * Self::STRIP_NAME_PADDING;
+            let name_rect = if vertical {
+                Rect::from_min_size(pos2(rect.left(), cursor), vec2(rect.width(), length))
+            } else {
+                Rect::from_min_size(pos2(cursor, rect.top()), vec2(length, rect.height()))
+            };
+            cursor += length;
+
+            let response = ui
+                .interact(name_rect, name.id, Sense::click())
+                .on_hover_cursor(CursorIcon::PointingHand);
+
+            // The same three states a tab bar shows, drawn from the same style: which panel was
+            // open stays legible while it is away, and hover feedback is whatever the user
+            // already configured rather than a second palette invented here.
+            let tab_style = if name.active {
+                &name.style.active
+            } else if response.hovered() || response.has_focus() {
+                &name.style.hovered
+            } else {
+                &name.style.inactive
+            };
+            ui.painter()
+                .rect_filled(name_rect, tab_style.corner_radius, tab_style.bg_fill);
+
+            // Anchored at the middle of the galley, so the quarter turn happens about the text's
+            // own centre and lands it in the middle of the rectangle either way. Anticlockwise
+            // (`angle` counts clockwise), which is what makes the glyphs run bottom-to-top —
+            // the direction a side bar is read in.
+            let text_pos = name_rect.center() - galley.size() / 2.0;
+            let mut text = TextShape::new(text_pos, galley, tab_style.text_color);
+            if vertical {
+                text = text.with_angle_and_anchor(-FRAC_PI_2, Align2::CENTER_CENTER);
+            }
+            ui.painter().add(text);
+
+            if response.clicked() {
+                // Two mutations, in this order, and both already exist: the panel comes back and
+                // the tab that was asked for is the one showing. `Activate` is applied before the
+                // expansion for no reason other than that it reads as the answer to the click.
+                self.mutations
+                    .push(DockMutation::Activate((name.leaf, name.tab).into()));
+                self.mutations.push(expand.clone());
+            }
+        }
+    }
+
+    /// What a strip at `path` has to name, in the order it will come back in.
+    ///
+    /// One leaf's tabs, or — for a side stowed as a unit — every leaf inside it, depth first and
+    /// first child first, which is top-to-bottom and left-to-right on screen.
+    fn strip_name_list(
+        &mut self,
+        tab_viewer: &mut impl TabViewer<Tab = Tab>,
+        path: NodePath,
+        fade_style: Option<&Style>,
+    ) -> Vec<StripName> {
+        let mut leaves = Vec::new();
+        let mut stack = vec![path.node];
+        while let Some(node) = stack.pop() {
+            if self.dock_state[path.surface][node].is_leaf() {
+                leaves.push(NodePath::new(path.surface, node));
+            } else if let Some([left, right]) = self.dock_state[path.surface].children(node) {
+                // Pushed back to front: the stack hands the first child back first.
+                stack.push(right);
+                stack.push(left);
+            }
+        }
+
+        let mut names = Vec::new();
+        for leaf_path in leaves {
+            let count = self.dock_state[leaf_path]
+                .get_leaf()
+                .expect("collected as a leaf just above")
+                .len();
+            for tab_index in 0..count {
+                let tab_index = TabIndex(tab_index);
+                let leaf = self.dock_state[leaf_path]
+                    .get_leaf()
+                    .expect("collected as a leaf just above");
+                let tab_id = leaf
+                    .tab_id_at(tab_index)
+                    .expect("the loop runs over the positions this leaf has");
+                let style = fade_style.unwrap_or_else(|| self.style.as_ref().unwrap());
+                names.push(StripName {
+                    leaf: leaf_path,
+                    tab: tab_index,
+                    // A salt of its own on top of the tab's address: the same tab can be named
+                    // here and — once the panel is back — in its own tab bar, and two widgets
+                    // sharing an id would share the hover and focus egui hangs off it.
+                    id: tab_widget_id(self.id, leaf_path, tab_id).with("strip"),
+                    active: leaf.is_active(tab_index),
+                    style: tab_viewer
+                        .tab_style_override(&leaf[tab_index], &style.tab)
+                        .unwrap_or_else(|| style.tab.clone()),
+                    title: tab_viewer.title(&leaf[tab_index]),
+                });
+            }
+        }
+        names
     }
 
     /// Draws a side that was stowed: the bar above, standing for a whole subtree.
@@ -839,13 +1071,14 @@ impl<Tab> DockArea<'_, Tab> {
     /// entry point is its own, and it lives here rather than with the splits because what it
     /// draws *is* the leaf's strip; only the meaning of the click differs.
     ///
-    /// One arrow for the whole side, and no per-leaf marks in it: those would need vertical text
-    /// or icons in something one tab bar wide, which is a different feature and one to build when
-    /// someone asks for it.
+    /// One arrow for the whole side, and under it the names of every tab inside — see
+    /// [`Self::strip_names`], which is why this needs the consumer's `TabViewer` at all: the
+    /// titles it draws are the consumer's to give.
     pub(super) fn show_stowed_split(
         &mut self,
         ui: &mut Ui,
         path: NodePath,
+        tab_viewer: &mut impl TabViewer<Tab = Tab>,
         fade_style: Option<&Style>,
     ) {
         debug_assert!(self.dock_state[path].is_stowed());
@@ -873,6 +1106,7 @@ impl<Tab> DockArea<'_, Tab> {
         self.collapsed_bar(
             ui,
             path,
+            tab_viewer,
             fade_style,
             side,
             DockMutation::SetSplitStowed {

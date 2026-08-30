@@ -1,4 +1,4 @@
-use crate::core::tree::{NodeId, Side};
+use crate::core::tree::{ChildIndex, NodeId};
 
 /// The inner data of a [`Node::Horizontal`](crate::Node) / [`Node::Vertical`](crate::Node),
 /// which splits into two further nodes.
@@ -74,25 +74,37 @@ impl SplitNode {
         self.children
     }
 
-    /// The child on the given side.
-    #[inline(always)]
-    pub const fn child(&self, side: Side) -> NodeId {
-        self.children[side.as_index()]
-    }
-
-    /// Which side `child` is on, or `None` if it is not a child of this split.
+    /// The child at the given position, or `None` if this split has no child there.
+    ///
+    /// `Option` rather than a panic, because one caller reads the position out of a **file**:
+    /// the focus route of a saved layout is a sequence of these (see
+    /// [`persist`](crate::core::tree::persist)), and nothing stops a file from naming a fifth
+    /// child of a pair. `Side` could not express that; an index can, so the out-of-range case
+    /// became reachable the moment it did.
     #[inline]
-    pub fn side_of(&self, child: NodeId) -> Option<Side> {
-        match child {
-            _ if self.children[0] == child => Some(Side::Left),
-            _ if self.children[1] == child => Some(Side::Right),
-            _ => None,
-        }
+    pub fn child(&self, index: ChildIndex) -> Option<NodeId> {
+        self.children.get(index.0).copied()
     }
 
-    /// Points the given side at another node. Used when the tree re-links a subtree.
+    /// Where `child` sits among this split's children, or `None` if it is not one of them.
+    #[inline]
+    pub fn index_of(&self, child: NodeId) -> Option<ChildIndex> {
+        self.children
+            .iter()
+            .position(|&candidate| candidate == child)
+            .map(ChildIndex)
+    }
+
+    /// Points the given position at another node. Used when the tree re-links a subtree.
+    ///
+    /// # Panics
+    ///
+    /// If this split has no child at that position. Every caller inside the crate holds an
+    /// index [`index_of`](Self::index_of) just handed it about *this* split, so an
+    /// out-of-range one is a bug in the caller rather than a case to answer — unlike
+    /// [`child`](Self::child), which also serves a route read from disk.
     #[inline(always)]
-    pub(crate) fn set_child(&mut self, side: Side, child: NodeId) {
-        self.children[side.as_index()] = child;
+    pub(crate) fn set_child(&mut self, index: ChildIndex, child: NodeId) {
+        self.children[index.0] = child;
     }
 }

@@ -186,15 +186,40 @@ four (the `crossings_moved_both` gate stood at **1** even with every fold replac
 — threadbare before folding touched it), and `STEPS` went 24 → 30, because two more kinds of step
 take their share of a scenario of fixed length.
 
-### Stage 1 — `Side` → `ChildIndex`
+### Stage 1 — `Side` → `ChildIndex` ✅ done 31.08
 
-`Side::{Left, Right}` means two things at once: *which of the two children* and *which
-geometric side*. The first becomes an index; the second already has its own type
-(`SideStrip`). Touches `split.rs` (`side_of`, `child`, `set_child`), `node_id.rs`, and
-`persist.rs`, where the focus path is `Vec<Side>` — read both spellings, write the new one.
+`Side::{Left, Right}` meant two things at once: *which of the two children* and *which
+geometric side*. The first became `ChildIndex(pub usize)`; the second already had its own
+type (`SideStrip`), which is why the split was possible at all — and why it was cheap: the
+type never spread, exactly as the reconnaissance said (`node_id.rs`, `split.rs`,
+`validate.rs`, `persist.rs`, and nothing in the application).
 
-**DoD**: `Side` no longer names a child anywhere; the layout corpus round-trips; focus
-survives a save/load of a file written before this stage.
+`side_of` → `index_of`, and `child` **returns an `Option`** now. That is not tidiness: one
+caller reads the position out of a *file*, and a route of indices can name a fifth child of a
+pair where `Left` / `Right` could not. The case became reachable the moment the type changed,
+and the mutant that indexes the array directly is killed by a file naming child 7.
+
+**On disk the field is renamed**, `focused` → `focus_path`, rather than keeping its name and
+changing its type — the same move `prev_active` → `history` made in this file, for a harder
+reason: a field that fails to parse fails the **whole file**, so the alternative is not "the
+focus is lost" but "the layout is". `focused` stays readable as a private `LegacySide`
+tombstone; `focus_path` wins if a file somehow carries both.
+
+**DoD** (met):
+
+* `Side` names no child anywhere — the type is gone from the crate, and `LegacySide` exists
+  only inside `persist.rs`, only for reading;
+* the layout corpus round-trips: all 35 seed layouts accepted by `corpus_tool`, and
+  `fuzz/corpus_tool --bin focus_probe` measures the focus of the real RON files —
+  **24 routes named, focus landed on 24**. With the tombstone removed it lands on 12, which is
+  exactly the half of the corpus that carries the old spelling: the probe judges;
+* five mutants killed by the new oracles — the legacy branch dropped, `Left` / `Right` mapped
+  the wrong way round, the legacy field preferred over the new one, `child` panicking instead
+  of answering `None`, and `index_of` always naming the first child (which takes eleven other
+  tests with it, the writer side included).
+
+`Side::other()` went with the type: it had no caller in the crate, in the tests, in the fuzz
+targets or in the application, and "the other one" is not a question a row of three can answer.
 
 ### Stage 2 — `children()` hands back a slice
 

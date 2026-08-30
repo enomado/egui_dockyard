@@ -6,9 +6,9 @@
 //! a generation and means nothing outside the process that handed it out. What a saved
 //! layout has to describe is the *shape* — who contains whom, in what order, with which
 //! split fractions — so the wire format is a plain recursive tree, and loading rebuilds a
-//! fresh arena from it. Positions (a tab's place in its leaf, a path of
-//! [`Side`]s to the focused node) are the right currency here precisely because there is no
-//! identity to carry across a save.
+//! fresh arena from it. Positions (a tab's place in its leaf, a route of
+//! [`ChildIndex`]es down to the focused node) are the right currency here precisely because
+//! there is no identity to carry across a save.
 //!
 //! # Two readers, one writer
 //!
@@ -29,7 +29,7 @@ use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
-use crate::core::tree::{LeafNode, Node, NodeId, Side, SplitNode, TabIndex, Tree};
+use crate::core::tree::{ChildIndex, LeafNode, Node, NodeId, SplitNode, TabIndex, Tree};
 
 use super::arena::NodeEntry;
 
@@ -40,7 +40,14 @@ use super::arena::NodeEntry;
 struct TreeOut<'a, Tab> {
     root: Option<NodeOut<'a, Tab>>,
     /// Route from the root to the focused leaf, or `None` if nothing is focused.
-    focused: Option<Vec<Side>>,
+    ///
+    /// A **new name for a new type**, exactly as `history` is below: this route used to be
+    /// `focused: Vec<Side>`, spelled `Left` / `Right` on disk, and a field whose type changes
+    /// cannot keep its name — a reader given `["Left"]` where it expects `[0]` fails the whole
+    /// file, and the layout is what the user loses. Files written before this carry `focused`
+    /// and are still read (see `TreeIn`); files written now carry only `focus_path`, so an
+    /// older build reading one loses the focus rather than the layout.
+    focus_path: Option<Vec<ChildIndex>>,
     collapsed: bool,
     collapsed_leaf_count: i32,
 }
@@ -127,12 +134,12 @@ fn node_out<Tab>(tree: &Tree<Tab>, id: NodeId) -> NodeOut<'_, Tab> {
 }
 
 /// The route from the root down to `node`, as the sequence of turns to take.
-fn path_to<Tab>(tree: &Tree<Tab>, node: NodeId) -> Option<Vec<Side>> {
+fn path_to<Tab>(tree: &Tree<Tab>, node: NodeId) -> Option<Vec<ChildIndex>> {
     let mut path = Vec::new();
     let mut current = node;
     while let Some(parent) = tree.parent(current) {
-        let side = tree[parent].get_split()?.side_of(current)?;
-        path.push(side);
+        let index = tree[parent].get_split()?.index_of(current)?;
+        path.push(index);
         current = parent;
     }
     // A path is only meaningful if walking up actually arrived at the root.
@@ -146,7 +153,7 @@ impl<Tab: Serialize> Serialize for Tree<Tab> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         TreeOut {
             root: self.root().map(|root| node_out(self, root)),
-            focused: self.focused_leaf().and_then(|node| path_to(self, node)),
+            focus_path: self.focused_leaf().and_then(|node| path_to(self, node)),
             collapsed: self.is_collapsed(),
             collapsed_leaf_count: self.collapsed_leaf_count(),
         }
@@ -164,7 +171,11 @@ struct TreeIn<Tab> {
     #[serde(default = "none")]
     root: Option<NodeIn<Tab>>,
     #[serde(default = "none")]
-    focused: Option<Vec<Side>>,
+    focus_path: Option<Vec<ChildIndex>>,
+    /// The same route as files written before it was made of positions spell it. Read, never
+    /// written: see `TreeOut::focus_path`.
+    #[serde(default = "none")]
+    focused: Option<Vec<LegacySide>>,
 
     // The pre-arena form: an implicit binary heap plus an index into it.
     #[serde(default = "Vec::new")]
@@ -193,6 +204,40 @@ fn stored_history(history: Vec<TabIndex>, prev_active: Option<TabIndex>) -> Vec<
     } else {
         history
     }
+}
+
+/// One turn of a focus route as files written before positions spell it.
+///
+/// A tombstone for the reader: `Side` is gone from the crate — a row of three has a middle
+/// child that is on neither side — but it is written into every layout on anyone's disk, and
+/// a file that cannot be parsed is a whole layout lost, not just a focus.
+#[derive(Deserialize, Clone, Copy)]
+enum LegacySide {
+    Left,
+    Right,
+}
+
+impl LegacySide {
+    /// The position this turn always meant. `Left` was the first child in both orientations.
+    const fn as_child(self) -> ChildIndex {
+        match self {
+            LegacySide::Left => ChildIndex(0),
+            LegacySide::Right => ChildIndex(1),
+        }
+    }
+}
+
+/// The focus route a stored tree describes, whichever way it says it.
+///
+/// `focus_path` wins when a file somehow carries both — it is the field this build writes, so
+/// it is the one that was up to date. Exactly the rule [`stored_history`] follows, for exactly
+/// the same reason.
+fn stored_focus_route(
+    focus_path: Option<Vec<ChildIndex>>,
+    focused: Option<Vec<LegacySide>>,
+) -> Option<Vec<ChildIndex>> {
+    focus_path
+        .or_else(|| focused.map(|route| route.into_iter().map(LegacySide::as_child).collect()))
 }
 
 #[derive(Deserialize)]
@@ -441,10 +486,14 @@ impl<Tab> Tree<Tab> {
     }
 
     /// Follows a route of turns down from the root.
-    fn walk(&self, path: &[Side]) -> Option<NodeId> {
+    ///
+    /// Every step can fail, and a stored route is the one input here nobody wrote on purpose:
+    /// it may name a turn at a leaf, or a child a split does not have. Both answer `None`,
+    /// which the caller reads as "nothing is focused" — a state the tree already has.
+    fn walk(&self, path: &[ChildIndex]) -> Option<NodeId> {
         let mut current = self.root()?;
-        for side in path {
-            current = self.node(current).ok()?.get_split()?.child(*side);
+        for index in path {
+            current = self.node(current).ok()?.get_split()?.child(*index)?;
         }
         Some(current)
     }
@@ -454,10 +503,12 @@ impl<'de, Tab: Deserialize<'de>> Deserialize<'de> for Tree<Tab> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let TreeIn {
             root,
+            focus_path,
             focused,
             nodes,
             focused_node,
         } = TreeIn::deserialize(deserializer)?;
+        let focus_path = stored_focus_route(focus_path, focused);
 
         let mut tree = Tree::default();
 
@@ -469,7 +520,7 @@ impl<'de, Tab: Deserialize<'de>> Deserialize<'de> for Tree<Tab> {
                 // with no root, which is what an empty dock is — files written by builds
                 // that stored the empty root leaf load as the one shape that exists now.
                 tree.root = tree.build(root);
-                tree.focused_node = focused.and_then(|path| tree.walk(&path));
+                tree.focused_node = focus_path.and_then(|path| tree.walk(&path));
             }
             // Pre-arena form. An absent `root` and an empty `nodes` both mean "no tree",
             // and both land here with the same (empty) result — there is nothing to
@@ -1040,11 +1091,87 @@ mod tests {
         let _ = tree.split(root, Split::Below, 0.5, Node::leaf("b".to_string()));
         let json = serde_json::to_string(&tree).unwrap();
         // Point focus at the root, which is the split.
-        let json = json.replace("\"focused\":[\"Right\"]", "\"focused\":[]");
+        let json = json.replace("\"focus_path\":[1]", "\"focus_path\":[]");
 
         let back: Tree<String> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.focused_leaf(), None);
         assert_eq!(back.validate(), Ok(()));
+    }
+
+    /// A tree of three leaves — `a` beside a vertical pair of `b` and `c` — with whatever the
+    /// caller wants to say about focus. Two turns deep on one side, so a route that maps
+    /// either end the wrong way round lands on a leaf with a different name rather than
+    /// silently on the right one.
+    fn a_tree_of_three(focus: &str) -> String {
+        format!(
+            r#"{{
+                "root": {{ "Horizontal": {{
+                    "fraction": 0.5,
+                    "children": [
+                        {{ "Leaf": {{ "tabs": ["a"], "active": 0 }} }},
+                        {{ "Vertical": {{
+                            "fraction": 0.5,
+                            "children": [
+                                {{ "Leaf": {{ "tabs": ["b"], "active": 0 }} }},
+                                {{ "Leaf": {{ "tabs": ["c"], "active": 0 }} }}
+                            ]
+                        }} }}
+                    ]
+                }} }},
+                {focus}
+            }}"#
+        )
+    }
+
+    /// The tab of the focused leaf, or `None` if the file left nothing focused. Loading is
+    /// asserted to succeed and to produce a well-formed tree in both cases: a route that
+    /// cannot be honoured costs the focus, never the layout.
+    fn focused_tab(json: &str) -> Option<String> {
+        let tree: Tree<String> = serde_json::from_str(json).unwrap();
+        assert_eq!(tree.validate(), Ok(()));
+        let focused = tree.focused_leaf()?;
+        tree.leaf(focused).unwrap().iter_tabs().next().cloned()
+    }
+
+    /// Every layout already on a disk spells the focus route `Left` / `Right`; this build
+    /// writes positions instead. Both are read, and the old spelling has to keep working for
+    /// a harder reason than the focus itself: a field that fails to parse fails the *whole
+    /// file*, so the alternative is not "focus is lost" but "the layout is".
+    #[test]
+    fn a_focus_route_written_as_sides_still_loads() {
+        assert_eq!(
+            focused_tab(&a_tree_of_three(r#""focused": ["Right", "Left"]"#)),
+            Some("b".to_string()),
+            "`Left` is the first child, `Right` the second — the convention positions kept"
+        );
+        assert_eq!(
+            focused_tab(&a_tree_of_three(r#""focus_path": [1, 1]"#)),
+            Some("c".to_string()),
+            "and the spelling this build writes names the same kind of route"
+        );
+        assert_eq!(
+            focused_tab(&a_tree_of_three(
+                r#""focus_path": [0], "focused": ["Right", "Right"]"#
+            )),
+            Some("a".to_string()),
+            "a file carrying both follows the field this build writes"
+        );
+    }
+
+    /// A position can name a child that is not there; `Left` / `Right` could not. The case
+    /// became reachable the moment the route became indices, and it is answered where every
+    /// other unhonourable route is — nothing is focused — rather than by indexing a pair
+    /// with a 7.
+    #[test]
+    fn a_focus_route_that_leads_nowhere_costs_only_the_focus() {
+        for route in [
+            r#""focus_path": [7]"#,           // no such child of the root
+            r#""focus_path": [0, 0]"#,        // a turn taken at a leaf
+            r#""focus_path": [1, 0, 0]"#,     // one turn too many
+            r#""focused": ["Left", "Left"]"#, // the same, in the old spelling
+        ] {
+            assert_eq!(focused_tab(&a_tree_of_three(route)), None, "{route}");
+        }
     }
 
     /// Found by the `tree_persist` fuzz target: a file describing a leaf with no tabs below

@@ -271,7 +271,7 @@ impl<Tab> Tree<Tab> {
                         .node(parent)
                         .ok()
                         .and_then(Node::get_split)
-                        .is_some_and(|split| split.side_of(id).is_some());
+                        .is_some_and(|split| split.index_of(id).is_some());
                     if !claims_it {
                         violations.push(TreeViolation::ParentLinkBroken { node: id, parent });
                     }
@@ -521,8 +521,8 @@ mod tests {
         // Cut the middle split loose: everything under it is now unreachable.
         let middle = tree.parent(deep).unwrap();
         let top = tree.parent(middle).unwrap();
-        let side = tree[top].get_split().unwrap().side_of(middle).unwrap();
-        tree[top].get_split_mut().unwrap().set_child(side, deep);
+        let index = tree[top].get_split().unwrap().index_of(middle).unwrap();
+        tree[top].get_split_mut().unwrap().set_child(index, deep);
 
         let violations = tree.validate().unwrap_err();
         assert!(
@@ -543,8 +543,8 @@ mod tests {
         let inner = tree.parent(deep).unwrap();
 
         // Point the inner split's own child back at the outer split.
-        let side = tree[inner].get_split().unwrap().side_of(deep).unwrap();
-        tree[inner].get_split_mut().unwrap().set_child(side, split);
+        let index = tree[inner].get_split().unwrap().index_of(deep).unwrap();
+        tree[inner].get_split_mut().unwrap().set_child(index, split);
 
         let violations = tree.validate().unwrap_err();
         assert!(

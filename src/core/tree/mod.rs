@@ -51,7 +51,7 @@ pub use node::LeafNode;
 pub use node::Node;
 pub use node::SplitNode;
 pub use node::TabId;
-pub use node_id::{NodeId, NodePath, Side};
+pub use node_id::{ChildIndex, NodeId, NodePath};
 pub use tab_index::{TabIndex, TabPath};
 pub use tab_iter::TabIter;
 pub use validate::{DockViolation, SurfaceViolation, TreeViolation};
@@ -596,11 +596,11 @@ impl<Tab> Tree<Tab> {
         );
 
         let grandparent = self.parent(target);
-        let side_of_target = grandparent.map(|split_id| {
+        let where_target_sat = grandparent.map(|split_id| {
             self[split_id]
                 .get_split()
                 .expect("a parent is always a split")
-                .side_of(target)
+                .index_of(target)
                 .expect("a child is known to its parent")
         });
 
@@ -631,11 +631,11 @@ impl<Tab> Tree<Tab> {
         self.nodes.get_mut(target).unwrap().parent = Some(split_id);
         self.nodes.get_mut(new_id).unwrap().parent = Some(split_id);
 
-        match (grandparent, side_of_target) {
-            (Some(grandparent), Some(side)) => self[grandparent]
+        match (grandparent, where_target_sat) {
+            (Some(grandparent), Some(index)) => self[grandparent]
                 .get_split_mut()
                 .expect("a parent is always a split")
-                .set_child(side, split_id),
+                .set_child(index, split_id),
             _ => self.root = Some(split_id),
         }
 
@@ -673,21 +673,21 @@ impl<Tab> Tree<Tab> {
         let [left, right] = self.children(parent).expect("a parent is always a split");
         let sibling = if left == node { right } else { left };
         let grandparent = self.parent(parent);
-        let side_of_parent = grandparent.map(|split_id| {
+        let where_parent_sat = grandparent.map(|split_id| {
             self[split_id]
                 .get_split()
                 .expect("a parent is always a split")
-                .side_of(parent)
+                .index_of(parent)
                 .expect("a child is known to its parent")
         });
 
         // Promote the sibling into the parent's place.
         self.nodes.get_mut(sibling).unwrap().parent = grandparent;
-        match (grandparent, side_of_parent) {
-            (Some(grandparent), Some(side)) => self[grandparent]
+        match (grandparent, where_parent_sat) {
+            (Some(grandparent), Some(index)) => self[grandparent]
                 .get_split_mut()
                 .expect("a parent is always a split")
-                .set_child(side, sibling),
+                .set_child(index, sibling),
             _ => self.root = Some(sibling),
         }
 

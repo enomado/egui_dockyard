@@ -73,37 +73,26 @@ impl std::fmt::Display for NodeId {
     }
 }
 
-/// Which of a split's two children is meant.
+/// Which child of a parent is meant: the child's position among its siblings.
 ///
-/// The two children of a [`Vertical`](crate::Node::Vertical) split are top and bottom; of a
-/// [`Horizontal`](crate::Node::Horizontal) one, left and right. `Left` is the first child in
-/// both cases (top / left), `Right` the second — the same convention the old heap layout
-/// used, kept so that split fractions keep meaning what they meant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// # Why a position and not a side
+///
+/// This used to be `Side::{Left, Right}`, and that one type said two things at once: *which
+/// of the children* and *which way round they sit on screen*. The two coincide only while a
+/// parent has exactly two children — a row of three has a middle child that is on neither
+/// side, and cannot be named at all in that language.
+///
+/// The screen-side meaning already has a type of its own ([`SideStrip`](crate::SideStrip)),
+/// which is why this one could keep the other half and become an index. The convention is
+/// unchanged: `0` is the first child — left of a [`Horizontal`](crate::Node::Horizontal)
+/// split, top of a [`Vertical`](crate::Node::Vertical) one — so split fractions keep meaning
+/// what they meant.
+///
+/// An index is a *position*, so it is only meaningful against the parent it was taken from,
+/// and only until that parent's children change. Holding one across a structural edit is the
+/// bug class [`NodeId`] exists to answer; this type is for the two places a position is the
+/// honest currency — one step of a walk down the tree, and the persisted focus route, where
+/// there is no identity to carry across a save.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
-pub enum Side {
-    /// The first child: left of a horizontal split, top of a vertical one.
-    Left,
-    /// The second child: right of a horizontal split, bottom of a vertical one.
-    Right,
-}
-
-impl Side {
-    /// Position of this side in a split's `children` array.
-    #[inline(always)]
-    pub(crate) const fn as_index(self) -> usize {
-        match self {
-            Side::Left => 0,
-            Side::Right => 1,
-        }
-    }
-
-    /// The other side.
-    #[inline(always)]
-    pub const fn other(self) -> Self {
-        match self {
-            Side::Left => Side::Right,
-            Side::Right => Side::Left,
-        }
-    }
-}
+pub struct ChildIndex(pub usize);

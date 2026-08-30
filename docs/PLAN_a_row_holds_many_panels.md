@@ -236,7 +236,7 @@ assumptions are a grep for one identifier instead of a reading of the crate.
 | `tree/persist.rs` `node_out` | the **wire** is a pair: `NodeOut` holds `[Box<NodeOut>; 2]` | stage 7 |
 | `tree/transpose.rs` `collect_chain` | a divider is named by its split's **node**, so a loop would push one id twice and call it two dividers | stage 5 |
 | `tree/transpose.rs` `transpose_cross` | honest: a crossing is two chains, and `at` / `bounds` are pairs with it | — |
-| `show/mod.rs` `child_paths` | `show_separator`, `cut_split` and the junction detector all speak of two halves and one line | stage 6 |
+| `show/mod.rs` `child_paths` | `show_separator`, `cut_split` and the junction detector all speak of two halves and one line | stage 6 — **paid**: a list now, and `cut_split` is `cut_row` |
 
 The other four went n-ary on the spot, because over two children the fold *is* what was
 written: `update_split_collapsed` (`max` / `sum` / `all` over the children, and the counts are
@@ -512,18 +512,106 @@ Not mutated, and why: `gap_neighbours` ignoring the index, `show_separator` draw
 identical on a pair. They are what stage 7 reaches, and a mutant nothing can kill is not a
 mutant but a note.
 
-### Stage 6 — the layout cuts a row
+### Stage 6 — the layout cuts a row ✅ done 30.08
 
 `cut_split` → `cut_row`, `SplitCut` → `RowCut { children: Vec<Rect>, dividers: Vec<Option<Rect>>,
-side_strips: Vec<Option<SideStrip>> }`. Same three branches, written over `n` instead of two.
-`update_split_collapsed` sums or maxes over the children rather than over `left`/`right`;
-`strip_columns` is already recursive and becomes a fold over the row. The callers of
-`RowNode::only_gap` (`compute_rect_sizes`) and of `child_paths` are this stage's list, and
-`compute_rect_sizes` writes one `set_divider` per gap of the cut.
+side_strips: Vec<Option<SideStrip>> }`, `child_paths` → `Vec<NodePath>`, `strip_columns` a fold
+(`Option<i32>` summed, `None` absorbing), and `compute_rect_sizes` writes one rectangle per
+child and one `set_divider` per gap — after asserting the cut's three lengths against the row,
+because a `zip` that truncated quietly would put the branch that forgets a child back on the
+map. `RowNode::only_gap` went with its last caller; `update_split_collapsed` had been a fold
+since stage 2 and needed nothing. The `duplicate!` macro left `cut_row` (the axis is a
+predicate and two closures there now) and stays in `show_divider`, which still needs the axis
+as a token.
 
-Still on a binary tree. The last stage that is parity, and the one that makes stage 7 small.
+**Two of the three branches are one arithmetic.** A vertical row with a collapsed child and a
+horizontal row with a sideways strip are the same problem one axis over — fixed lengths pressed
+against the row's edges, the open children sharing what is left — and the pair-shaped code had
+solved it twice, which is how the 30.08 bug lived in one axis and not the other. Now both call
+`cut_runs`, one-dimensional: the fixed children at the start of the row are a **leading run**
+stacked from the near edge, those at the end a **trailing run** stacked from the far edge, and
+whatever lies between shares the span the runs leave (fixed ones keep their length, open ones
+split the rest by weight; a divider is recorded only between two *open* neighbours). The
+ordinary branch clamps each boundary through its own `SeparatorBand` and cuts child `k` between
+divider `k − 1` and divider `k`.
 
-**DoD**: parity, measured the same way as stage 4.
+**Two asymmetries the pair had are kept by parity, and both are now pinned** rather than
+silently carried:
+
+* **snapping.** The horizontal branch snapped its run (`right_start = cut_at(left_end +
+  separator)` with `left_end` already snapped); the vertical one snapped each edge from the
+  unsnapped run. Identical at an integer `pixels_per_point`, a pixel apart at a fractional one —
+  so the corpus probes and the sweep cannot tell them apart, and `cut_runs` takes a `carry` so
+  that each branch keeps its own. Pinned by
+  `the_two_axes_snap_their_runs_differently_and_it_is_inherited` at `ppp = 1.5`, with a third
+  child, because with two the run and the cut are the same number. Unifying them is a decision
+  about pixels on every HiDPI screen, not a cleanup;
+* **the remainder with nothing open.** Vertical: the last collapsed child keeps the rest of the
+  column (the pair's "either only the first collapsed or both: the strip is the top of the
+  node"). Horizontal: the rest is nobody's (Стас, 30.08). `cut_runs` takes
+  `last_fixed_takes_the_rest`; both answers are pinned on a row of three
+  (`with_every_row_collapsed_the_stack_hangs_from_the_top_and_the_last_keeps_the_rest`,
+  `with_every_column_a_strip_the_rest_of_the_row_is_nobodys`). Listed under *Open* below.
+
+**Parity, measured — and the measurement had a hole.** `shape_probe` byte-identical
+(`bfc8ebb4…`), `rect_probe` as saved byte-identical (`d227401611a0…`, 4141 nodes), the DST
+sweep's ten coverage lines identical on the same 96 seeds, `cargo test --all-features`
+**313 passed, 0 failed** (300 + 13 new), plus stage 0's two ignored. Then the mutant that gave
+the last strip the rest of the row diffed *nothing* in the corpus, and the count said why: the
+corpus carries **no collapsed, stowed or sideways node at all** — 0 of 4141 — so a dump of the
+layouts as saved judges only the ordinary cut, and the two branches this stage rewrote were
+judged by the screen tests alone, to half a pixel. `rect_probe` now lays every layout out
+**three times** — as saved, every odd leaf collapsed, every leaf collapsed (the layout's own
+leaves, in `iter_leaves` order, so the scene is a function of the file) — which reaches strips
+at either end of a row and rows with nothing open, in both axes, on every shape the corpus has:
+5133 collapsed nodes, 1684 `Left` and 512 `Right` strips, 364 collapsed vertical and 1449
+collapsed horizontal rows. The "before" of that dump was produced by the **old code** — a
+`git archive` of `60b27cb` in a scratch directory with the new probe copied in — and the two
+are byte-identical: **79 126 lines, `7db01182…`**, both sides. Stage 7 inherits the three-scene
+probe.
+
+**Oracles for what a pair cannot reach.** Stages 4 and 5 each found their central property
+judged by nothing until a unit was written on a row built by hand; this stage wrote them first.
+`Tree::row_by_hand` (test-only, to go when `split` can build the same row) builds one row of
+`n` leaves, and seven screen scenes in `show/mod.rs` lay rows of three out headlessly: cut at
+both boundaries where the weights put them; strips at both ends hugging their own edges; a
+strip among open columns handing its width to both sides three-to-one; every column a strip;
+collapsed rows at both ends of a stack; every row collapsed; and a stack of collapsed rows given
+a bar for each. Six units state `cut_runs` on the arithmetic (runs, the remainder flag, a fixed
+child among open ones, weights of zero, weights of one and three, the snapping asymmetry).
+
+#### Mutants
+
+Twelve; eleven killed, one a note.
+
+| Mutant | Killed by |
+|---|---|
+| the run carried unsnapped (`carry(end) + separator`) | **only** the snapping unit, and only once it had a third child |
+| vertical: the last collapsed child does not keep the rest | the row-of-three scene; **1456 lines** of the three-scene probe (the one-scene probe: nothing) |
+| horizontal: the last strip keeps the rest | that scene, `a_fully_collapsed_row_is_a_row_of_strips`, `two_collapsed_siblings_become_two_strips`; **876 lines** (one-scene: nothing) |
+| a trailing strip marked `Left` | `strips_at_both_ends…`, `a_collapsed_leaf_beside_a_column_becomes_a_strip`, `a_stowed_side_beside_a_column_becomes_a_strip`; **2048 lines** (one-scene: nothing) |
+| the middle's last child cut at `cursor + length` instead of `bottom` | **nothing** — at every reachable value the two are the same bits. A note, not a mutant; the `bottom` form stays because it is the one that cannot drift |
+| a divider recorded beside a fixed child | `a_fixed_child_among_open_ones…`, `a_strip_among_open_columns…` — a middle of two is unreachable on a pair |
+| a child starting at the *near* edge of the divider before it | 10 tests and **38 582 lines** — the ordinary branch on pairs, and what says the probe is not vacuous |
+| every boundary read from gap `0` | **only** `a_row_of_three_is_cut_at_each_of_its_boundaries` |
+| `strip_columns` folding `max` for `sum` | three sideways tests and **9472 lines** |
+| a strip among open columns marked `Right` | **only** `a_strip_among_open_columns…` |
+| open children sharing equally, weights ignored | the two weight-aware oracles — which were written *equal-weighted* first and would have let it through |
+| a collapsed child given one bar for `collapsed_leaf_count` | **survived everything** — 313 tests, five screen files, all three corpus scenes. See below |
+
+**The survivor predates the stage.** A vertical row whose *first* child is a fully collapsed
+vertical row asks that child for `collapsed_strip_height(count)`, and no scene in the suite or
+in the corpus had one: as the *last* child such a stack takes the rest of the column and its
+height is never asked, which is where every existing scene put it. The arithmetic was right
+and unjudged since the day it was written. Pinned now by
+`a_stack_of_collapsed_rows_is_given_a_bar_for_each_of_them` (`V(V(b, c), a)`, `b` and `c`
+collapsed: the stack is two bars and a separator, `c` is one bar and not the rest of the
+column), which the mutant fails with `expected 49, got 24`.
+
+**In the application: nothing to write.** The only public surface that moved is
+`RowNode::only_gap`, gone, and nothing in `rust_app` named it (checked by grep, since the MCP
+does not resolve a dependency's symbols — see the stage 4 findings). Consumers built against
+the new pin, not assumed.
 
 ### Stage 7 — rows actually hold more than two
 
@@ -563,5 +651,17 @@ click where it used to be two.
   and belongs to stage 7, with Стас.
 * **Whether a stowed row can hold more than two.** `SplitNode::stowed` is state on the split;
   on a row of five, stowing puts away all five behind one arrow, which is what stowing means —
-  but the strip arithmetic (`collapsed_strip_width(columns)`) then has to agree, and that is
-  stage 6's business to state.
+  but the strip arithmetic (`collapsed_strip_width(columns)`) then has to agree. Stage 6 stated
+  the arithmetic over `n` (`strip_columns` is a sum, a stowed row is one column) without
+  touching what stowing means; whether a row of five *should* stow as one is still stage 7's.
+* **Who owns the rest of a row with nothing open.** Stage 6 found the two axes answer
+  differently and kept both by parity: a fully collapsed *vertical* row lets its last child
+  keep the rest of the column; a fully collapsed *horizontal* row leaves the rest to nobody
+  (Стас, 30.08). Same picture — a collapsed leaf draws its bar at the top of whatever it is
+  given — different owner of the empty space, which is what a drop target or a hit test sees.
+  Reconciling them is a user-visible choice for stage 7 or 8, with Стас; the two scenes that
+  pin today's answers name where to change it.
+* **Two snapping schemes, one per axis.** Inherited from the pair-shaped code and kept by
+  parity (see stage 6): at a fractional `pixels_per_point` a strip's divider lands a pixel
+  apart depending on the axis. Unifying them changes pixels on HiDPI screens and is a decision
+  to take on purpose, once, with the pin updated.

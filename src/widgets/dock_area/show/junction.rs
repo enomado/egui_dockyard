@@ -409,6 +409,11 @@ impl<Tab> DockArea<'_, Tab> {
         pixels_per_point: f32,
     ) -> Option<Junctions> {
         let outer_horizontal = self.dock_state[outer].is_horizontal();
+        // The line these junctions would sit *on* has to be a line. A split whose child was
+        // folded away is cut at the strip's edge instead of at its ratio, and the layout then
+        // draws no divider for it at all (see `NodeGeometry::divider`) — there is nothing here
+        // for a junction to meet, and nothing for a hand to take hold of.
+        self.separator_rect(outer)?;
         let [c0, c1] = self.child_paths(outer);
 
         // A divider that can reach the line between the two children runs *across* `outer`'s
@@ -441,17 +446,41 @@ impl<Tab> DockArea<'_, Tab> {
         // partner across the line still *ends* on it, and that is a junction of two separators.
         // Walking both lists to exhaustion, rather than stopping at the shorter one, is what
         // makes that true of the tail as well as of the middle.
-        let (first, second) = (band0.divider_positions(), band1.divider_positions());
+        // A junction is a meeting of boundaries a hand can take hold of, and a band knows only
+        // where its parts ended up on screen. A part folded away leaves its split cut at the
+        // strip's edge, so the layout draws no divider for it — and a handle offered there is not
+        // a cosmetic slip: the press is answered and the drag begins, then `follow_held_junction`
+        // asks the same layout for that rectangle, finds none, draws nothing, and the gesture is
+        // dropped with the button still down. The corner goes dead until the hand opens, and the
+        // ratio the folded panel is keeping for its return would have been the thing being
+        // dragged. Found by the DST sweep at seed 5, the pass it learned to fold.
+        //
+        // Each position is carried with the index it had in its band, rather than the list being
+        // filtered afterwards: the kinds below name a band's own divider, and a crossing whose
+        // other half is not drawn has to degrade into the tee it visibly is instead of vanishing
+        // along with it.
+        let drawn = |band: &Band| -> Vec<(usize, f32)> {
+            band.divider_positions()
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(index, _)| {
+                    self.separator_rect(NodePath::new(outer.surface, band.dividers[*index]))
+                        .is_some()
+                })
+                .collect()
+        };
+        let (first, second) = (drawn(&band0), drawn(&band1));
         let tolerance = Junctions::tolerance(toggle, pixels_per_point);
         let (mut i, mut j) = (0, 0);
         let mut at = Vec::new();
         while i < first.len() || j < second.len() {
             let pair = first.get(i).zip(second.get(j));
-            if let Some((&a, &b)) = pair
+            if let Some((&(first_divider, a), &(second_divider, b))) = pair
                 && (a - b).abs() <= tolerance
             {
                 at.push(Junction {
-                    kind: JunctionKind::Cross([i, j]),
+                    kind: JunctionKind::Cross([first_divider, second_divider]),
                     center: at_line(0.5 * (a + b)),
                 });
                 i += 1;
@@ -460,23 +489,23 @@ impl<Tab> DockArea<'_, Tab> {
             }
             // Screen order: whichever of the two heads comes first along the line is the next
             // junction, and the list that ran out has no head at all.
-            let take_first = pair.is_none_or(|(a, b)| a < b) && i < first.len();
+            let take_first = pair.is_none_or(|(a, b)| a.1 < b.1) && i < first.len();
             if take_first {
                 at.push(Junction {
                     kind: JunctionKind::Tee {
                         side: 0,
-                        divider: i,
+                        divider: first[i].0,
                     },
-                    center: at_line(first[i]),
+                    center: at_line(first[i].1),
                 });
                 i += 1;
             } else {
                 at.push(Junction {
                     kind: JunctionKind::Tee {
                         side: 1,
-                        divider: j,
+                        divider: second[j].0,
                     },
-                    center: at_line(second[j]),
+                    center: at_line(second[j].1),
                 });
                 j += 1;
             }
@@ -1936,31 +1965,57 @@ mod tests {
         // `gap` is how far the right column's divider sits below the left one's.
         let scene = |gap: f32| {
             let mut layout = DockLayout::default();
-            let mut put = |node: NodeId, rect: Rect| {
-                layout.set_rect(NodePath::new(SurfaceIndex::main(), node), rect);
+            // Rectangle and line in one call, because a junction is made of boundaries that are
+            // *drawn*: a split whose divider the layout does not record has none to meet (that is
+            // what a folded panel leaves behind), so a fixture that recorded only the rectangles
+            // would be describing a picture the detector is right to find nothing in.
+            let mut put = |node: NodeId, rect: Rect, divider: Option<Rect>| {
+                let path = NodePath::new(SurfaceIndex::main(), node);
+                layout.set_rect(path, rect);
+                layout.set_divider(path, divider);
             };
             let (left, right) = (0.0..=600.0, 601.0..=1200.0);
             let half = 0.5; // half a separator: the gap the midpoint of a boundary is read from
-            put(left_half, Rect::from_x_y_ranges(left.clone(), 0.0..=900.0));
+            put(
+                outer_id,
+                Rect::from_x_y_ranges(0.0..=1200.0, 0.0..=900.0),
+                Some(Rect::from_x_y_ranges(600.0..=601.0, 0.0..=900.0)),
+            );
+            put(
+                left_half,
+                Rect::from_x_y_ranges(left.clone(), 0.0..=900.0),
+                Some(Rect::from_x_y_ranges(
+                    left.clone(),
+                    450.0 - half..=450.0 + half,
+                )),
+            );
             put(
                 right_half,
                 Rect::from_x_y_ranges(right.clone(), 0.0..=900.0),
+                Some(Rect::from_x_y_ranges(
+                    right.clone(),
+                    450.0 + gap - half..=450.0 + gap + half,
+                )),
             );
             put(
                 top_left,
                 Rect::from_x_y_ranges(left.clone(), 0.0..=450.0 - half),
+                None,
             );
             put(
                 bottom_left,
                 Rect::from_x_y_ranges(left, 450.0 + half..=900.0),
+                None,
             );
             put(
                 top_right,
                 Rect::from_x_y_ranges(right.clone(), 0.0..=450.0 + gap - half),
+                None,
             );
             put(
                 bottom_right,
                 Rect::from_x_y_ranges(right, 450.0 + gap + half..=900.0),
+                None,
             );
             layout
         };

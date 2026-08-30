@@ -161,6 +161,27 @@ enum Step {
     Split { leaf: usize, split: usize },
     /// Close a leaf through the model.
     CloseLeaf { leaf: usize },
+    /// Press a collapse arrow: the panel folds away to a bar — or, beside a column, to a strip
+    /// one tab bar wide — and pressing it again brings it back.
+    ///
+    /// Addressed as "the k-th arrow on screen" and not as a leaf, because half of what draws one
+    /// is not a leaf: a side stowed as a unit is a *split*, and the layout takes its whole subtree
+    /// off the map, so nothing in a list of leaves names it and its own arrow is the only way
+    /// back. See [`Sim::arrows`].
+    Collapse { arrow: usize },
+    /// Press an arrow with the modifier held, which asks for **the whole side** the arrow lives
+    /// in — the child of the root, however deep the leaf pressed sits inside it.
+    ///
+    /// A step of its own rather than a flag on the one above, for the reason `GrabJunction` is
+    /// not a `Grab` with a flag: both are aimed and judged the same way, but a scenario asking
+    /// for one is asking for something else, and the shrinker has to be able to drop one of them
+    /// while keeping the other.
+    ///
+    /// Where the gesture does not apply — a leaf that already *is* its own side, a side that is
+    /// stowed — the modifier adds nothing and the press is the plain fold above. That is the
+    /// crate's documented behaviour rather than a hole in this step, and [`CollapseWatch`] counts
+    /// which of the two the press turned out to be.
+    Stow { arrow: usize },
     /// Drag the separator of a split node, moving the boundary between its two children.
     ///
     /// The only gesture here that edits a number rather than the shape — and that number,
@@ -254,6 +275,8 @@ impl Step {
                 | Step::ToggleCrossSplit { .. }
                 | Step::GrabJunction { .. }
                 | Step::ClickJunction { .. }
+                | Step::Collapse { .. }
+                | Step::Stow { .. }
         )
     }
 
@@ -345,6 +368,14 @@ struct BandView {
     /// The chain's splits, in screen order: `dividers[k]` is the split whose boundary falls
     /// between part `k` and part `k + 1`.
     dividers: Vec<NodePath>,
+    /// Whether the layout drew each of them. A split with a folded part is cut at the strip's
+    /// edge instead of at its ratio and has no divider rectangle at all, so its boundary is not
+    /// on screen and cannot be half of a junction.
+    ///
+    /// Parallel to `dividers` rather than filtered out of it, because `bounds` describes the
+    /// *parts* — all of them, drawn boundary or not — and `parts()` and `renestable` are read off
+    /// that. Dropping an entry from one list would quietly renumber the other.
+    drawn: Vec<bool>,
     /// The `parts + 1` boundaries along the band's own axis, ascending, outer edges included.
     bounds: Vec<f32>,
     /// Whether every part is at least `separator.extra` long — the crate's condition for a
@@ -359,11 +390,16 @@ impl BandView {
 
     /// Where this band's dividers are along its axis, each with the split that draws it.
     /// Ascending, so two bands' lists merge in one walk.
+    ///
+    /// The ones the layout did not draw are left out: a boundary that is not on screen is not a
+    /// boundary a junction can be made of — see [`BandView::drawn`].
     fn dividers(&self) -> Vec<(f32, NodePath)> {
         self.bounds[1..self.bounds.len() - 1]
             .iter()
             .copied()
             .zip(self.dividers.iter().copied())
+            .zip(self.drawn.iter().copied())
+            .filter_map(|(pair, drawn)| drawn.then_some(pair))
             .collect()
     }
 }
@@ -611,6 +647,8 @@ struct Sim {
     separator: SeparatorWatch,
     /// How much the cross-split toggle got to do — see [`CrossWatch`].
     cross: CrossWatch,
+    /// How much the folding gestures got to do — see [`CollapseWatch`].
+    collapse: CollapseWatch,
     /// The gesture the hand has not finished, if there is one — see [`Hold`].
     hold: Option<Hold>,
     /// How much of the interleaving a hold makes possible was actually reached — see
@@ -916,6 +954,60 @@ struct CrossWatch {
     unrenestable: usize,
 }
 
+/// Coverage of the two folding gestures, counted while the run happens.
+///
+/// The generic outcome counter says only that something folded and something came back. These say
+/// *what*, and they exist because the shapes are not interchangeable: a leaf folding into a bar
+/// under a vertical split and a leaf folding into a strip beside a column are two branches of the
+/// layout, written twice; and a side stowed as a unit is a third thing again, addressed at a node
+/// that is not a leaf at all.
+#[derive(Clone, Copy, Default, Debug)]
+struct CollapseWatch {
+    /// Steps that found an arrow to press at all.
+    offered: usize,
+    /// Presses that folded a leaf away.
+    collapsed: usize,
+    /// Presses that brought one back.
+    expanded: usize,
+    /// ...of the folds, the ones the layout answered with a **strip** rather than a bar.
+    ///
+    /// The branch `DockArea::collapse_sideways` exists for, and the one the row work of 30.08
+    /// rewrote. A zero would mean the sweep only ever folded leaves under vertical splits, where
+    /// the strip arithmetic is not reached at all — and where `strip_columns`, the function that
+    /// bug lived in, is never called.
+    sideways: usize,
+    /// Modified presses that put a whole side away.
+    stowed: usize,
+    /// Presses that brought a stowed side back.
+    unstowed: usize,
+    /// ...of the stows, the ones that put away a side holding **more than two leaves**.
+    ///
+    /// Counted apart because a side of two is one split, which is the shape a plain fold can
+    /// almost imitate; a side of three is two nested splits, and it is the scene the stowing
+    /// feature was written for and the one the n-ary row plan is aimed at.
+    stowed_a_deep_side: usize,
+    /// Frames left with a row whose **both** sides are strips — the whole row folded, nobody left
+    /// to take the width.
+    ///
+    /// The scene the 30.08 fix is about, and the one place in this feature where the layout
+    /// deliberately leaves a hole (the remainder of the row belongs to nobody). Reached by
+    /// folding every panel of a row and not by anything else, so a zero says the sweep never got
+    /// there rather than that the case is fine.
+    rows_folded_whole: usize,
+    /// Presses made while **no panel was open at all** — the state every other step here is blind
+    /// to, since `live_leaves` is empty and a drag, a click, a split and a close all skip.
+    ///
+    /// Not gated, and the number says why: it stands at **zero** across the sweep as tuned. The
+    /// state is real and was reached — it is where the seed-5 fix below came from, with a stowed
+    /// side holding every surviving leaf while the rest were closed — but reaching it takes a run
+    /// of folds long enough to cover the floating windows too, and lengthening the burst until it
+    /// does would spend the scenarios on one degenerate scene. It is pinned by a scripted test
+    /// instead (`a_dock_with_nothing_open_can_still_be_brought_back`), which is the right shape
+    /// for a scene that is one gesture wide, and left counted here so that a future tuning which
+    /// does reach it says so.
+    pressed_with_nothing_open: usize,
+}
+
 /// What a step actually did to the dock — measured after the fact, not assumed from its name.
 ///
 /// Coverage is counted in these terms on purpose. "Every kind of step ran" is satisfied by a
@@ -931,11 +1023,21 @@ enum Outcome {
     Refocused,
     SeparatorMoved,
     CrossTransposed,
+    /// A panel went away: a leaf collapsed to its bar, or a whole side stowed as a unit.
+    ///
+    /// One outcome for both, and the direction is what makes it two: a press on an arrow is the
+    /// same gesture either way, so "the folds string differs" would be satisfied by a scenario
+    /// that only ever folded — leaving the way back untested while reading fully covered. What
+    /// *kind* of fold it was is [`CollapseWatch`]'s business, next to the shapes only some of
+    /// them reach.
+    Folded,
+    /// A panel came back.
+    Unfolded,
     Nothing,
 }
 
 /// Width of the coverage counter.
-const OUTCOMES: usize = 8;
+const OUTCOMES: usize = 10;
 
 /// Slot of the coverage counter, or `None` for "nothing happened", which is not coverage.
 fn outcome_index(outcome: Outcome) -> Option<usize> {
@@ -948,6 +1050,8 @@ fn outcome_index(outcome: Outcome) -> Option<usize> {
         Outcome::Refocused => 5,
         Outcome::SeparatorMoved => 6,
         Outcome::CrossTransposed => 7,
+        Outcome::Folded => 8,
+        Outcome::Unfolded => 9,
         Outcome::Nothing => return None,
     })
 }
@@ -1096,6 +1200,8 @@ const OUTCOME_NAMES: [&str; OUTCOMES] = [
     "Refocused",
     "SeparatorMoved",
     "CrossTransposed",
+    "Folded",
+    "Unfolded",
 ];
 
 impl Sim {
@@ -1117,6 +1223,7 @@ impl Sim {
             commits: Commits::default(),
             separator: SeparatorWatch::default(),
             cross: CrossWatch::default(),
+            collapse: CollapseWatch::default(),
             hold: None,
             holds: HoldWatch::default(),
             junction_hold: None,
@@ -1164,6 +1271,13 @@ impl Sim {
             CentralPanel::default().show(ctx, |ui| {
                 let response = DockArea::new(state)
                     .style(style.clone())
+                    // The knob decides what a *folded* node gets — a strip beside its sibling
+                    // rather than a bar keeping its whole column — so it changes nothing at all
+                    // until something folds, and until `Step::Collapse` existed nothing in this
+                    // vocabulary could. It has to be on for `Step::Stow` to exist at all (the
+                    // gesture is behind the same knob, deliberately: see `stow_target`), and it
+                    // is the arrangement the consumer this crate is written for runs.
+                    .collapse_sideways(true)
                     .show_inside_with_response(ui, &mut Viewer);
                 // One per *frame* that carried a finalised event, which is the unit the contract
                 // is written in: `layout_committed()` is a per-frame bool, and it is the signal
@@ -1241,6 +1355,109 @@ impl Sim {
             .map(|(path, _)| path)
             .filter(|path| layout.get(*path).is_some_and(|g| g.viewport.is_some()))
             .collect()
+    }
+
+    /// Every collapse arrow on screen, in tree order, with the rectangle it was cut out of.
+    ///
+    /// Two kinds of node draw one: every leaf that was laid out — folded or not, since a folded
+    /// leaf keeps the bar the arrow lives in and that bar is all there is left of it — and every
+    /// side stowed as a unit, which is a *split* and has no tabs at all. The leaves inside a
+    /// stowed side are in neither list: the layout takes their subtree off the map, which is
+    /// exactly what makes the side's own arrow the only thing that still names them.
+    ///
+    /// Deliberately not [`Sim::live_leaves`] with the filter changed. That list is about leaves
+    /// and this one is about buttons, and the difference is not only the stowed split: a folded
+    /// leaf stays in `live_leaves` — its geometry entry keeps the viewport of the last frame it
+    /// drew a body on, on purpose (`DockLayout::set_rect`, "keeping any viewport already known
+    /// for it") — so the two lists overlap without either containing the other.
+    fn arrows(&self) -> Vec<(NodePath, Rect)> {
+        let layout = self.layout();
+        self.state
+            .iter_all_nodes()
+            .filter(|(_, node)| node.is_leaf() || node.is_stowed())
+            .filter_map(|(path, _)| layout.get(path).map(|geometry| (path, geometry.rect)))
+            .collect()
+    }
+
+    /// Where to press the arrow of a node laid out at `rect`.
+    ///
+    /// The button is cut out of the top-left corner of whatever the node was given — of the tab
+    /// bar on an open leaf, of the top of the strip on a folded one — and is one bar tall. Its
+    /// width is a private constant of the crate, so the point is stated as "well inside that
+    /// corner" rather than as its centre: 8 px in is inside the button at every size it has had,
+    /// and clear of the bar's own margin. The same expression the scripted tests of the feature
+    /// use (`collapse_arrow_of` in `a_side_can_be_stowed.rs`).
+    fn arrow_point(&self, rect: Rect) -> Pos2 {
+        Pos2::new(
+            rect.left() + 8.0,
+            rect.top() + self.style.tab_bar.height / 2.0,
+        )
+    }
+
+    /// How many leaves live under `path`, itself included if it is one.
+    ///
+    /// Walked here rather than read off the layout: the subtree of a stowed side is off the
+    /// geometry map entirely, which is precisely the case this is asked about.
+    fn leaves_under(&self, path: NodePath) -> usize {
+        let tree = &self.state[path.surface];
+        let mut stack = vec![path.node];
+        let mut leaves = 0;
+        while let Some(node) = stack.pop() {
+            match tree.children(node) {
+                Some(children) => stack.extend(children),
+                None => leaves += 1,
+            }
+        }
+        leaves
+    }
+
+    /// Which nodes are folded away, in tree order: `c` for a collapsed leaf, `s` for a stowed
+    /// side, `.` for everything open.
+    ///
+    /// A trace of its own rather than a widening of [`Sim::layout_trace`], for the reason the
+    /// fractions are one too: `subtree_shape` writes the shape and the tabs, and a fold changes
+    /// neither — the panel is still there, still holding what it held. Without this string a run
+    /// that folded a panel and a run that did not would compare *equal*, which is the shape of
+    /// blindness this harness has already been bitten by twice (a focus trace that named only the
+    /// surface; the fractions, missing until the gesture that moves them arrived).
+    ///
+    /// Only the two *stored* facts are written. A split also answers `is_collapsed` when every
+    /// leaf under it happens to be folded, and that is derived — counting it here would report
+    /// one press as two changes.
+    fn fold_trace(&self) -> String {
+        self.state
+            .iter_all_nodes()
+            .map(|(_, node)| match node {
+                node if node.is_stowed() => 's',
+                node if node.is_leaf() && node.is_collapsed() => 'c',
+                _ => '.',
+            })
+            .collect()
+    }
+
+    /// How many splits ended up with a strip on **both** sides: a row folded whole, with nobody
+    /// left to take the width it gave up.
+    ///
+    /// The scene of the 30.08 fix, and the one place in this feature where the layout leaves a
+    /// hole on purpose — the remainder of such a row belongs to nobody. Read off the layout
+    /// rather than off the tree, because "is this a strip" is the layout's answer to give: a
+    /// narrow rectangle is not a strip, and the two were told apart once already.
+    fn rows_folded_whole(&self) -> usize {
+        let layout = self.layout();
+        self.state
+            .iter_all_nodes()
+            .filter_map(|(path, node)| node.get_split().map(|_| path))
+            .filter(|path| {
+                let Some(children) = self.state[path.surface].children(path.node) else {
+                    return false;
+                };
+                children.iter().all(|child| {
+                    layout
+                        .side_strip(NodePath::new(path.surface, *child))
+                        .is_some()
+                })
+            })
+            .count()
     }
 
     /// Id of one tab's widget.
@@ -1566,6 +1783,10 @@ impl Sim {
             .iter_all_nodes()
             .filter_map(|(path, node)| {
                 node.get_split()?;
+                // The line the junctions would sit *on*, same rule as for the arms: a split with
+                // a folded child is cut at the strip's edge and draws no divider, so there is no
+                // line here for anything to meet.
+                layout.divider(path)?;
                 let outer_horizontal = matches!(node, Node::Horizontal(_));
                 let inner_horizontal = !outer_horizontal;
                 let at = |id: NodeId| NodePath::new(path.surface, id);
@@ -1783,11 +2004,24 @@ impl Sim {
             .windows(2)
             .all(|pair| pair[1] - pair[0] >= self.style.separator.extra);
 
+        let dividers: Vec<NodePath> = dividers
+            .into_iter()
+            .map(|id| NodePath::new(surface, id))
+            .collect();
+        // Which of them the layout actually drew. A split whose part was folded away is cut at
+        // the strip's edge rather than at its ratio, so it has no divider rectangle — nothing to
+        // paint and nothing to hit-test (`NodeGeometry::divider`) — and a junction cannot be made
+        // of a boundary that is not there. Restated here rather than inferred, exactly as the
+        // tolerance above is read off the style: a harness that offered handles the crate does
+        // not draw would press pixels answering to nobody and call the silence a pass.
+        let drawn = dividers
+            .iter()
+            .map(|path| layout.divider(*path).is_some())
+            .collect();
+
         Some(BandView {
-            dividers: dividers
-                .into_iter()
-                .map(|id| NodePath::new(surface, id))
-                .collect(),
+            dividers,
+            drawn,
             bounds,
             renestable,
         })
@@ -1935,6 +2169,15 @@ impl Sim {
             () if now.surfaces < before.surfaces => Outcome::SurfaceClosed,
             () if now.leaves > before.leaves => Outcome::LeafSplit,
             () if now.leaves < before.leaves => Outcome::LeafClosed,
+            // Counted, not compared, and that is the whole point of the pair: one press flips one
+            // flag, so which way the count moved is which of the two gestures the press turned
+            // out to be. "The folds string differs" would credit a sweep that only ever folded
+            // with covering the way back too.
+            //
+            // Above the shape and the fractions because a fold changes neither: the panel is
+            // still there, holding what it held, at the ratio it was keeping for its return.
+            () if folded_count(&now.folds) > folded_count(&before.folds) => Outcome::Folded,
+            () if folded_count(&now.folds) < folded_count(&before.folds) => Outcome::Unfolded,
             // Before the fraction test, because a toggle rewrites fractions too — and often
             // back to the same numbers, which is why the orientations carry this and not them.
             // Both halves are load-bearing: the ids alone would let a plain append through
@@ -1994,6 +2237,7 @@ impl Sim {
             fractions: self.fraction_trace(),
             orientations: self.orientation_trace(),
             leaf_ids: self.leaf_id_trace(),
+            folds: self.fold_trace(),
         }
     }
 
@@ -2381,9 +2625,21 @@ impl Sim {
         let held_a_junction = self.junction_hold.is_some();
 
         let leaves = self.live_leaves();
-        if leaves.is_empty() {
-            // An empty dock can only be rebuilt through the model.
-            if let Step::Split { .. } = step {
+        // The two arrow steps run on regardless, and they are the only ones that can: a dock whose
+        // surviving panels are all inside a stowed side has no live leaf to aim into, and it is a
+        // state this vocabulary can now *produce*. Letting them past this gate is what keeps that
+        // state from being a one-way door — everything else would skip forever, and the sweep
+        // would spend the rest of the scenario green and idle. See
+        // `a_dock_with_nothing_open_can_still_be_brought_back`.
+        if leaves.is_empty() && !matches!(step, Step::Collapse { .. } | Step::Stow { .. }) {
+            // An empty dock can only be rebuilt through the model — and "no panel is on screen"
+            // stopped meaning "there is no panel" the moment folding arrived. A dock can have
+            // every one of its leaves put away, tabs and all, and pushing into the focused one
+            // then lands in a panel this step never named: the sweep found it on seed 5 as an
+            // identity moving under a `Split` that had aimed at nothing.
+            if self.state.iter_leaves().next().is_none()
+                && let Step::Split { .. } = step
+            {
                 let tab = self.fresh_tab();
                 self.state.push_to_focused_leaf(tab);
                 self.run_frame(vec![]);
@@ -2645,6 +2901,116 @@ impl Sim {
                 self.state.remove_leaf(target);
                 self.run_frame(vec![]);
                 vec![target]
+            }
+
+            Step::Collapse { arrow } | Step::Stow { arrow } => {
+                let arrows = self.arrows();
+                if arrows.is_empty() {
+                    return None;
+                }
+                let (target, rect) = arrows[arrow % arrows.len()];
+                // A node squeezed below one bar in either direction has no corner to press: the
+                // button is clipped, and a point 8 px into it lands on whatever the clip left.
+                if rect.width() < self.style.tab_bar.height
+                    || rect.height() < self.style.tab_bar.height
+                {
+                    self.refused[refused_index(Refused::TooSmall)] += 1;
+                    return None;
+                }
+                let at = self.arrow_point(rect);
+                if self.window_over(at, target.surface) {
+                    self.refused[refused_index(Refused::Contested)] += 1;
+                    return None;
+                }
+                let modified = matches!(step, Step::Stow { .. });
+                // On a floating surface the same modifier is the window's own "minimise", which
+                // is the older meaning and the one that wins (`is_on_secondary_button`). Pressing
+                // there would be judging that gesture under the name of this one — the same
+                // reason every other aim here refuses a point that means something else.
+                if modified && !target.surface.is_main() {
+                    self.refused[refused_index(Refused::Elsewhere)] += 1;
+                    return None;
+                }
+                self.collapse.offered += 1;
+                if leaves.is_empty() {
+                    self.collapse.pressed_with_nothing_open += 1;
+                }
+
+                let folds_before = self.fold_trace();
+                let focus_before = self.focus_trace();
+                self.click_holding(
+                    at,
+                    if modified {
+                        Modifiers::SHIFT
+                    } else {
+                        Modifiers::NONE
+                    },
+                );
+                // No extra quiet frame: a fold is queued while drawing and applied at the end of
+                // that pass, so the picture it asks for is the next frame's — and `click_holding`
+                // already runs one after the release to take the modifier back.
+                let folds_after = self.fold_trace();
+
+                // Which node the press turned out to be about, found by the one mark that moved.
+                // The tree is the same tree either side of a fold — nothing is created, removed
+                // or reordered — so the walk lines up and a position in it is a node.
+                let moved = folds_before
+                    .chars()
+                    .zip(folds_after.chars())
+                    .position(|(was, now)| was != now);
+                if let Some(index) = moved {
+                    let path = self
+                        .state
+                        .iter_all_nodes()
+                        .nth(index)
+                        .map(|(path, _)| path)
+                        .expect("the mark that moved names a node of the walk it came from");
+                    match (
+                        folds_before.as_bytes()[index],
+                        folds_after.as_bytes()[index],
+                    ) {
+                        (b'.', b's') => {
+                            self.collapse.stowed += 1;
+                            // A side of two is one split, which a plain fold can nearly imitate;
+                            // a side of three is two nested splits, and it is the scene the
+                            // gesture was written for.
+                            if self.leaves_under(path) > 2 {
+                                self.collapse.stowed_a_deep_side += 1;
+                            }
+                        }
+                        (b'.', _) => {
+                            self.collapse.collapsed += 1;
+                            // Asked of the layout, which is the one entitled to answer it: a
+                            // narrow rectangle is not a strip, and the two were told apart once
+                            // already (see `NodeGeometry::side_strip`).
+                            if self.layout().side_strip(path).is_some() {
+                                self.collapse.sideways += 1;
+                            }
+                        }
+                        (b's', _) => self.collapse.unstowed += 1,
+                        _ => self.collapse.expanded += 1,
+                    }
+                }
+                if self.rows_folded_whole() > 0 {
+                    self.collapse.rows_folded_whole += 1;
+                }
+
+                // One press, one finalised event — the crate announces `LayoutCommitted` for a
+                // fold that actually flips a flag and nothing for one that does not. The focus
+                // term is for the press that flipped nothing and still moved something, which is
+                // what a point landing beside the button rather than in it would do: that is one
+                // change, and the dock announces it once, exactly as for a close.
+                commits = CommitRule::Exactly(usize::from(
+                    folds_after != folds_before || self.focus_trace() != focus_before,
+                ));
+                // Nothing may move. A fold is the one edit whose whole promise is that the panel
+                // is kept rather than changed: its tabs, its active tab and its focus history all
+                // have to come back when it does, and the ratio its parent is holding for that
+                // return is exactly what a hidden half must not have rewritten (the bug
+                // `a_hidden_half_has_no_boundary_to_drag` pins on one scene, stated here over
+                // every scene the sweep builds).
+                boundaries = BoundaryRule::None;
+                Vec::new()
             }
 
             Step::DragSeparator { node, by } => {
@@ -3384,10 +3750,11 @@ impl Sim {
     /// the gesture that was just added.
     fn trace(&self) -> String {
         format!(
-            "{} {} {}",
+            "{} {} {} folds:{}",
             self.layout_trace(),
             self.focus_trace(),
-            self.fraction_trace()
+            self.fraction_trace(),
+            self.fold_trace()
         )
     }
 }
@@ -3417,6 +3784,14 @@ struct Snapshot {
     /// ids; a transposition reuses every one of them, which is the promise this field turns
     /// into a discriminator.
     leaf_ids: String,
+    /// Which nodes are folded away — see [`Sim::fold_trace`]. Its own field for the same reason
+    /// `fractions` is one: nothing else in the snapshot moves when a panel folds.
+    folds: String,
+}
+
+/// How many nodes a fold trace says are put away — see [`Sim::fold_trace`].
+fn folded_count(folds: &str) -> usize {
+    folds.chars().filter(|mark| *mark != '.').count()
 }
 
 /// A short, stable number for a surface in traces.
@@ -3523,6 +3898,27 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
     // land inside a four-step burst is waiting for a coincidence. Measured before it was
     // written: 21 junction grabs across the sweep and not one of them lost its handle.
     let mut close_under_the_junction: Option<usize> = None;
+    // Which arrow, if any, the very next step must press again — the way back from a fold, drawn
+    // as a scheduled pair rather than waited for.
+    //
+    // The fourth use of the device above, and the one with the sharpest reason: a plain fold
+    // leaves the arrow list exactly as it was, so pressing the same index one step later is the
+    // *same* arrow and brings the panel back. Two independent draws are not: an index drawn out
+    // of eight against a list that keeps changing length lands on the panel that was folded about
+    // as often as it lands anywhere, and "the way back" would be covered by accident or not at
+    // all. Half of them, so that some folds are also left to sit there while the rest of the
+    // scenario runs against a dock with one panel fewer.
+    let mut unfold_the_last: Option<usize> = None;
+    // Which arrow, if any, the next step must fold *as well* — the panel beside the one just put
+    // away.
+    //
+    // The scene this builds is the one the row work of 30.08 is about: a row with a strip on both
+    // sides, folded whole, with nobody left to take the width. It is the only place in this
+    // feature where the layout leaves a hole on purpose, and the arithmetic that decides how many
+    // strips a side gets (`strip_columns`) is only exercised past one strip here. Independent
+    // draws reach it about once across the whole sweep — measured, with the neighbour scheduled
+    // it is reached in a fifth of the seeds.
+    let mut fold_the_neighbour: Option<(usize, usize)> = None;
 
     while steps.len() < len {
         if until_release == Some(0) {
@@ -3568,7 +3964,20 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
             steps.push(previous);
             continue;
         }
-        let step = match rng.below(34) {
+        if let Some(arrow) = unfold_the_last.take() {
+            steps.push(Step::Collapse { arrow });
+            continue;
+        }
+        if let Some((arrow, left)) = fold_the_neighbour.take() {
+            // The next one along, and the one after that: a row is folded *whole* only when every
+            // panel of it has gone, and one neighbour is only enough for a row of two.
+            if left > 1 {
+                fold_the_neighbour = Some((arrow + 1, left - 1));
+            }
+            steps.push(Step::Collapse { arrow });
+            continue;
+        }
+        let step = match rng.below(40) {
             0..=4 => Step::Drag {
                 from: rng.below(8),
                 to: rng.below(8),
@@ -3664,7 +4073,15 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
             // the generator has to build: *every* band divider ends on the line between its
             // split's children, so any two splits of opposite orientation put a tee somewhere.
             // That is why there is no `press_the_junction` scheduling next to `press_the_cross`.
-            28..=29 => Step::GrabJunction {
+            //
+            // Four draws rather than the two it had, and the reason is a measurement taken when
+            // folding arrived. Folding takes boundaries off the screen, so it thins the junctions
+            // out — but the gate it took down was already threadbare: on the *same* scenarios with
+            // every fold replaced by a quiet frame, 15 grabs produced exactly **one**
+            // `crossings_moved_both`, which is the number this file elsewhere calls "one
+            // reshuffled seed away from a red suite that means nothing". At four draws it is 4-6
+            // with the folds in.
+            28..=29 | 37..=38 => Step::GrabJunction {
                 junction: rng.below(6),
                 by: JUNCTION_TRAVEL[rng.below(JUNCTION_TRAVEL.len())],
             },
@@ -3685,6 +4102,22 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
                     WindowSize::Squeezed,
                     WindowSize::Roomy,
                 ][rng.below(3)],
+            },
+            // The two folds. Drawn as often as the separator drags, and the weight is measured
+            // rather than guessed: folding takes boundaries off the screen, so it thins out
+            // exactly the coverage the junction and separator gates are counted in. At this draw
+            // rate and 30 steps the junction handles are still grabbed 20 times across the sweep,
+            // against 15 with no folding at all in the same scenarios.
+            33..=34 => Step::Collapse {
+                arrow: rng.below(8),
+            },
+            // The modified press. Two draws even though it is the rarer gesture, because most of
+            // them land where the modifier adds nothing (a leaf that is its own side) and go
+            // through as plain folds — only an arrow inside a side of two or more splits is the
+            // gesture proper, and that is a scene the generator has to wait for rather than ask
+            // for.
+            35..=36 => Step::Stow {
+                arrow: rng.below(8),
             },
             // The plain click, drawn on its own rather than folded into the hold: a click is a
             // press and a release inside egui's click window, and a hold's release is a step
@@ -3723,6 +4156,22 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
         {
             press_the_cross = true;
         }
+        // ...and not under a hold either, for the same reason: an arrow is a press, and a press
+        // is refused while the hand is closed.
+        if let Step::Collapse { arrow } | Step::Stow { arrow } = step
+            && until_release.is_none()
+            && until_junction_release.is_none()
+        {
+            // Half of them come straight back, and of the rest half take their neighbour with
+            // them: the three outcomes worth having are a fold that is undone, a fold that is
+            // left to stand while the scenario runs against a shorter dock, and a row folded
+            // whole.
+            match rng.below(4) {
+                0 | 1 => unfold_the_last = Some(arrow),
+                2 => fold_the_neighbour = Some((arrow + 1, 5)),
+                _ => {}
+            }
+        }
         // Outside a hold there is no lock to catch mid-decay — `Step::Settle` just moves the
         // pointer — so only schedule the close when a hold is actually live.
         if let Step::Settle { to } = step
@@ -3752,6 +4201,8 @@ struct Run {
     separator: SeparatorWatch,
     /// How much the cross-split toggle got to do — see [`CrossWatch`].
     cross: CrossWatch,
+    /// How much the folding gestures got to do — see [`CollapseWatch`].
+    collapse: CollapseWatch,
     /// How much of the interleaving a hold makes possible was reached — see [`HoldWatch`].
     holds: HoldWatch,
     /// How much the junction gestures got to do — see [`JunctionWatch`].
@@ -4032,6 +4483,7 @@ fn run(steps: &[Step]) -> Run {
         boundary,
         separator: sim.separator,
         cross: sim.cross,
+        collapse: sim.collapse,
         holds: sim.holds,
         junction: sim.junction,
         subjects: sim.subjects,
@@ -4469,6 +4921,79 @@ fn a_separator_grabbed_and_released_commits_nothing() {
         sim.take_commits().frames,
         0,
         "and an unchanged dock may not report a finalised layout change"
+    );
+    assert_eq!(sim.state.validate(), Ok(()));
+}
+
+/// A dock whose only remaining panels are inside a stowed side still has an arrow, and pressing it
+/// brings them back.
+///
+/// The one state no other step in this vocabulary can see. A *folded leaf* stays in
+/// [`Sim::live_leaves`] — its geometry entry keeps the viewport of the last frame it drew a body
+/// on, deliberately (`DockLayout::set_rect`, "keeping any viewport already known for it") — so
+/// folding alone never empties the screen. A **stowed side** does: the layout takes its whole
+/// subtree off the map, rectangle and all, and if everything else has been closed there is nothing
+/// left for a drag, a click, a split or a close to act on.
+///
+/// Written scripted rather than left to the sweep because the fix it stands for was found the hard
+/// way and the sweep reaches this state only by coincidence: "no panel is on screen" used to be
+/// read as "there is no panel", and a `Split` arriving here pushed a tab into the focused leaf —
+/// a panel inside the stowed side, that the step had never named, whose identities then moved
+/// under an oracle that was right to complain (seed 5, the pass this vocabulary learned to fold).
+#[test]
+fn a_dock_with_nothing_open_can_still_be_brought_back() {
+    let mut sim = Sim::new();
+    let root = sim.state.main_surface().root().unwrap();
+    // `H(open, V(top, bottom))`: the modifier puts away *the side*, and a side has to be a split
+    // for the gesture to mean anything at all — on a leaf that is its own side the arrow already
+    // does the same thing without it.
+    sim.state.split(
+        NodePath::new(SurfaceIndex::main(), root),
+        Split::Right,
+        0.5,
+        Node::leaf("t1".to_string()),
+    );
+    sim.run_frame(vec![]);
+    let inside = sim.live_leaves()[1];
+    sim.state
+        .split(inside, Split::Below, 0.5, Node::leaf("t2".to_string()));
+    sim.run_frame(vec![]);
+    assert_eq!(sim.live_leaves().len(), 3, "one panel and a side of two");
+
+    let arrow = sim
+        .arrows()
+        .iter()
+        .position(|(path, _)| *path == inside)
+        .expect("the leaf inside the side has an arrow");
+    sim.apply(Step::Stow { arrow })
+        .expect("the modifier puts the whole side away from any leaf in it");
+    sim.apply(Step::CloseLeaf { leaf: 0 })
+        .expect("and the panel beside it is closed through the model");
+
+    assert!(
+        sim.live_leaves().is_empty(),
+        "a dock whose surviving leaves are all inside a stowed side has no panel open: {:?}",
+        sim.live_leaves()
+    );
+    assert!(
+        sim.apply(Step::Split { leaf: 0, split: 0 }).is_none(),
+        "nothing can be aimed at a dock with no panel open, and a step that pretended otherwise \
+         would be acting on a leaf it never named"
+    );
+
+    let arrows = sim.arrows();
+    assert_eq!(
+        arrows.len(),
+        1,
+        "one arrow is left, the stowed side's own: {arrows:?}"
+    );
+    sim.apply(Step::Collapse { arrow: 0 })
+        .expect("and it is still there to press");
+
+    assert_eq!(
+        sim.live_leaves().len(),
+        2,
+        "pressing it brings the whole side back, both of its panels"
     );
     assert_eq!(sim.state.validate(), Ok(()));
 }
@@ -5138,7 +5663,13 @@ const PREFERENCE_TIME: f32 = 0.05;
 /// been bought back by shortening the lock itself rather than the pause — see
 /// [`PREFERENCE_TIME`], which is the same run of the same sweep, four seconds cheaper.
 const SEEDS: u64 = 96;
-const STEPS: usize = 24;
+/// Steps per scenario.
+///
+/// Raised from 24 when the folding gestures joined the vocabulary: two more kinds of step, plus
+/// the scheduling that brings a fold back and the burst that folds a row whole, all take their
+/// share of a scenario of fixed length. Measured across the sweep, the 25 % more steps put every
+/// counter back roughly where it was and cost about a second and a half of wall time.
+const STEPS: usize = 30;
 
 /// The sweep: every seed must leave the dock well-formed at every step.
 ///
@@ -5151,6 +5682,7 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
     let mut boundary = BoundaryWatch::default();
     let mut separator = SeparatorWatch::default();
     let mut cross = CrossWatch::default();
+    let mut collapse = CollapseWatch::default();
     let mut holds = HoldWatch::default();
     let mut junction = JunctionWatch::default();
     let mut subjects = SubjectWatch::default();
@@ -5184,6 +5716,15 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         cross.in_two_long_bands += outcome.cross.in_two_long_bands;
         cross.on_a_crowded_line += outcome.cross.on_a_crowded_line;
         cross.unrenestable += outcome.cross.unrenestable;
+        collapse.offered += outcome.collapse.offered;
+        collapse.collapsed += outcome.collapse.collapsed;
+        collapse.expanded += outcome.collapse.expanded;
+        collapse.sideways += outcome.collapse.sideways;
+        collapse.stowed += outcome.collapse.stowed;
+        collapse.unstowed += outcome.collapse.unstowed;
+        collapse.stowed_a_deep_side += outcome.collapse.stowed_a_deep_side;
+        collapse.rows_folded_whole += outcome.collapse.rows_folded_whole;
+        collapse.pressed_with_nothing_open += outcome.collapse.pressed_with_nothing_open;
         holds.grabs += outcome.holds.grabs;
         holds.live += outcome.holds.live;
         holds.releases += outcome.holds.releases;
@@ -5240,6 +5781,7 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         REFUSAL_NAMES.iter().zip(refused).collect::<Vec<_>>()
     );
     println!("cross watch: {cross:?}");
+    println!("collapse watch: {collapse:?}");
     println!("identity watch: {identity:?}");
     println!("boundary watch: {boundary:?}");
     println!("separator watch: {separator:?}");
@@ -5294,6 +5836,54 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
          — `Step::ResizeWindow` never left the window small enough. The branch that tells a \
          drag-only handle apart from one that also transposes went untried across {SEEDS} seeds",
         cross.offered
+    );
+
+    // The folding gestures, asserted before the generic loop for the same reason the cross is:
+    // "the sweep never produced Folded" is true of a sweep that never found an arrow and of one
+    // that pressed hundreds and moved nothing, and those are opposite faults.
+    assert!(
+        collapse.offered > 0,
+        "not one arrow was pressed across {SEEDS} seeds — every fold step found nothing to press \
+         or was refused its point, so both folding gestures and everything asserted about them \
+         are vacuous"
+    );
+    assert!(
+        collapse.collapsed > 0,
+        "{} arrows were pressed across {SEEDS} seeds and not one folded a panel away. The point \
+         is derived here from the layout's own rectangle; presses that land beside the button \
+         mean the two have drifted apart, and the sweep has been clicking bars while staying \
+         green",
+        collapse.offered
+    );
+    assert!(
+        collapse.expanded > 0,
+        "{} panels were folded across {SEEDS} seeds and not one was brought back. A fold takes \
+         its panel out of `live_leaves`, so a sweep that cannot undo one is a sweep whose \
+         scenarios get quieter with every step — and the whole class this stage exists to reach \
+         (a gesture aimed at a dock that has folded panels in it) would go untested",
+        collapse.collapsed
+    );
+    assert!(
+        collapse.sideways > 0,
+        "all {} folds across {SEEDS} seeds kept their column — not one became a strip. The strip \
+         is the branch `collapse_sideways` exists for and the one the row work of 30.08 rewrote \
+         (`strip_columns`); without it this sweep exercises the *other* half of the layout and \
+         says nothing about the half the consumer runs",
+        collapse.collapsed
+    );
+    assert!(
+        collapse.stowed > 0,
+        "not one modified press across {SEEDS} seeds put a whole side away. Either the scenes \
+         never grew a side of two splits — the shape where the modifier means anything at all — \
+         or the modifier is not reaching the button, and both leave `Step::Stow` a slower \
+         spelling of `Step::Collapse`"
+    );
+    assert!(
+        collapse.unstowed > 0,
+        "{} sides were stowed across {SEEDS} seeds and not one came back. A stowed side takes \
+         its whole subtree off the geometry map, so its own arrow is the only thing left that \
+         names it: a sweep that never presses it is one where stowing is a one-way door",
+        collapse.stowed
     );
 
     // A green sweep means nothing unless the steps did something. Every kind has to have

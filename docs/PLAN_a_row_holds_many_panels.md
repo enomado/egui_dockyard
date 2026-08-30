@@ -138,17 +138,53 @@ reached the dock. A green stage 0 would have been the same failure as the strip 
 passed on a scene where no truncation happened (28.08 findings), and the hunt would have
 continued rather than the stage being declared done.
 
-### Stage 0b — the sweep learns to collapse
+### Stage 0b — the sweep learns to collapse ✅ done 31.08
 
-`tests/dst.rs` still has no `Collapse` and no `Stow` step, so the entire class this feature
-lives in is unreachable *by construction* — recorded three sessions running and never moved.
-It has to move **before** stage 7, not after: rows are exactly where collapsing and n-arity
-meet, and a sweep that cannot collapse will report a clean run through the riskiest change in
-this plan.
+`tests/dst.rs` had no `Collapse` and no `Stow` step, so the entire class this feature lives in
+was unreachable *by construction* — recorded three sessions running and never moved. It had to
+move **before** stage 7, not after: rows are exactly where collapsing and n-arity meet, and a
+sweep that cannot collapse would report a clean run through the riskiest change in this plan.
 
-**DoD**: the sweep performs both, and the coverage assert names the *outcomes and refusals*
-reached, not the kinds of step issued (see `DST_INTERACTION_RECIPE.md`). A mutant that stops
-collapsing anything must redden it.
+Two steps, both pressing an arrow, addressed as "the k-th arrow on screen" rather than as a leaf
+— because half of what draws one is not a leaf. A stowed side is a *split*, and the layout takes
+its whole subtree off the map, so nothing in a list of leaves names it and its own arrow is the
+only way back. The dock is now shown with `collapse_sideways(true)`, which changes nothing until
+something folds and is what the stowing gesture lives behind.
+
+**It found a bug on its first complete run**, which is what the stage is for:
+
+> **A junction offered on a boundary that is not drawn.** `detect_junctions` read the bands off
+> the *rectangles*, so a split whose panel had folded away — cut at the strip's edge, no divider
+> recorded, nothing to paint or hit-test — still contributed a boundary. The press was answered
+> and the drag began; `follow_held_junction` then asked the same layout for that rectangle, found
+> none, drew nothing, and the dock dropped the gesture with the button still down. On screen: the
+> corner answers the hand and then goes dead until it is released. And before dying it applies its
+> first frame's travel, which **writes the ratio the folded panel is keeping for its return** —
+> the exact harm `a_hidden_half_has_no_boundary_to_drag.rs` exists to prevent, reached through the
+> one gesture that file had not covered.
+>
+> Fixed by asking the layout instead of the rectangles: no junction is offered on a line the
+> layout did not draw, and a crossing whose other half is undrawn degrades into the tee it visibly
+> is. Pinned by `a_junction_on_a_hidden_boundary_is_not_offered`, with a positive control beside
+> it.
+
+**DoD** (met): the sweep performs both gestures, and the coverage is asserted in terms of what the
+dock *did* — `Folded` / `Unfolded` in the outcome counter, and a `CollapseWatch` gating the shapes
+that are not interchangeable (a fold that became a strip rather than a bar, a side stowed, a side
+brought back). Measured over 96 seeds × 30 steps: 172 arrows pressed, 107 folds, 52 expansions, 28
+strips, 8 stows, 5 unstows, 13 rows folded whole.
+
+Mutants, each killed by the gate that names it: a fold that does nothing (`collapsed` gate); the
+stowing modifier disabled (`stowed` gate, and the scripted test); a stow that announces no
+finalised event (`commit_complaint`, "a real change nobody will persist"); a fold trace blind to
+the flags (`commit_complaint` again — the trace is load-bearing for the *oracle*, not only for the
+coverage); and the junction fix reverted (the directed test, which had to be sharpened before it
+caught it — see the handoff's findings).
+
+Two things this cost, both recorded where they were done: the junction grab draws went from two to
+four (the `crossings_moved_both` gate stood at **1** even with every fold replaced by a quiet frame
+— threadbare before folding touched it), and `STEPS` went 24 → 30, because two more kinds of step
+take their share of a scenario of fixed length.
 
 ### Stage 1 — `Side` → `ChildIndex`
 

@@ -92,6 +92,47 @@ impl Sim {
         sim
     }
 
+    /// A column beside two stacked panels: `H(V(top, bottom), right)`.
+    ///
+    /// The smallest scene with a **junction** in it — the root's line runs down the middle, and
+    /// the boundary between the two stacked panels ends on it. Answers with the split over the
+    /// stack and its two leaves; `parent` is the root, and `left` is the stack itself, so
+    /// [`Sim::seam`] still names the line down the middle.
+    fn a_column_beside_two_rows() -> (Self, NodeId, NodeId, NodeId) {
+        let mut state = DockState::new(vec![tab("top")]);
+        let top = state.main_surface().root().unwrap();
+        let [_, right] = state.split(
+            NodePath::new(SurfaceIndex::main(), top),
+            Split::Right,
+            0.5,
+            Node::leaf(tab("right")),
+        );
+        let [_, bottom] = state.split(
+            NodePath::new(SurfaceIndex::main(), top),
+            Split::Below,
+            0.5,
+            Node::leaf(tab("bottom")),
+        );
+        let rows = state
+            .main_surface()
+            .parent(top)
+            .expect("the two stacked leaves have a parent");
+        let parent = state
+            .main_surface()
+            .parent(rows)
+            .expect("the stack sits beside a column");
+
+        let mut sim = Sim {
+            ctx: Context::default(),
+            state,
+            parent,
+            left: rows,
+            right,
+        };
+        sim.settle();
+        (sim, rows, top, bottom)
+    }
+
     /// Enough frames for the layout pass to settle and publish every rectangle.
     fn settle(&mut self) {
         for _ in 0..4 {
@@ -167,21 +208,40 @@ impl Sim {
     /// The ratio the split is cut at — the thing a divider drag writes, and the thing a hidden
     /// half is keeping for when it expands.
     fn fraction(&self) -> f32 {
-        self.state.main_surface()[self.parent]
+        self.fraction_of(self.parent)
+    }
+
+    fn fraction_of(&self, node: NodeId) -> f32 {
+        self.state.main_surface()[node]
             .get_split()
-            .expect("the parent is a split")
+            .expect("the node is a split")
             .fraction
     }
 
     /// Where the divider sits while both halves are open: the seam between the two rectangles.
     /// Read rather than computed, so the test aims at the line the code actually drew.
     fn seam(&self) -> Pos2 {
-        let left = self.rect_of(self.left);
-        let right = self.rect_of(self.right);
-        Pos2::new(
-            (left.max.x + right.min.x) * 0.5,
-            (left.min.y + left.max.y) * 0.5,
-        )
+        self.seam_between(self.left, self.right)
+    }
+
+    /// The seam between two nodes laid out side by side or one above the other: the midpoint of
+    /// the gap along whichever axis they are separated on, and the middle of the overlap on the
+    /// other. Read rather than computed from a ratio, for the reason [`Sim::seam`] is.
+    fn seam_between(&self, first: NodeId, second: NodeId) -> Pos2 {
+        let (first, second) = (self.rect_of(first), self.rect_of(second));
+        if (first.center().x - second.center().x).abs()
+            > (first.center().y - second.center().y).abs()
+        {
+            Pos2::new(
+                (first.max.x + second.min.x) * 0.5,
+                (first.min.y + first.max.y) * 0.5,
+            )
+        } else {
+            Pos2::new(
+                (first.min.x + first.max.x) * 0.5,
+                (first.max.y + second.min.y) * 0.5,
+            )
+        }
     }
 }
 
@@ -226,6 +286,104 @@ fn dragging_where_the_divider_was_does_nothing() {
         sim.side_strip_of(sim.left),
         Some(SideStrip::Left),
         "and it is still a strip afterwards"
+    );
+}
+
+/// The junction handle is the *other* way to drag that boundary, and a hidden half has none of it
+/// either.
+///
+/// Two separators meet where the line down the middle carries the boundary between the two stacked
+/// panels, and the dock puts a handle there that drags both at once. Fold the top panel away and
+/// the second of those two boundaries is gone — no line to paint, none to hit-test — so there is
+/// nothing left for a handle to be made of.
+///
+/// The detector used to disagree with itself about that, and the way it failed is worth keeping:
+/// it read the boundaries off the *rectangles*, which are still where they were, and offered a
+/// handle; the press was answered and the drag began; and then the frame that follows a live
+/// junction drag asks the layout for the same rectangle, finds none, draws nothing, and the dock
+/// drops the gesture with the button still down. On screen the corner answers the hand and then
+/// goes dead until it is released — and what it would have been dragging is the very ratio the
+/// folded panel is keeping for its return, which is what this whole file is about. Found by the
+/// DST sweep at seed 5, the pass it learned to fold.
+#[test]
+fn a_junction_on_a_hidden_boundary_is_not_offered() {
+    let (mut sim, rows, top, bottom) = Sim::a_column_beside_two_rows();
+    sim.collapse(top, true);
+    // Read **after** the fold, and that is the point of it: folding moves the stack's boundary up
+    // against the bar, so the crossing "where it used to be" is nowhere near where a handle would
+    // wrongly be offered now. A test aimed at the old place presses plain separator either way and
+    // passes whatever the detector does — measured, on the very mutant this test exists to kill.
+    let junction = Pos2::new(sim.seam().x, sim.seam_between(top, bottom).y);
+    assert!(
+        sim.layout()
+            .divider(NodePath::new(SurfaceIndex::main(), rows))
+            .is_none(),
+        "precondition: the stack's own boundary is gone, because one of its panels folded away"
+    );
+
+    let (rows_before, root_before) = (sim.fraction_of(rows), sim.fraction());
+    let bottom_before = sim.rect_of(bottom);
+
+    // Diagonally, which is what a junction drag is for: one leg along each of the two lines it is
+    // supposed to be made of.
+    sim.drag(junction, Vec2::new(PULL, PULL));
+
+    assert!(
+        (sim.fraction_of(rows) - rows_before).abs() < f32::EPSILON,
+        "the folded panel keeps the ratio it had: {} became {}",
+        rows_before,
+        sim.fraction_of(rows)
+    );
+    assert!(
+        (sim.rect_of(bottom).min.y - bottom_before.min.y).abs() < TOLERANCE
+            && (sim.rect_of(bottom).max.y - bottom_before.max.y).abs() < TOLERANCE,
+        "and nothing in the stack moved vertically: {:?} became {:?}",
+        bottom_before,
+        sim.rect_of(bottom)
+    );
+    // The line down the middle *is* still there, so the press landed on it and it must have
+    // followed the hand **all the way**. This is the assertion that tells the fix from the bug,
+    // and the weaker "it moved at all" does not: a handle offered here answers the press itself,
+    // and its first frame's travel is applied through the same path a live drag takes before the
+    // gesture is dropped. So the bug does not leave the line where it was — it leaves it short,
+    // stranded wherever the pointer had reached when the dock let go.
+    let landed = sim.seam_between(sim.left, sim.right).x;
+    assert!(
+        (landed - (junction.x + PULL)).abs() <= TOLERANCE,
+        "the line the press landed on has to end up under the pointer, at {}, and it stopped at \
+         {landed} (the ratio went {root_before} -> {}). A line that stops short is the corner \
+         answering the press and then going dead",
+        junction.x + PULL,
+        sim.fraction()
+    );
+}
+
+/// The positive control for the test above: with both panels open, that very point is a junction,
+/// and one drag moves **both** boundaries.
+///
+/// Without it "nothing moved vertically" is satisfied by a point that was never a handle in the
+/// first place — a couple of pixels off, a scene with no crossing in it — and the test would be
+/// pinning its own arithmetic rather than the dock.
+#[test]
+fn the_same_press_moves_both_boundaries_while_both_panels_are_open() {
+    let (mut sim, rows, top, bottom) = Sim::a_column_beside_two_rows();
+    let junction = Pos2::new(sim.seam().x, sim.seam_between(top, bottom).y);
+    let (rows_before, root_before) = (sim.fraction_of(rows), sim.fraction());
+
+    sim.drag(junction, Vec2::new(PULL, PULL));
+
+    assert!(
+        sim.fraction() > root_before,
+        "the line down the middle followed the hand: {} became {}",
+        root_before,
+        sim.fraction()
+    );
+    assert!(
+        sim.fraction_of(rows) > rows_before,
+        "and so did the boundary that ends on it — that is what makes this point a junction and \
+         not just a separator: {} became {}",
+        rows_before,
+        sim.fraction_of(rows)
     );
 }
 

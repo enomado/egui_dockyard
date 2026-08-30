@@ -315,19 +315,114 @@ read the field. Recorded here because the previous five stages all landed with "
 already there", and the next reader of this plan should not inherit that expectation: stages 5
 and 7 change `DockMutation` and the file format, which the application does touch.
 
-### Stage 4 — `fraction` becomes `shares`
+### Stage 4 — `fraction` becomes `shares` ✅ done 31.08
 
 `RowNode { children: Vec<NodeId>, shares: Vec<Share> }`, every row still of length two, every
-`shares` still `[f, 1 − f]` up to normalisation. The model is n-ary by *type*; the tree is
-still binary by *content*.
+`shares` still `[f, 1 − f]`. The model is n-ary by *type*; the tree is still binary by
+*content*. Four places build a row and all four say so by name — `RowNode::pair`, the sibling
+of `children_pair`, so the remaining binary assumptions stay a grep for one identifier.
+`RowNode::fraction` / `set_fraction` are the pair spelling on the reading side, and they are
+what every reader of the layout still asks: while a row holds two children it has exactly one
+boundary.
 
-The biggest stage, and the one whose parity is worth measuring rather than asserting: the
-frame is compared pixel for pixel over the scene corpus, and the DST sweep is run before and
-after with the same seeds.
+**`fraction` answers *exactly* what `pair` was built from**, and that is the whole of the parity
+claim: `f + fl(1 − f)` rounds to exactly `1.0` in `f32` for every `f` in `0..=1`, because the
+error of `fl(1 − f)` is at most half an ulp of a value below one, which is at most half the ulp
+just below `1.0`. Pinned by `the_boundary_a_pair_was_built_from_comes_back_exactly` over 10 001
+boundaries, compared **by bits** — an epsilon comparison there would pass on an implementation
+that drifts, which is the one thing it exists to catch.
 
-**DoD**: identical rectangles for every node of every corpus scene; `SeparatorBand` keeps its
-two tests (the NaN guard and the collapsed band); `validate` gains "every weight is finite and
-positive" and the fuzz corpus still loads.
+**DoD** (met):
+
+* **identical rectangles for every node of every corpus scene** — `rect_probe`, new here:
+  544 layouts of `fuzz/corpus/tree_persist`, **4141 nodes, byte-identical**, and a determinism
+  control (the same build run twice) before the comparison was believed. `shape_probe` is
+  byte-identical too, and the DST sweep replays the same seeds with **every** coverage counter
+  unchanged — the outcome histogram and all eight watches;
+* `SeparatorBand` keeps its two tests, untouched: the NaN guard
+  (`a_range_that_is_not_a_positive_number_constrains_nothing`) and the collapsed band;
+* `validate` gains the weight rules and the fuzz corpus still loads (544 of 8233, the other
+  7689 being the fuzzer's own binary entries, exactly as before);
+* `cargo test --all-features`: **294 passed, 0 failed**, plus stage 0's two ignored.
+
+**`rect_probe` is a second probe and not a bigger `shape_probe`.** The existing one answers
+about the *model* — orientation, boundary, collapsed flag, children by position — and a change
+to how a row stores its division could leave that dump alone and still move a pixel, because
+between the model and the screen sit the separator band, the pixel snapping, the strip
+arithmetic and the sideways cut. It builds against the *previous* commit unchanged, which is
+what let it produce a "before" at all: it uses only `DockState::iter_all_nodes` and
+`DockLayout::get`, both of which predate this stage. Stages 6 and 7 re-run it.
+
+#### The one rule that is not what this plan wrote
+
+The plan said `validate` would gain "every weight is finite and **positive**". It gained
+*finite, **not negative**, and a sum greater than zero* — three rules, in that order, because
+`NaN` fails every comparison and would otherwise slip past the sign test and poison the sum.
+
+Strict positivity was rejected on parity: a `fraction` of exactly `0.0` or `1.0` is legal today
+and reachable three ways — `Tree::split` asserts the **inclusive** range `0..=1`, `validate`'s
+own old range was inclusive, and `adopt_split` clamps stored fractions *into* it, so files
+carrying one load as one. It means a child with no length, which the separator margin takes
+back at draw time. Rejecting it would have refused layouts that load today, which is the one
+thing a parity stage may not do; the mutant `share <= 0.0` is killed by
+`a_fraction_a_file_cannot_mean_is_repaired_on_load` — a persist test, which is where the
+evidence for this actually lives.
+
+What replaces it is `RowSharesAllZero`: `[0, 0]` passes both other rules and is the only shape
+that makes the division answer `NaN`. Not reachable through `set_fraction`, which always writes
+weights summing to one — so it is checked because the *type* admits it, and built by hand in the
+oracle.
+
+**The rename is the point of the rule, not paperwork.** `SplitFractionOutOfRange` →
+`RowShareNegative`: writing a boundary past either end of a row leaves a negative weight on the
+child that lost, so the *global* rule ("the fraction lies inside the interval it measures", which
+every writer had to keep in mind) became the *local* one ("no weight is negative"), catching
+exactly the same cases. That is decision 1 of this plan, arriving as one line of code.
+
+#### Mutants
+
+Nine, eight killed by the gate that names each:
+
+| Mutant | Killed by |
+|---|---|
+| `fraction` reads the **second** child | 24 tests |
+| `set_fraction` writes `[1 − f, f]` | 13 tests |
+| `pair` writes `[f, 1.0]` — weights not summing to one | 13 tests, **and both probes**: `rect_probe` diffs on 26 052 lines, `shape_probe` on 5 300 |
+| `total_share` returns the constant `1.0` | the two oracles below, and nothing else |
+| the `RowShareNegative` arm dropped | `oracle_bites_on_a_weight_that_is_not_a_length` |
+| `share <= 0.0` instead of `< 0.0` | that oracle **and** `a_fraction_a_file_cannot_mean_is_repaired_on_load` |
+| the `RowSharesAllZero` arm dropped | that oracle |
+| `node_out` writing `1 − fraction` to disk | `round_trip_preserves_shape_focus_and_fractions` |
+| `copy_filtered` writing `0.5` instead of carrying the weights | **nothing — see below** |
+
+The third one is load-bearing twice over: it is what says `rect_probe` is not vacuous, and it is
+the failure mode stage 0 of this plan exists to avoid.
+
+**Two oracles exist because the round found them missing.** Every row alive at this stage is
+built by `pair`, whose weights always sum to exactly one — so "divide by the sum" and "read the
+first weight" are the same function at every call site, and a `total_share` returning `1.0`
+survived the entire suite *and both corpus probes*. That is the **central decision of this
+stage** — weights are deliberately not normalised — going unjudged. It is stated now on rows
+built by hand (`weights_that_do_not_add_up_to_one_still_name_a_proportion`, which also asks a
+row of three, since the question survives the shape change), and stage 7 is where ordinary use
+starts reaching it.
+
+**The survivor is the finding.** `copy_filtered` — the sweep behind `filter_tabs` / `retain_tabs`
+/ `map_tabs` — writing `0.5` instead of carrying the user's weights passed all 293 tests. The
+line has always carried a comment saying the boundaries are a decision of the user's, and
+nothing checked it: a copy that recentred them would silently rearrange a dock that was only
+asked to drop a tab. Pinned by `a_copying_sweep_keeps_the_boundaries_the_user_left`. The class
+is one this crate keeps paying for — a property stated in prose beside the code that implements
+it, with no oracle anywhere — and it was reachable only because the line changed.
+
+#### The application, again
+
+Second stage running, and the first where the application *writes*: `tree_layout/layouts.rs`
+(`s.fraction = f` → `s.set_fraction(f)`), `live_api/host/panels.rs` (a read, feeding the wire,
+which is still a pair), and the `dock_layout_gate` test. All eleven consumers of the dock in
+that tree build with `--all-targets`; `dock_layout_gate` 9/9, `main_app` 975/975. Stage 5 renames
+what those three places name, so they will be visited again — and stage 5's own DoD should say so
+rather than discovering it.
 
 ### Stage 5 — a divider is addressed as a gap
 
@@ -337,10 +432,16 @@ while rows are pairs, so the change is in the language, not in the behaviour.
 
 Readers to move: `DockLayout::divider` and `NodeGeometry::divider`, `separator_rect`,
 `resize_id`, `DragSubject::Separator`, `DockMutation::SetSplitFraction`, `nudge_split`,
-`split_gesture`, and the six junction sites.
+`split_gesture`, and the six junction sites. Plus `RowNode::fraction` / `set_fraction`, which
+stage 4 left as the pair spelling precisely because a gap has no name yet.
 
-**DoD**: parity; the sweep replays the same gestures at the same points; the `dst.rs` divider
-step names a gap and still finds every divider it found before.
+**In the application**, which stage 4 found writing as well as reading: `tree_layout/layouts.rs`
+and `live_api/host/panels.rs` in `rust_app`, and the `dock_layout_gate` test. Look at them
+*before* moving the pin — `DockMutation` is what the live-api op speaks.
+
+**DoD**: parity, measured by `rect_probe` and `shape_probe` over the corpus the way stage 4 was;
+the sweep replays the same gestures at the same points; the `dst.rs` divider step names a gap and
+still finds every divider it found before.
 
 ### Stage 6 — the layout cuts a row
 

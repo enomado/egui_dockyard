@@ -1,3 +1,4 @@
+use crate::core::resize::{SepBehavior, apply_drag};
 use crate::core::tree::{ChildIndex, GapIndex, NodeId};
 
 /// How much of a row's length one of its children asks for, **relative to its siblings**.
@@ -435,6 +436,88 @@ impl RowNode {
         self.shares[gap.0 + 1] = Share(after - cut);
     }
 
+    /// What this row's weights become when boundary `gap` is dragged by `delta` **points** under
+    /// `behavior` — the *whole* vector, not just the two beside the gap.
+    ///
+    /// [`set_boundary`](Self::set_boundary) is one answer to "who pays for this drag": the two
+    /// neighbours, and nobody else. It is the only one a row could give while a boundary was the
+    /// thing being written. Weights can say more, and this is where they do — a
+    /// [`Chain`](SepBehavior::Chain) drag passes over a child that has reached `min_size` and asks
+    /// the one behind it, a [`Proportional`](SepBehavior::Proportional) one moves every boundary of
+    /// the row at once. Which of them a given gesture is, is policy and lives with whoever read the
+    /// modifier; the arithmetic is [`apply_drag`], shared with the application's grid screens.
+    ///
+    /// # Points, and why the caller supplies the extent
+    ///
+    /// Weights are relative and a drag is not: a minimum size is in points, and "how much room is
+    /// this child still able to give" cannot be answered without knowing how long the row is on
+    /// screen. `extent` is that length — the part of the row its *weighted* children divide,
+    /// dividers and fixed-size strips already taken out, which is exactly what the layout pass
+    /// hands to its own division. A child's current length follows from it and the weights, so
+    /// nothing here needs a rectangle, and the model stays free of screen state.
+    ///
+    /// # Why it answers instead of writing
+    ///
+    /// The drawing pass reads the tree and may not write it — every edit travels as a request and
+    /// is applied in the epilogue (see `DockMutation`). A drag is computed while drawing, so what
+    /// it needs is the *post-image*, carried in the request and written by
+    /// [`set_shares`](Self::set_shares). A `&mut self` writer here would be the same arithmetic
+    /// with a borrow no caller in this crate can hold.
+    ///
+    /// # Panics
+    ///
+    /// If `gap` is not one of this row's gaps — see [`boundary`](Self::boundary).
+    #[track_caller]
+    pub fn shares_after_drag(
+        &self,
+        gap: GapIndex,
+        delta: f32,
+        behavior: &SepBehavior,
+        extent: f32,
+        min_size: f32,
+    ) -> Vec<Share> {
+        assert!(
+            self.has_gap(gap),
+            "boundary {} was dragged in a row with {} gaps",
+            gap.0,
+            self.gap_count()
+        );
+        let total = self.total_share();
+        let mut weights: Vec<f32> = self.shares.iter().map(|share| share.0).collect();
+        // One weight is this many points. A row whose weights add up to nothing has no lengths to
+        // speak of, and `apply_drag` answers "nothing can be given" for every child, which is the
+        // honest reading of a row that is not on screen.
+        let per_share = if total > 0.0 { extent / total } else { 0.0 };
+        let sizes: Vec<f32> = weights.iter().map(|weight| weight * per_share).collect();
+        apply_drag(behavior, &mut weights, gap.0, delta, min_size, |child| {
+            sizes[child]
+        });
+        weights.into_iter().map(Share).collect()
+    }
+
+    /// Replaces every weight of this row at once — the post-image half of
+    /// [`shares_after_drag`](Self::shares_after_drag).
+    ///
+    /// A post-image and not a delta, for the reason every other request in this crate carries one:
+    /// two of them arriving in a single frame must not compound, and the clamp stays where it was
+    /// computed.
+    ///
+    /// # Panics
+    ///
+    /// If `shares` is not one weight per child. The pair of vectors staying the same length is the
+    /// one invariant of this type a reader cannot check for itself — see [`new`](Self::new).
+    #[track_caller]
+    pub fn set_shares(&mut self, shares: Vec<Share>) {
+        assert_eq!(
+            shares.len(),
+            self.children.len(),
+            "a row of {} children was given {} weights",
+            self.children.len(),
+            shares.len()
+        );
+        self.shares = shares;
+    }
+
     /// The proportion of this row taken by its first child — the boundary of gap `0`.
     ///
     /// The pair spelling of [`boundary`](Self::boundary), kept by name for the readers that
@@ -477,7 +560,7 @@ impl RowNode {
 
 #[cfg(test)]
 mod tests {
-    use super::{RowNode, Share};
+    use super::{RowNode, SepBehavior, Share};
     use crate::core::tree::{GapIndex, NodeId};
 
     /// Two ids, which is all a row needs to be built directly: nothing here walks the tree.
@@ -593,6 +676,150 @@ mod tests {
             "nor the first, the other way round"
         );
         assert_eq!(row.shares()[0], Share(0.5));
+    }
+
+    /// A row of three equal children, 400 points each: the scene stage 0's oracle draws on the
+    /// screen, here on the model.
+    fn three_equal() -> RowNode {
+        row(vec![Share(1.0), Share(1.0), Share(1.0)])
+    }
+
+    /// The whole row on screen, and the margin each child keeps — this crate's own numbers
+    /// (`SeparatorStyle::extra` is 175), so a child is 400 points long and has 225 to give.
+    const EXTENT: f32 = 1200.0;
+    const MIN: f32 = 175.0;
+
+    /// Where boundary `gap` would sit after a drag, without writing anything: the same reading
+    /// [`RowNode::boundary`] does, over the answer rather than over the row.
+    fn boundary_of(shares: &[Share], gap: GapIndex) -> f32 {
+        let total: f32 = shares.iter().map(|share| share.0).sum();
+        let before: f32 = shares[..=gap.0].iter().map(|share| share.0).sum();
+        before / total
+    }
+
+    /// **A chain drag reaches past the child that ran out** — the property the whole plan is for,
+    /// stated where it is reachable before any gesture reads a modifier.
+    ///
+    /// Pulling boundary `0` right by 400 points asks child `b` for more than the 225 it can spare;
+    /// the remaining 175 come off `c`, which `set_boundary` could not have taken from anyone.
+    #[test]
+    fn a_chain_drag_takes_from_the_child_behind_the_one_that_ran_out() {
+        let row = three_equal();
+        let after = row.shares_after_drag(GapIndex(0), 400.0, &SepBehavior::Chain, EXTENT, MIN);
+
+        let total: f32 = after.iter().map(|share| share.0).sum();
+        let in_points = |child: usize| after[child].0 / total * EXTENT;
+        assert!(
+            (in_points(1) - MIN).abs() < 0.5,
+            "the near neighbour is at its minimum: {:?}",
+            after
+        );
+        assert!(
+            (in_points(2) - (400.0 - 175.0)).abs() < 0.5,
+            "and the one behind it paid the 175 points b could not: {:?}",
+            after
+        );
+    }
+
+    /// **A `Pair` drag through this writer lands where `set_boundary` would put it** — decision 2
+    /// of `docs/PLAN_a_drag_chooses_who_pays_for_it.md`, checked rather than asserted in prose.
+    ///
+    /// Unequal weights on purpose: `[1, 3, 2]` tells "the neighbour paid" from "everyone paid a
+    /// third", which equal children cannot — the symmetry trap this track has now hit four times.
+    /// A soft pull, because the two spellings agree only while nobody reaches `min_size`:
+    /// `set_boundary` has no minimum to reach, which is exactly why the clamp lives above it.
+    #[test]
+    fn a_pair_drag_agrees_with_set_boundary() {
+        let row = row(vec![Share(1.0), Share(3.0), Share(2.0)]);
+        let dragged = row.shares_after_drag(GapIndex(0), 150.0, &SepBehavior::Pair, EXTENT, MIN);
+
+        let mut written = row.clone();
+        written.set_boundary(GapIndex(0), row.boundary(GapIndex(0)) + 150.0 / EXTENT);
+
+        for (child, (a, b)) in dragged.iter().zip(written.shares()).enumerate() {
+            assert!(
+                (a.0 - b.0).abs() < 1e-5,
+                "weight {child}: dragged {dragged:?} against written {:?}",
+                written.shares()
+            );
+        }
+        assert!(
+            (dragged[2].0 - 2.0).abs() < 1e-5,
+            "and the far child stood still: {dragged:?}"
+        );
+    }
+
+    /// **`Proportional` moves the row's other boundary and `Chain` does not** — on the same soft
+    /// pull, which is what makes the two modes different pictures rather than two names.
+    ///
+    /// 150 points is well inside `b`'s own room, so a chain never asks `c` at all; proportional
+    /// asks both from the first point, 75 each, and the second boundary travels by that 75.
+    #[test]
+    fn proportional_moves_the_far_boundary_where_a_chain_leaves_it() {
+        let row = three_equal();
+        let before = row.boundary(GapIndex(1));
+
+        let chained = row.shares_after_drag(GapIndex(0), 150.0, &SepBehavior::Chain, EXTENT, MIN);
+        assert!(
+            (boundary_of(&chained, GapIndex(1)) - before).abs() < 1e-5,
+            "a soft chain never reaches the far boundary: {chained:?}"
+        );
+
+        let spread =
+            row.shares_after_drag(GapIndex(0), 150.0, &SepBehavior::Proportional, EXTENT, MIN);
+        let moved = (boundary_of(&spread, GapIndex(1)) - before) * EXTENT;
+        assert!(
+            (moved - 75.0).abs() < 0.5,
+            "proportional took 75 points from each of the two ahead: moved {moved} px ({spread:?})"
+        );
+    }
+
+    /// **The extent is what turns points into weight**, and the row's length is the caller's to
+    /// say: the same 12-point pull is a hundredth of a 1200-point row and a fiftieth of a
+    /// 600-point one.
+    ///
+    /// The one thing a mutant could get backwards silently — `extent / total` inverted, or the
+    /// extent ignored — while every behaviour above still moved the right children. A *small*
+    /// pull, because on the shorter row each child is 200 points and keeps 175, so anything over
+    /// 25 measures the minimum instead of the conversion.
+    #[test]
+    fn the_same_pull_is_a_bigger_share_of_a_shorter_row() {
+        let row = three_equal();
+        let start = row.boundary(GapIndex(0));
+        for (extent, expected) in [(EXTENT, 12.0 / EXTENT), (600.0, 12.0 / 600.0)] {
+            let after = row.shares_after_drag(GapIndex(0), 12.0, &SepBehavior::Pair, extent, MIN);
+            let moved = boundary_of(&after, GapIndex(0)) - start;
+            assert!(
+                (moved - expected).abs() < 1e-5,
+                "over {extent} points the boundary moved by {moved} of the row, not {expected}"
+            );
+        }
+    }
+
+    /// **A post-image is written whole**, and the boundaries the row then reports are the ones it
+    /// was given — the other half of a drag, which computes the vector while drawing and hands it
+    /// over in the epilogue.
+    ///
+    /// Trivial to read and not trivial to leave out: with no caller in this crate until the
+    /// gesture grows a modifier, a `set_shares` that quietly kept the old weights would look
+    /// exactly like a drag the clamp refused.
+    #[test]
+    fn a_post_image_is_what_the_row_then_reports() {
+        let mut row = three_equal();
+        row.set_shares(vec![Share(1.0), Share(2.0), Share(1.0)]);
+
+        assert_eq!(row.shares(), &[Share(1.0), Share(2.0), Share(1.0)]);
+        assert_eq!(row.boundary(GapIndex(0)), 0.25);
+        assert_eq!(row.boundary(GapIndex(1)), 0.75);
+    }
+
+    /// A row is given one weight per child or none at all: a post-image of the wrong length is a
+    /// caller that lost track of the row it measured, and silently keeping the old vector would
+    /// hide it behind a drag that simply did nothing.
+    #[test]
+    #[should_panic(expected = "a row of 3 children was given 2 weights")]
+    fn a_post_image_of_the_wrong_length_is_a_bug() {
+        three_equal().set_shares(vec![Share(1.0), Share(1.0)]);
     }
 
     /// The gaps a row offers are one fewer than its children, in order, and `has_gap` draws the

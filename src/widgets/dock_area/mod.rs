@@ -199,7 +199,10 @@ pub(in crate::widgets::dock_area) enum DockMutation {
     /// *which node goes where* is derived from the tree when this is applied, by
     /// [`Tree::transpose_cross`](crate::core::tree::Tree::transpose_cross).
     TransposeCross {
-        outer: NodePath,
+        /// The **gap** the two chains lie on either side of — not the row. A row of three has
+        /// two gaps and a crossing sits on exactly one of them; carrying the row would name the
+        /// gesture's neighbours only while every row held two.
+        outer: GapPath,
         /// Which divider of each chain the crossing is made of.
         at: [usize; 2],
         bounds: [Vec<f32>; 2],

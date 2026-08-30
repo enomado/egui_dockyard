@@ -133,59 +133,34 @@ enum Collapse {
     Both,
 }
 
-/// Which way a binary tree happened to write the row `a | b | c`.
+/// Three leaves in a row, left to right — one row of three.
 ///
-/// Both, in every test that uses a row, because the shape is *not* something the user chose:
-/// it is a record of the order the panels were split off in, and the same three columns on
-/// screen can be either. A rule that reads the tree pair by pair passes for one shape and fails
-/// for the other — which is exactly how the bug this file's row tests are about stayed hidden
-/// (the leftmost panel of `H(a, H(b, c))` keeps its strip when the second is collapsed; the
-/// leftmost panel of `H(H(a, b), c)` loses it).
-#[derive(Clone, Copy, Debug)]
-enum RowShape {
-    /// `H(a, H(b, c))` — the row was grown by splitting off to the right each time.
-    RightHeavy,
-    /// `H(H(a, b), c)` — the row was grown by splitting the leftmost panel again.
-    LeftHeavy,
-}
-
-/// Three leaves in a row, left to right, in the given shape.
-fn three_columns(shape: RowShape) -> (DockState<String>, [NodeId; 3]) {
+/// It used to be two fixtures, `RowShape::RightHeavy` (`H(a, H(b, c))`) and `LeftHeavy`
+/// (`H(H(a, b), c)`), and every row test here ran against both: the nesting was *not* something
+/// the user chose — it recorded the order the panels were split off in — and a rule that read the
+/// tree pair by pair passed for one spelling and failed for the other. That is exactly how the
+/// bug this file is about stayed hidden.
+///
+/// Since stage 7 of `docs/PLAN_a_row_holds_many_panels.md` the two spellings **are the same
+/// tree**: splitting the same way twice joins the row rather than nesting inside it. The
+/// property the double fixture was defending is now held by construction, and keeping it would
+/// mean running every scene twice on one shape while claiming to run it on two.
+fn three_columns() -> (DockState<String>, [NodeId; 3]) {
     let mut state = DockState::new(vec![tab("a")]);
     let a = state.main_surface().root().unwrap();
-    match shape {
-        RowShape::RightHeavy => {
-            let [_, b] = state.split(
-                NodePath::new(SurfaceIndex::main(), a),
-                Split::Right,
-                0.5,
-                Node::leaf(tab("b")),
-            );
-            let [_, c] = state.split(
-                NodePath::new(SurfaceIndex::main(), b),
-                Split::Right,
-                0.5,
-                Node::leaf(tab("c")),
-            );
-            (state, [a, b, c])
-        }
-        RowShape::LeftHeavy => {
-            let [_, c] = state.split(
-                NodePath::new(SurfaceIndex::main(), a),
-                Split::Right,
-                0.5,
-                Node::leaf(tab("c")),
-            );
-            // Splitting `a` again puts the new leaf between `a` and `c`, so this is the middle.
-            let [_, b] = state.split(
-                NodePath::new(SurfaceIndex::main(), a),
-                Split::Right,
-                0.5,
-                Node::leaf(tab("b")),
-            );
-            (state, [a, b, c])
-        }
-    }
+    let [_, b] = state.split(
+        NodePath::new(SurfaceIndex::main(), a),
+        Split::Right,
+        0.5,
+        Node::leaf(tab("b")),
+    );
+    let [_, c] = state.split(
+        NodePath::new(SurfaceIndex::main(), b),
+        Split::Right,
+        0.5,
+        Node::leaf(tab("c")),
+    );
+    (state, [a, b, c])
 }
 
 fn row_rect(layout: &DockLayout, state: &DockState<String>) -> Rect {
@@ -344,9 +319,9 @@ fn two_collapsed_siblings_become_two_strips() {
 fn two_of_three_collapsed_are_two_strips_beside_one_column() {
     let style = style();
 
-    for shape in [RowShape::RightHeavy, RowShape::LeftHeavy] {
+    {
         for open in 0..3 {
-            let (mut state, nodes) = three_columns(shape);
+            let (mut state, nodes) = three_columns();
             for (i, node) in nodes.iter().enumerate() {
                 if i != open {
                     state.main_surface_mut().set_leaf_collapsed(*node, true);
@@ -362,14 +337,14 @@ fn two_of_three_collapsed_are_two_strips_beside_one_column() {
                 }
                 assert!(
                     (rect.width() - style.tab_bar.height).abs() <= TOLERANCE,
-                    "{shape:?}, panel {open} open: panel {i} got {} px instead of a {} px strip \
+                    "panel {open} open: panel {i} got {} px instead of a {} px strip \
                      — collapsing one panel of a row took the strip away from another",
                     rect.width(),
                     style.tab_bar.height
                 );
                 assert!(
                     side_strip_of(&layout, nodes[i]).is_some(),
-                    "{shape:?}, panel {open} open: panel {i} is narrow but the layout did not \
+                    "panel {open} open: panel {i} is narrow but the layout did not \
                      call it a strip, so it will draw a tab bar with no room for one"
                 );
             }
@@ -379,20 +354,20 @@ fn two_of_three_collapsed_are_two_strips_beside_one_column() {
                 rects.iter().map(|rect| rect.width()).sum::<f32>() + 2.0 * style.separator.width;
             assert!(
                 (covered - row.width()).abs() <= TOLERANCE,
-                "{shape:?}, panel {open} open: the row covers {covered} px of {} px",
+                "panel {open} open: the row covers {covered} px of {} px",
                 row.width()
             );
             assert_eq!(
                 side_strip_of(&layout, nodes[open]),
                 None,
-                "{shape:?}: the open panel {open} is not a strip"
+                "the open panel {open} is not a strip"
             );
             // Left to right, as they were built: a strip belongs to the panel it collapsed
             // from, and a row that reorders itself when two of it collapse is a different bug
             // wearing the same numbers.
             assert!(
                 rects[0].min.x < rects[1].min.x && rects[1].min.x < rects[2].min.x,
-                "{shape:?}, panel {open} open: the row came out in the order {:?}",
+                "panel {open} open: the row came out in the order {:?}",
                 rects.map(|rect| rect.min.x)
             );
         }
@@ -410,8 +385,8 @@ fn two_of_three_collapsed_are_two_strips_beside_one_column() {
 fn a_fully_collapsed_row_is_a_row_of_strips() {
     let style = style();
 
-    for shape in [RowShape::RightHeavy, RowShape::LeftHeavy] {
-        let (mut state, nodes) = three_columns(shape);
+    {
+        let (mut state, nodes) = three_columns();
         for node in nodes {
             state.main_surface_mut().set_leaf_collapsed(node, true);
         }
@@ -422,25 +397,25 @@ fn a_fully_collapsed_row_is_a_row_of_strips() {
         for (i, rect) in rects.iter().enumerate() {
             assert!(
                 (rect.width() - style.tab_bar.height).abs() <= TOLERANCE,
-                "{shape:?}: panel {i} of a fully collapsed row got {} px instead of a {} px strip",
+                "panel {i} of a fully collapsed row got {} px instead of a {} px strip",
                 rect.width(),
                 style.tab_bar.height
             );
             assert!(
                 side_strip_of(&layout, nodes[i]).is_some(),
-                "{shape:?}: panel {i} of a fully collapsed row is not marked as a strip"
+                "panel {i} of a fully collapsed row is not marked as a strip"
             );
         }
         assert!(
             (rects[0].min.x - row.min.x).abs() <= TOLERANCE,
-            "{shape:?}: the row of strips starts at {} rather than at its row's edge {}",
+            "the row of strips starts at {} rather than at its row's edge {}",
             rects[0].min.x,
             row.min.x
         );
         for i in 1..3 {
             assert!(
                 (rects[i].min.x - (rects[i - 1].max.x + style.separator.width)).abs() <= TOLERANCE,
-                "{shape:?}: strip {i} starts at {} rather than right after strip {} ({} + a \
+                "strip {i} starts at {} rather than right after strip {} ({} + a \
                  divider) — the empty part of the row got in between the strips",
                 rects[i].min.x,
                 i - 1,
@@ -449,7 +424,7 @@ fn a_fully_collapsed_row_is_a_row_of_strips() {
         }
         assert!(
             rects[2].max.x < row.max.x - style.tab_bar.height,
-            "{shape:?}: nothing was left empty — three strips ended at {} of a row ending at {}",
+            "nothing was left empty — three strips ended at {} of a row ending at {}",
             rects[2].max.x,
             row.max.x
         );
@@ -458,42 +433,56 @@ fn a_fully_collapsed_row_is_a_row_of_strips() {
 
 /// A row of strips is marked leaf by leaf, and the split holding them is not marked at all.
 ///
-/// Drawing asks the layout "am I a strip?" and answers by drawing one bar with one arrow. The
-/// split above a collapsed pair is a strip's *width* but not a strip's *bar*: mark it and the
-/// row draws a single arrow for two panels — which is what stowing means, and stowing is a
-/// state the user sets deliberately, not something a pair of ordinary collapses should turn
-/// into behind their back.
+/// Drawing asks the layout "am I a strip?" and answers by drawing one bar with one arrow. A row
+/// holding collapsed panels is their *width* but not their *bar*: mark it and the row draws a
+/// single arrow for two panels — which is what stowing means, and stowing is a state the user
+/// sets deliberately, not something a pair of ordinary collapses should turn into behind their
+/// back.
 #[test]
 fn a_row_of_strips_marks_its_leaves_not_the_split() {
     let style = style();
 
-    let (mut state, [a, b, c]) = three_columns(RowShape::RightHeavy);
+    let (mut state, [a, b, c]) = three_columns();
     state.main_surface_mut().set_leaf_collapsed(b, true);
     state.main_surface_mut().set_leaf_collapsed(c, true);
-    let inner = state
+    let row = state
         .main_surface()
         .parent(b)
-        .expect("the two right-hand panels have a parent");
+        .expect("the panels have a parent");
 
     let layout = run(&mut state, &style, true);
 
     assert_eq!(
-        side_strip_of(&layout, inner),
+        side_strip_of(&layout, row),
         None,
-        "the split holding two strips was marked as a strip itself, so it draws one bar and one \
+        "the row holding two strips was marked as a strip itself, so it draws one bar and one \
          arrow for both panels — silently the same as stowing it"
     );
-    assert_eq!(side_strip_of(&layout, b), Some(SideStrip::Left));
-    assert_eq!(side_strip_of(&layout, c), Some(SideStrip::Left));
+    // `Right`, and this is where the mark **changed at stage 7**. The two used to sit in a
+    // nested pair of their own, and inside that pair — which was fully collapsed — they were the
+    // *leading* run, so both were marked `Left`. On the flat row they are what they always were
+    // on screen: the trailing run, stacked from the far edge, with the open column taking the
+    // width to their left. The rule (`Run::Trailing` → `Right`) did not move; the tree stopped
+    // mis-stating which run they are in.
+    assert_eq!(side_strip_of(&layout, b), Some(SideStrip::Right));
+    assert_eq!(side_strip_of(&layout, c), Some(SideStrip::Right));
 
-    // And it is exactly as wide as the two strips and the divider between them, which is the
-    // arithmetic `collapsed_strip_width` gained a `columns` parameter for.
-    let inner_rect = rect_of(&layout, inner);
+    // The two of them together are exactly two strips and the divider between them, which is
+    // the arithmetic `collapsed_strip_width` gained a `columns` parameter for. Measured on the
+    // strips rather than on the node above them, which the flat row no longer has.
+    let strips = rect_of(&layout, b).union(rect_of(&layout, c));
     let expected = 2.0 * style.tab_bar.height + style.separator.width;
     assert!(
-        (inner_rect.width() - expected).abs() <= TOLERANCE,
+        (strips.width() - expected).abs() <= TOLERANCE,
         "the pair of strips was given {} px where two strips and a divider need {expected}",
-        inner_rect.width()
+        strips.width()
+    );
+    let whole = rect_of(&layout, row);
+    assert!(
+        (strips.max.x - whole.max.x).abs() <= TOLERANCE,
+        "the strips are stacked from the far edge: they end at {} of a row ending at {}",
+        strips.max.x,
+        whole.max.x
     );
     assert!(
         rect_of(&layout, a).width() > style.tab_bar.height * 2.0,

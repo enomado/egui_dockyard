@@ -55,8 +55,10 @@ pub struct Share(pub f32);
 /// shape the 30.08 strip bug hid in, where the horizontal branch had grown a rule the vertical
 /// one had solved years earlier.
 ///
-/// A row does not hold more than two children yet: that is stage 7 of
-/// `docs/PLAN_a_row_holds_many_panels.md`, and this stage is parity.
+/// A row holds as many children as it has. Splitting a pane whose row already runs along the
+/// same axis joins that row ([`insert_beside`](Self::insert_beside)) rather than nesting a second
+/// one inside it, and a file that spells a row as a chain of nested pairs is collapsed back into
+/// one on the way in — stage 7 of `docs/PLAN_a_row_holds_many_panels.md`.
 #[derive(Clone, Debug)]
 pub struct RowNode {
     /// Which axis this row lays its children out along: `true` for side by side (the first
@@ -71,19 +73,16 @@ pub struct RowNode {
 
     /// The children, in order along the axis: leftmost / topmost first.
     ///
-    /// A `Vec` although a row holds exactly two of them today — the type is n-ary and the
-    /// content is not, which is the whole of stage 4 in
-    /// `docs/PLAN_a_row_holds_many_panels.md`. Every reader that walks them was already written
-    /// against a slice (stage 2); what is left to change is the four places that *build* a row,
-    /// and they are stage 7's.
+    /// A `Vec`, and a row genuinely holds as many as the user made: three panels side by side
+    /// are one row of three, not two nested pairs.
     children: Vec<NodeId>,
 
     /// One weight per child, in [`children`](Self::children) order.
     ///
-    /// Kept the same length as `children` by construction — the only writer of either is
-    /// [`new`](Self::new), which checks it, and [`set_boundary`](Self::set_boundary), which
-    /// rewrites two neighbouring weights in place. Nothing in the crate can grow one and not the
-    /// other yet; the operations that could are stage 7's, and they will take the two together.
+    /// Kept the same length as `children` by construction: every writer of either writes both.
+    /// [`new`](Self::new) checks the two agree, [`set_boundary`](Self::set_boundary) rewrites two
+    /// neighbouring weights in place, and [`insert_beside`](Self::insert_beside) /
+    /// [`remove_child`](Self::remove_child) grow and shrink the pair of vectors together.
     shares: Vec<Share>,
 
     /// Whether all subnodes are collapsed.
@@ -114,7 +113,7 @@ pub struct RowNode {
 }
 
 impl RowNode {
-    /// Creates a new [`RowNode`] over two existing nodes.
+    /// Creates a new [`RowNode`] over existing nodes, one weight each.
     ///
     /// The collapsing bookkeeping is *not* an argument, and deliberately so: both fields are
     /// derived from the children, so the only honest value at construction time — before
@@ -155,12 +154,13 @@ impl RowNode {
 
     /// A row of exactly two children, whose boundary sits at `fraction` of its length.
     ///
-    /// The pair spelling, named apart from [`new`](Self::new) for the same reason
-    /// [`children_pair`](Self::children_pair) is named apart from [`children`](Self::children):
-    /// every place that still *builds* a row of two is then a grep for one identifier instead of
-    /// a reading of the crate. All four of them are owed a row by stage 7 of
-    /// `docs/PLAN_a_row_holds_many_panels.md` — splitting a node, regrouping a subtree, copying
-    /// a filtered tree, and loading a file, which is where the binary shape enters from disk.
+    /// The pair spelling, named apart from [`new`](Self::new) so that every place which builds
+    /// a row of *exactly* two is a grep for one identifier rather than a reading of the crate.
+    ///
+    /// Still honest in two of them, and owed a row in the third: splitting a pane whose parent
+    /// runs along the other axis genuinely makes a row of two, loading a two-child row from a
+    /// file likewise — while a regrouping builds a right-leaning ladder where one row of `n` is
+    /// what it means (`transpose.rs`, stage 7b of `docs/PLAN_a_row_holds_many_panels.md`).
     pub(crate) fn pair(horizontal: bool, children: [NodeId; 2], fraction: f32) -> Self {
         Self::new(
             horizontal,
@@ -183,10 +183,9 @@ impl RowNode {
 
     /// This row's children, in order: first (left / top), then second (right / bottom).
     ///
-    /// A slice and not a pair, although a row holds exactly two of them today. Almost every
+    /// A slice, because a row genuinely holds as many children as the user made. Almost every
     /// reader of this method walks a subtree, counts leaves or forwards the children to a
-    /// queue — questions a row of five answers exactly as a pair does, and which therefore
-    /// need not be written twice when a row can hold five. The readers that genuinely need
+    /// queue — questions a row of five answers exactly as a pair does. The readers that need
     /// *two* say so by name, through [`children_pair`](Self::children_pair).
     #[inline(always)]
     pub fn children(&self) -> &[NodeId] {
@@ -202,10 +201,10 @@ impl RowNode {
     ///
     /// # Panics
     ///
-    /// If this row does not hold exactly two children. Unreachable while the tree is binary by
-    /// content, and deliberately loud rather than silently answering about the first two: a
-    /// caller here is one that has *not* been taught rows yet, and the moment stage 7 builds a
-    /// row of three, this is the list of places that have to be visited.
+    /// If this row does not hold exactly two children — **reachable since stage 7**, which is
+    /// the point: loud rather than silently answering about the first two, because a caller here
+    /// is one that has not been taught rows yet. Each remaining caller carries a note saying why
+    /// a pair is honest there, or which stage owes it a row.
     #[inline]
     #[track_caller]
     pub fn children_pair(&self) -> [NodeId; 2] {
@@ -250,6 +249,78 @@ impl RowNode {
     #[inline(always)]
     pub(crate) fn set_child(&mut self, index: ChildIndex, child: NodeId) {
         self.children[index.0] = child;
+    }
+
+    /// Puts `child` next to the child at `index`, dividing *that child's* weight between the two
+    /// of them at `fraction` — the newcomer taking the near side when `before` is set.
+    ///
+    /// The row grows by one and **nobody else's weight changes**: the pair now sharing the old
+    /// child's weight adds up to exactly what that child had, so every boundary outside the two
+    /// of them is where it was. That is the whole of what this row gains over wrapping a fresh
+    /// pair around the child — the same picture, one node fewer, and a drag that stays local.
+    ///
+    /// `fraction` is read the way [`pair`](Self::pair) reads it: the share taken by the *first*
+    /// of the two in screen order, whichever of them is the newcomer.
+    ///
+    /// # Panics
+    ///
+    /// If this row has no child at `index`. Every caller holds an index
+    /// [`index_of`](Self::index_of) just handed it about *this* row.
+    #[track_caller]
+    pub(crate) fn insert_beside(
+        &mut self,
+        index: ChildIndex,
+        child: NodeId,
+        fraction: f32,
+        before: bool,
+    ) {
+        assert!(
+            index.0 < self.children.len(),
+            "there is no child {} in a row of {}",
+            index.0,
+            self.children.len()
+        );
+        let room = self.shares[index.0].0;
+        let (near, far) = (room * fraction, room * (1.0 - fraction));
+        let at = if before { index.0 } else { index.0 + 1 };
+        // The *existing* child keeps the half it is not being pushed off, and the newcomer takes
+        // the other: written as two assignments rather than one so that neither depends on which
+        // slot the newcomer lands in.
+        self.shares[index.0] = Share(if before { far } else { near });
+        self.children.insert(at, child);
+        self.shares
+            .insert(at, Share(if before { near } else { far }));
+    }
+
+    /// Drops the child at `index`, and its weight with it.
+    ///
+    /// The row simply has one weight fewer and the rest keep their ratios — decision 5 of
+    /// `docs/PLAN_a_row_holds_many_panels.md`, taken with Стас. Every boundary moves and no
+    /// proportion changes. Handing the weight to a neighbour instead would nail some boundaries
+    /// at the price of making one child grow for a reason it did not ask for, which is a pair's
+    /// answer to a row's question.
+    ///
+    /// The caller is responsible for what is left: a row of one is not a row, and
+    /// [`Tree::remove_leaf`](crate::Tree::remove_leaf) dissolves it rather than asking this
+    /// method to.
+    ///
+    /// # Panics
+    ///
+    /// If this row has no child at `index`, or if the row would be left empty.
+    #[track_caller]
+    pub(crate) fn remove_child(&mut self, index: ChildIndex) {
+        assert!(
+            index.0 < self.children.len(),
+            "there is no child {} in a row of {}",
+            index.0,
+            self.children.len()
+        );
+        assert!(
+            self.children.len() > 1,
+            "a row with no children is not a row"
+        );
+        self.children.remove(index.0);
+        self.shares.remove(index.0);
     }
 
     /// This row's weights, one per child, in [`children`](Self::children) order.

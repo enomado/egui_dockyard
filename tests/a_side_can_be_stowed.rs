@@ -582,14 +582,19 @@ fn the_arrow_on_a_stowed_side_brings_it_back() {
     );
 }
 
-/// A side of three leaves: `open | (one / (two / three))`, so that the deepest leaf's *parent*
+/// A side of three leaves: `open | (one / (two | three))`, so that the deepest leaf's *parent*
 /// is only part of the side. Returns (state, the side, the inner split, the three leaves).
+///
+/// The last split crosses the axis on purpose. Three panels stacked would now be **one row** —
+/// a same-axis split joins the row it is in rather than nesting a second one inside it — and
+/// then the deepest leaf's parent would *be* the side, which is the one thing this scene exists
+/// to tell apart. Nesting still happens wherever the axes alternate, and that is what it uses.
 fn a_side_of_three() -> (DockState<String>, NodeId, NodeId, [NodeId; 3]) {
     let mut state = DockState::new(vec![tab("open")]);
     let open = state.main_surface().root().unwrap();
     let [_, one] = state.split(path(open), Split::Right, 0.5, Node::leaf(tab("side one")));
     let [_, two] = state.split(path(one), Split::Below, 0.5, Node::leaf(tab("side two")));
-    let [_, three] = state.split(path(two), Split::Below, 0.5, Node::leaf(tab("side three")));
+    let [_, three] = state.split(path(two), Split::Right, 0.5, Node::leaf(tab("side three")));
 
     let inner = state
         .main_surface()

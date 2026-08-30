@@ -622,19 +622,45 @@ impl<Tab> Tree<Tab> {
             node: new,
         });
 
-        let children = match split {
+        let horizontal = matches!(split, Split::Left | Split::Right);
+        // Whether the newcomer lands on the near side of `target` — left of it, or above it.
+        let before = matches!(split, Split::Left | Split::Above);
+
+        // **The row `target` already sits in, when it lays out along the same axis.** Splitting a
+        // pane of a row of two used to wrap a fresh row around it and leave a row inside a row;
+        // the picture was the same and the *hand* was not, because a fraction is a share of its
+        // own rectangle and the outer boundary then dragged the inner one along with it. Joining
+        // the row instead divides only `target`'s own weight, so every other boundary of the row
+        // stays exactly where the user left it (`RowNode::insert_beside`).
+        //
+        // The other orientation still allocates: a column inside a row is what the user asked
+        // for, not an accident of spelling.
+        if let (Some(parent), Some(index)) = (grandparent, where_target_sat)
+            && self[parent]
+                .get_row()
+                .expect("a parent is always a row")
+                .is_horizontal()
+                == horizontal
+        {
+            self[parent]
+                .get_row_mut()
+                .expect("a parent is always a row")
+                .insert_beside(index, new_id, fraction, before);
+            self.nodes.get_mut(new_id).unwrap().parent = Some(parent);
+            self.focused_node = Some(new_id);
+            self.node_update_collapsed(new_id);
+            return [target, new_id];
+        }
+
+        let children = match before {
             // The new node takes the first slot, pushing the old one to the second.
-            Split::Left | Split::Above => [new_id, target],
-            Split::Right | Split::Below => [target, new_id],
+            true => [new_id, target],
+            false => [target, new_id],
         };
-        // The new split starts with empty collapsing bookkeeping; `node_update_collapsed`
+        // The new row starts with empty collapsing bookkeeping; `node_update_collapsed`
         // below settles it, and the whole chain of ancestors with it, once the children are
         // linked. Inheriting it from `target` would be writing down a value that is about to
-        // be overwritten anyway — and the wrong one, since the split now holds `new` too.
-        let horizontal = matches!(split, Split::Left | Split::Right);
-        // A pair, and stage 7's to change: the row that will hold three is the one this method
-        // allocates, and going n-ary here means inserting into an existing row of the same
-        // orientation instead of wrapping a new one around the target.
+        // be overwritten anyway — and the wrong one, since the row now holds `new` too.
         let split_node = Node::Row(RowNode::pair(horizontal, children, fraction));
         let split_id = self.nodes.insert(NodeEntry {
             parent: grandparent,
@@ -683,13 +709,44 @@ impl<Tab> Tree<Tab> {
             return;
         };
 
-        // A pair, and honestly so *today*: "the sibling" is a question only a pair can answer.
-        // Stage 7 of the n-ary plan is where it stops being one — a row of five loses a child
-        // and stays a row, and only the last-child-standing case dissolves it.
-        let [left, right] = self
-            .children_pair(parent)
-            .expect("a parent is always a split");
-        let sibling = if left == node { right } else { left };
+        // Read out of the row before anything is written to it: the index, how many children it
+        // has, and — for the dissolving case below — the one that would be left.
+        let (index, child_count, sibling) = {
+            let row = self[parent].get_row().expect("a parent is always a row");
+            let index = row.index_of(node).expect("a child is known to its parent");
+            let sibling = row.children()[if index.0 == 0 { 1 } else { 0 }];
+            (index, row.children().len(), sibling)
+        };
+
+        // **A row of three loses a child and stays a row.** Only a row down to its last child
+        // stops being one, which is the case below; that used to be every removal, because
+        // every row held two. The weight goes back to the row rather than to a neighbour —
+        // decision 5 of the n-ary plan — so the survivors keep their ratios to each other.
+        if child_count > 2 {
+            self[parent]
+                .get_row_mut()
+                .expect("a parent is always a row")
+                .remove_child(index);
+            self.nodes.remove(node);
+
+            // The neighbour that moved into the gap, or the one before it at the far end.
+            let children = self.children(parent).expect("a row keeps its children");
+            let neighbour = children[index.0.min(children.len() - 1)];
+
+            if self.focused_node == Some(node) {
+                // The nearest surviving leaf, spelled over a row the way `first_leaf(sibling)`
+                // spells it over a pair.
+                self.focused_node = self.first_leaf(neighbour);
+            }
+
+            // From a *child*, because `node_update_collapsed` settles the ancestors of what it
+            // is given and the row itself has just lost a leaf: handed the row, it would start
+            // one level too high and leave the row's own count describing the child that went.
+            self.node_update_collapsed(neighbour);
+            return;
+        }
+
+        // Down to one child: the row is not a row any more, and the survivor takes its place.
         let grandparent = self.parent(parent);
         let where_parent_sat = grandparent.map(|split_id| {
             self[split_id]
@@ -862,40 +919,41 @@ impl<Tab> Tree<Tab> {
                 })
             }
             Node::Row(row) => {
-                // A pair, and the arithmetic below is why: "one child survived, so it takes the
-                // row's place" is a rule about two. Over a row of five it becomes "keep the
-                // survivors, dissolve at one left", which is stage 7's business and not a rewrite
-                // this stage can make honestly — the shares would have to be filtered with them.
-                let [left, right] = row.children_pair();
-                let left = self.copy_filtered(left, target, function, focus);
-                let right = self.copy_filtered(right, target, function, focus);
-                match (left, right) {
-                    // A split with one surviving child is not a split any more: the child
-                    // takes its place, which is what the old `balance()` did by swapping
-                    // slots around.
-                    (Some(only), None) | (None, Some(only)) => return Some(only),
-                    (None, None) => return None,
-                    (Some(left), Some(right)) => {
-                        // Only the weights are carried across: they are a decision of the user's.
-                        // The collapsing counts describe the subtree that *was* here, and the
-                        // sweep may have just dropped leaves out of it — `recompute_collapsed`
-                        // in the caller settles them from the shape that actually got built.
-                        //
-                        // Copied rather than re-derived through a fraction, so that a row whose
-                        // weights do not add up to one keeps the ones it has: the file may carry
-                        // any positive numbers, and a copy that renormalised them would be
-                        // inventing a layout nobody chose.
-                        let node = RowNode::new(
-                            row.is_horizontal(),
-                            vec![left, right],
-                            row.shares().to_vec(),
-                        );
+                // Each child is copied, and a child that lost every tab drops out of the row
+                // **together with its weight** — the survivors keep their ratios to each other,
+                // which is the same rule `remove_leaf` follows (decision 5 of the n-ary plan).
+                //
+                // Only the weights are carried across: they are a decision of the user's. The
+                // collapsing counts describe the subtree that *was* here, and the sweep may have
+                // just dropped leaves out of it — `recompute_collapsed` in the caller settles
+                // them from the shape that actually got built.
+                //
+                // Copied rather than re-derived through a fraction, so that a row whose weights
+                // do not add up to one keeps the ones it has: the file may carry any positive
+                // numbers, and a copy that renormalised them would be inventing a layout nobody
+                // chose.
+                let mut children = Vec::new();
+                let mut shares = Vec::new();
+                for (child, share) in row.children().iter().zip(row.shares()) {
+                    if let Some(copied) = self.copy_filtered(*child, target, function, focus) {
+                        children.push(copied);
+                        shares.push(*share);
+                    }
+                }
+                match children.len() {
+                    // A row with one surviving child is not a row any more: the child takes its
+                    // place, which is what the old `balance()` did by swapping slots around.
+                    0 => return None,
+                    1 => return Some(children[0]),
+                    _ => {
+                        let node = RowNode::new(row.is_horizontal(), children.clone(), shares);
                         let copied = target.nodes.insert(NodeEntry {
                             parent: None,
                             node: Node::Row(node),
                         });
-                        target.nodes.get_mut(left).unwrap().parent = Some(copied);
-                        target.nodes.get_mut(right).unwrap().parent = Some(copied);
+                        for child in children {
+                            target.nodes.get_mut(child).unwrap().parent = Some(copied);
+                        }
                         copied
                     }
                 }
@@ -1111,12 +1169,12 @@ impl<Tab> Tree<Tab> {
 
     /// A tree that is one row of `leaves`, weighted by `shares` — built by hand, for scenes.
     ///
-    /// Nothing in the crate builds a row of more than two yet: [`split`](Self::split) wraps a
-    /// new pair around its target, and stage 7 of `docs/PLAN_a_row_holds_many_panels.md` is
-    /// where it starts inserting into an existing row instead. The layout of such a row has to
-    /// be judged *before* then, on a scene that exists — the lesson of stages 4 and 5, where the
-    /// property each stage was for turned out reachable only on a row built by hand — so tests
-    /// build one here. Test-only, and to go when `split` can build the same row.
+    /// Written for stage 6, when nothing in the crate built a row of three and the layout of one
+    /// had to be judged anyway; its docket then said "to go when `split` can build the same row".
+    /// [`split`](Self::split) now can — and this stays, because what it is really for is naming
+    /// the **weights** outright. A scene that wants `1 : 3` gets it in one call instead of a
+    /// split at a fraction chosen so that the renderer happens to land there, and the lesson of
+    /// stages 4 and 5 was exactly that equal weights hide the path weights take.
     ///
     /// Returns the tree, the row's id, and the leaves in order. The first leaf is focused.
     #[cfg(test)]
@@ -1148,6 +1206,68 @@ impl<Tab> Tree<Tab> {
         tree.focused_node = Some(children[0]);
         tree.recompute_collapsed();
         (tree, row, children)
+    }
+
+    /// Puts a row of fresh leaves where `leaf` is, keeping `leaf`'s place in its parent — built
+    /// by hand, for scenes. Returns the new row and its leaves.
+    ///
+    /// The one shape [`split`](Self::split) cannot make: a row **inside a row of the same
+    /// orientation**. Splitting the same way twice joins the row it is in, which is the whole of
+    /// stage 7 — so from stage 7 on, a nested same-axis row is a state the tree still admits
+    /// (loading keeps a *stowed* one, and a regrouping can leave one behind) but no gesture
+    /// produces. A property that only such a shape can show — `collapsed_strip_height` over a
+    /// subtree of several collapsed rows, found missing by mutation at stage 6 — would otherwise
+    /// have no scene at all.
+    ///
+    /// The weights are equal: a scene that cares about weights says so through
+    /// [`row_by_hand`](Self::row_by_hand).
+    #[cfg(test)]
+    pub(crate) fn nest_row_by_hand(
+        &mut self,
+        leaf: NodeId,
+        horizontal: bool,
+        leaves: Vec<Vec<Tab>>,
+    ) -> (NodeId, Vec<NodeId>) {
+        assert!(leaves.len() >= 2, "a row holds at least two children");
+        assert!(self[leaf].is_leaf(), "the node replaced must be a leaf");
+        let where_it_sat = self.parent(leaf).map(|parent| {
+            self[parent]
+                .get_row()
+                .expect("a parent is always a row")
+                .index_of(leaf)
+                .expect("a child is known to its parent")
+        });
+        let parent = self.parent(leaf);
+        let children: Vec<NodeId> = leaves
+            .into_iter()
+            .map(|tabs| {
+                self.nodes.insert(NodeEntry {
+                    parent: None,
+                    node: Node::leaf_with(tabs),
+                })
+            })
+            .collect();
+        let shares = vec![Share(1.0); children.len()];
+        let row = self.nodes.insert(NodeEntry {
+            parent,
+            node: Node::Row(RowNode::new(horizontal, children.clone(), shares)),
+        });
+        for &child in &children {
+            self.nodes.get_mut(child).unwrap().parent = Some(row);
+        }
+        match (parent, where_it_sat) {
+            (Some(parent), Some(index)) => self[parent]
+                .get_row_mut()
+                .expect("a parent is always a row")
+                .set_child(index, row),
+            _ => self.root = Some(row),
+        }
+        if self.focused_node == Some(leaf) {
+            self.focused_node = Some(children[0]);
+        }
+        self.nodes.remove(leaf);
+        self.recompute_collapsed();
+        (row, children)
     }
 
     // ------------------------------------------------------------------------

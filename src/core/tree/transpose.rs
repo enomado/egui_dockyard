@@ -35,7 +35,7 @@
 //! on small tiles.
 
 use crate::core::tree::regroup::Regroup;
-use crate::core::tree::{NodeId, RowGap, Tree};
+use crate::core::tree::{NodeId, RowGap, Share, Tree};
 
 /// A chain of same-oriented rows, flattened in screen order.
 ///
@@ -102,14 +102,21 @@ impl<Tab> Tree<Tab> {
 
     /// Regroup around the crossing at `at`, keeping every leaf exactly where it is on screen.
     ///
-    /// `outer` is the split between the two chains, and `at` names the divider of each that the
-    /// crossing is made of: `at[0]` counts along the first chain, `at[1]` along the second. The
-    /// line through that crossing runs the full extent of both chains, so it can carry the whole
-    /// of `outer`: afterwards `outer` is cut *by that line* into two halves, and each half stacks
-    /// what the two chains had on its side of it.
+    /// `outer` is the **gap** the two chains lie on either side of, and `at` names the divider of
+    /// each that the crossing is made of: `at[0]` counts along the first chain, `at[1]` along the
+    /// second. The line through that crossing runs the full extent of both chains, so it can
+    /// carry the whole of what lies between them: afterwards those two neighbours are replaced by
+    /// **one** node, cut by that line into two halves, and each half holds what the two chains had
+    /// on its side of it.
+    ///
+    /// A gap and not a row, since stage 7: a row of three has two gaps and a crossing sits on
+    /// exactly one of them, between exactly two of the children. On a row of two the two readings
+    /// coincide — the row's only gap is the row — and the replacement leaves the row with a single
+    /// child, so the row *is* that node, which is how this used to be written. The rest of the
+    /// row's children are not part of the gesture and are not touched.
     ///
     /// The 2x2 case — one divider per chain, both chains two parts — is this with every
-    /// sub-chain of length one, and comes out with `outer`'s two old children still playing the
+    /// sub-chain of length one, and comes out with the gap's two old neighbours still playing the
     /// two halves. The general case has `n + m` rectangles and no "swap" reading, but the promise
     /// is the same: nothing moves except the two dividers that were out of line, which become one
     /// line — their average — so each moves by half of whatever gap the caller's alignment
@@ -117,34 +124,45 @@ impl<Tab> Tree<Tab> {
     ///
     /// `bounds[c]` are the `parts + 1` boundaries of chain `c` along its own axis, ascending:
     /// its two outer edges with each divider's position in between. `stack_fraction` is the one
-    /// number from the *other* axis — where `outer`'s own boundary sits between its two edges —
-    /// because that is the share each rebuilt half keeps for the first chain.
+    /// number from the *other* axis — where the gap's own boundary sits between the **two
+    /// neighbours'** outer edges — because that is the share each rebuilt half keeps for the
+    /// first chain.
     ///
     /// # Panics
     ///
-    /// If `outer` is not a split, if `at` does not name a divider of both chains, or if `bounds`
-    /// does not describe them. All four are caller mistakes, not user input: the caller has just
-    /// measured these chains.
+    /// If `outer` does not name a gap of a live row, if `at` does not name a divider of both
+    /// chains, or if `bounds` does not describe them. All are caller mistakes, not user input:
+    /// the caller has just measured these chains.
     pub(crate) fn transpose_cross(
         &mut self,
-        outer: NodeId,
+        outer: RowGap,
         at: [usize; 2],
         bounds: [&[f32]; 2],
         stack_fraction: f32,
     ) {
-        let outer_horizontal = self[outer].is_horizontal();
+        let (outer_horizontal, kids, shares) = {
+            let row = self[outer.row]
+                .get_row()
+                .expect("a transposition is rooted at a gap of a row");
+            assert!(
+                row.has_gap(outer.gap),
+                "gap {} was named on a row with {} gaps",
+                outer.gap.0,
+                row.gap_count()
+            );
+            (
+                row.is_horizontal(),
+                row.children().to_vec(),
+                row.shares().to_vec(),
+            )
+        };
         let inner_horizontal = !outer_horizontal;
-        // A pair, and honestly so at every level of this function: a crossing is made of
-        // exactly two chains, which is why `at`, `bounds` and `chains` are pairs as well. A
-        // transposition of a row of three is a different gesture, not a wider version of this
-        // one, so nothing here is waiting for a row.
-        let [first, second] = self[outer]
-            .get_row()
-            .expect("a transposition is rooted at the split between the two chains")
-            .children_pair();
+        let k = outer.gap.0;
+        // Exactly two, whatever the row holds — that is what a gap is. `at`, `bounds` and
+        // `chains` are pairs for the same reason, and none of them is waiting for a row.
         let chains = [
-            self.chain(first, inner_horizontal),
-            self.chain(second, inner_horizontal),
+            self.chain(kids[k], inner_horizontal),
+            self.chain(kids[k + 1], inner_horizontal),
         ];
 
         for (c, chain) in chains.iter().enumerate() {
@@ -170,20 +188,21 @@ impl<Tab> Tree<Tab> {
         let span_end = bounds[0][bounds[0].len() - 1];
         let cross_fraction = (line - span_start) / (span_end - span_start);
 
-        // The pool of split ids the new shape is built out of: exactly the two chains being
-        // taken apart. `outer` is not in it — it stays where it is, because its own parent
-        // points at it — and the arithmetic leaves none over: `(n - 1) + (m - 1)` ids in, two
-        // halves plus `(k - 1) + (n - k - 1) + (l - 1) + (m - l - 1)` chain splits out.
-        //
-        // The rows *behind* the dividers, one id per divider: that is one id per row only while
-        // every row is a pair, which is what keeps the count above true. A row of three would
-        // put its id in here twice, and the rebuild would hand one node to two splits — stage 7
-        // rebuilds one row per chain and does its pool arithmetic over rows, not gaps.
-        let mut pool = chains[0]
-            .dividers
-            .iter()
-            .chain(&chains[1].dividers)
-            .map(|divider| divider.row);
+        // Rows the rebuild may reuse: the ones inside the two chains, each once. A row of three
+        // contributes two dividers and is one node, so the list is deduplicated — which is why
+        // this is no longer an exact "pool" with arithmetic to match. The new shape is flatter
+        // than the ladder it replaces in some places and deeper in others; `Tree::regroup`
+        // allocates what is missing and frees what is left over, and the promise that survives
+        // is the one about the *parts*, not about the node count.
+        let mut pool = Vec::new();
+        for chain in &chains {
+            for divider in &chain.dividers {
+                if !pool.contains(&divider.row) {
+                    pool.push(divider.row);
+                }
+            }
+        }
+        let mut pool = pool.into_iter();
 
         let near = rebuild_half(
             &chains,
@@ -203,30 +222,48 @@ impl<Tab> Tree<Tab> {
             stack_fraction,
             &mut pool,
         );
-        assert!(
-            pool.next().is_none(),
-            "a transposition needs exactly as many splits as the chains it took apart"
-        );
 
-        let shape = Regroup::Split {
-            id: outer,
-            horizontal: inner_horizontal,
-            fraction: cross_fraction,
-            children: [Box::new(near), Box::new(far)],
+        let shape = if kids.len() == 2 {
+            // The replacement is the whole row, so the row becomes it — the same node, turned
+            // by 90°, which is what this operation was before a row could hold three.
+            Regroup::pair(
+                Some(outer.row),
+                inner_horizontal,
+                cross_fraction,
+                [near, far],
+            )
+        } else {
+            let merged = Regroup::pair(pool.next(), inner_horizontal, cross_fraction, [near, far]);
+            let mut children = Vec::with_capacity(kids.len() - 1);
+            let mut merged_shares = Vec::with_capacity(kids.len() - 1);
+            let mut merged = Some(merged);
+            for (index, (&child, &share)) in kids.iter().zip(&shares).enumerate() {
+                if index == k {
+                    children.push(merged.take().expect("one gap, one replacement"));
+                    // The two neighbours' room, added: the replacement occupies exactly what
+                    // they occupied, so no other boundary of the row moves.
+                    merged_shares.push(Share(share.0 + shares[k + 1].0));
+                } else if index != k + 1 {
+                    children.push(Regroup::Keep(child));
+                    merged_shares.push(share);
+                }
+            }
+            Regroup::Row {
+                id: Some(outer.row),
+                horizontal: outer_horizontal,
+                shares: merged_shares,
+                children,
+            }
         };
         // Through `regroup` rather than by assigning `Node`s: subtrees change parent here, and a
         // child's back-pointer and the subtree's collapsing bookkeeping live outside the `Node`
         // being assigned.
-        self.regroup(outer, &shape);
+        self.regroup(outer.row, &shape);
     }
 }
 
 /// One half of a transposed cross: what the two chains each had on one side of the crossing
-/// line, stacked along `outer`'s old axis.
-///
-/// The half itself reuses a split from `pool`, and so does every sub-chain inside it, in that
-/// order — which is what makes the 2x2 case come out with `outer`'s two old children still
-/// playing the two halves.
+/// line, stacked along the gap's old axis.
 #[allow(clippy::too_many_arguments)]
 fn rebuild_half(
     chains: &[Chain; 2],
@@ -237,42 +274,42 @@ fn rebuild_half(
     stack_fraction: f32,
     pool: &mut impl Iterator<Item = NodeId>,
 ) -> Regroup {
-    let id = pool
-        .next()
-        .expect("each half of a transposed cross reuses one of the chains' splits");
     let inner_horizontal = !outer_horizontal;
-    Regroup::Split {
-        id,
-        horizontal: outer_horizontal,
-        fraction: stack_fraction,
-        children: [
-            Box::new(rebuild_chain(
+    Regroup::pair(
+        pool.next(),
+        outer_horizontal,
+        stack_fraction,
+        [
+            rebuild_run(
                 &chains[0],
                 bounds[0],
                 from[0],
                 to[0],
                 inner_horizontal,
                 pool,
-            )),
-            Box::new(rebuild_chain(
+            ),
+            rebuild_run(
                 &chains[1],
                 bounds[1],
                 from[1],
                 to[1],
                 inner_horizontal,
                 pool,
-            )),
+            ),
         ],
-    }
+    )
 }
 
-/// Parts `from..=to` of one chain, re-nested right-leaning: `part(from)` beside the rest.
+/// Parts `from..=to` of one chain, as **one row** — the shape they read as on screen.
 ///
-/// Right-leaning is the cheapest nesting there is — each split's two sides hold at least one
-/// whole part — and which nesting is chosen is free, because any tree of splits at the same
-/// boundaries draws the same picture. What is not free is the fractions, and those come straight
-/// off the measured boundaries.
-fn rebuild_chain(
+/// A right-leaning ladder of pairs is what this built while a row held two, and the nesting was
+/// free because any tree of splits at the same boundaries draws the same picture. It is not free
+/// under the hand: the outer boundary of a ladder drags the inner one along with it, which is the
+/// complaint this whole plan started from. One row keeps the picture and drops that.
+///
+/// What is not free either way is the weights, and those come straight off the measured
+/// boundaries: part `i` asks for the length it already has.
+fn rebuild_run(
     chain: &Chain,
     bounds: &[f32],
     from: usize,
@@ -283,24 +320,31 @@ fn rebuild_chain(
     if from == to {
         return Regroup::Keep(chain.parts[from]);
     }
-    let id = pool
-        .next()
-        .expect("a chain is rebuilt out of exactly the splits it was taken apart from");
-    Regroup::Split {
-        id,
+    Regroup::Row {
+        id: pool.next(),
         horizontal,
-        fraction: (bounds[from + 1] - bounds[from]) / (bounds[to + 1] - bounds[from]),
-        children: [
-            Box::new(Regroup::Keep(chain.parts[from])),
-            Box::new(rebuild_chain(chain, bounds, from + 1, to, horizontal, pool)),
-        ],
+        shares: (from..=to)
+            .map(|index| Share(bounds[index + 1] - bounds[index]))
+            .collect(),
+        children: (from..=to)
+            .map(|index| Regroup::Keep(chain.parts[index]))
+            .collect(),
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::core::tree::{Node, Split};
+    use crate::core::tree::{GapIndex, Node, Split};
+
+    /// The only gap of a row of two — every `outer` in this module is one, and a crossing is
+    /// addressed by the gap it lies on.
+    fn gap_of(row: NodeId) -> RowGap {
+        RowGap {
+            row,
+            gap: GapIndex(0),
+        }
+    }
 
     /// Four leaves in a 2x2, grouped as two columns: `outer` cuts left from right, and each
     /// side is a stack. Returns the tree, `outer`, and the leaves clockwise from the top left:
@@ -359,7 +403,7 @@ mod test {
         let (mut tree, outer, [a, b, c, d]) = two_columns();
         let before = tree.len();
 
-        tree.transpose_cross(outer, [0, 0], [&even(2), &even(2)], 0.5);
+        tree.transpose_cross(gap_of(outer), [0, 0], [&even(2), &even(2)], 0.5);
 
         assert_eq!(tree.validate(), Ok(()), "the tree is still well formed");
         assert_eq!(tree.len(), before, "no node was created or dropped");
@@ -379,8 +423,8 @@ mod test {
     fn transposing_twice_returns_to_the_grouping_it_started_from() {
         let (mut tree, outer, [a, b, c, d]) = two_columns();
 
-        tree.transpose_cross(outer, [0, 0], [&even(2), &even(2)], 0.5);
-        tree.transpose_cross(outer, [0, 0], [&even(2), &even(2)], 0.5);
+        tree.transpose_cross(gap_of(outer), [0, 0], [&even(2), &even(2)], 0.5);
+        tree.transpose_cross(gap_of(outer), [0, 0], [&even(2), &even(2)], 0.5);
 
         assert_eq!(tree.validate(), Ok(()));
         assert!(tree[outer].is_horizontal(), "back to two columns");
@@ -403,7 +447,7 @@ mod test {
         let [b, c] = tree.split(rest, Split::Below, 0.5, Node::leaf(2u32));
         let [d, e] = tree.split(right, Split::Below, 2.0 / 3.0, Node::leaf(11u32));
 
-        tree.transpose_cross(outer, [1, 0], [&even(3), &even(2)], 0.5);
+        tree.transpose_cross(gap_of(outer), [1, 0], [&even(3), &even(2)], 0.5);
 
         assert_eq!(tree.validate(), Ok(()));
         let rows = tree.chain(outer, false);
@@ -432,7 +476,7 @@ mod test {
 
         // Both columns divided at 0.75 of their height, in a chain spanning 0..=1.
         let bounds = vec![0.0, 0.75, 1.0];
-        tree.transpose_cross(outer, [0, 0], [&bounds, &bounds], 0.5);
+        tree.transpose_cross(gap_of(outer), [0, 0], [&bounds, &bounds], 0.5);
 
         let fraction = tree[outer]
             .get_row()

@@ -569,7 +569,10 @@ mod tests {
         let mut tree = Tree::new(vec![1]);
         let root = tree.root().unwrap();
         let [left, _right] = tree.split_right(root, 0.5, vec![2]);
-        let [_, deep] = tree.split_right(left, 0.5, vec![3]);
+        // Across the axis, so that the second split allocates a row instead of joining the
+        // first one: this scene needs a *nested* row to cut loose, and same-axis splits no
+        // longer nest.
+        let [_, deep] = tree.split_below(left, 0.5, vec![3]);
         assert_eq!(tree.validate(), Ok(()), "precondition: tree is well-formed");
 
         // Cut the middle split loose: everything under it is now unreachable.

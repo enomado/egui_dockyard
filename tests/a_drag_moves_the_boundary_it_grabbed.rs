@@ -242,7 +242,6 @@ fn the_drag_moves_the_boundary_it_grabbed() {
 /// the inner split takes its fraction of, so the inner line slides by half the pull. Which of
 /// the two boundaries is the outer one depends on the spelling, which is the whole complaint.
 #[test]
-#[ignore = "red until a row is n-ary: stage 7 of PLAN_a_row_holds_many_panels"]
 fn dragging_one_boundary_leaves_the_other_where_it_was() {
     let mut failures = Vec::new();
 
@@ -285,7 +284,6 @@ fn dragging_one_boundary_leaves_the_other_where_it_was() {
 /// the far boundary while resizing the far panel is not a shape this tree can produce today but
 /// is exactly what a careless n-ary implementation would produce tomorrow.
 #[test]
-#[ignore = "red until a row is n-ary: stage 7 of PLAN_a_row_holds_many_panels"]
 fn dragging_a_boundary_resizes_only_the_two_panels_it_lies_between() {
     let mut failures = Vec::new();
 

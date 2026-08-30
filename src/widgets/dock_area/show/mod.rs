@@ -21,7 +21,7 @@ use crate::{
     AllowedSplits, DockArea, Node, OverlayType, Style, SurfaceIndex, TabDestination, TabViewer,
     utils::{expand_to_pixel, fade_dock_style, map_to_pixel},
 };
-use crate::{GapIndex, GapPath, NodePath};
+use crate::{GapIndex, GapPath, NodePath, RowGap};
 
 mod junction;
 mod leaf;
@@ -303,8 +303,11 @@ impl<Tab> DockArea<'_, Tab> {
                     stack_fraction,
                 } => {
                     let [first, second] = bounds;
-                    self.dock_state[outer.surface].transpose_cross(
-                        outer.node,
+                    self.dock_state[outer.row.surface].transpose_cross(
+                        RowGap {
+                            row: outer.row.node,
+                            gap: outer.gap,
+                        },
                         at,
                         [first, second],
                         stack_fraction,
@@ -315,16 +318,17 @@ impl<Tab> DockArea<'_, Tab> {
                     // root's rectangle, the same value `render_nodes` hands to
                     // `compute_rect_sizes`. Parents before children, each call cutting its
                     // children out of a rectangle an earlier call wrote.
-                    let root = self.dock_state[outer.surface]
+                    let root = self.dock_state[outer.row.surface]
                         .root()
                         .expect("the surface being laid out has a root: `outer` lives in it");
                     let max_rect = self
                         .layout
-                        .rect(NodePath::new(outer.surface, root))
+                        .rect(NodePath::new(outer.row.surface, root))
                         .expect("the root was laid out at the top of this pass");
-                    let mut queue = VecDeque::from([outer.node]);
+                    let mut queue = VecDeque::from([outer.row.node]);
                     while let Some(node) = queue.pop_front() {
-                        let Some(children) = self.dock_state[outer.surface].children(node) else {
+                        let Some(children) = self.dock_state[outer.row.surface].children(node)
+                        else {
                             continue;
                         };
                         // Queued before the cut below, and only so that the borrow of the tree
@@ -332,7 +336,7 @@ impl<Tab> DockArea<'_, Tab> {
                         queue.extend(children.iter().copied());
                         self.compute_rect_sizes(
                             pixels_per_point,
-                            NodePath::new(outer.surface, node),
+                            NodePath::new(outer.row.surface, node),
                             max_rect,
                         );
                     }
@@ -993,6 +997,12 @@ impl<Tab> DockArea<'_, Tab> {
             // Each edge snapped from the *unsnapped* run — `far = near + width` in points, then
             // to the pixel — the way the pair's `right_separator_border` was. The horizontal
             // branch below snaps the run itself; `cut_runs` says why the two are kept apart.
+            // `false`, and this is the one place stage 7 **changed a pixel on purpose**. A fully
+            // collapsed vertical row used to let its last child keep the rest of the column,
+            // where the horizontal one left the rest to nobody: the same picture — every
+            // collapsed leaf draws its bar at the top of whatever it is given — answering
+            // differently to a hit test and to a drop target, and letting the thing called a
+            // strip quietly not be one. Reconciled on the horizontal answer (decision 7, Стас).
             let runs = cut_runs(
                 lo,
                 hi,
@@ -1000,7 +1010,7 @@ impl<Tab> DockArea<'_, Tab> {
                 style.separator.width,
                 cut_at,
                 |at| at,
-                true,
+                false,
             );
             return RowCut {
                 children: runs.spans.into_iter().map(child_rect).collect(),
@@ -1119,11 +1129,20 @@ impl<Tab> DockArea<'_, Tab> {
         //
         // Each boundary is clamped on its own, exactly as the pair's one boundary was. The
         // boundaries of a row are monotone — running sums of weights `validate` keeps
-        // non-negative — and the clamp is monotone, so their order survives. What the band does
-        // *not* promise on a row of three is that two boundaries stay a divider apart: a child
-        // can be squeezed to nothing between them. Not reachable while rows are pairs, and
-        // stage 7's to state when they stop being.
-        let edges: Vec<(f32, f32)> = row
+        // non-negative — and the clamp is monotone, so their order survives.
+        //
+        // What the band does *not* promise on a row of three is that two boundaries stay a
+        // divider apart: two of them can coincide, and then the child between them is asked to
+        // fit into the width of a divider *backwards*. That is what the second pass is for.
+        // Stage 6 wrote this branch and recorded the hole as unreachable while rows were pairs;
+        // stage 7 made it reachable and the corpus found it — 86 inside-out rectangles across
+        // 544 layouts, all of them children of long chains flattened on load.
+        //
+        // A squeezed child is given **nothing**, not less than nothing. A minimum size per child
+        // would be the other answer and is deliberately not this feature (`shares` is the shape
+        // that admits it later); an inverted rectangle is not an answer at all — it is a panel
+        // whose hit test and clipping disagree about which side of itself it is on.
+        let mut edges: Vec<(f32, f32)> = row
             .gaps()
             .map(|gap| {
                 let band = SeparatorBand::new(row.boundary(gap), size, style.separator.extra);
@@ -1134,6 +1153,23 @@ impl<Tab> DockArea<'_, Tab> {
                 )
             })
             .collect();
+        // Forward, because a divider pushed back by its predecessor pushes the next one in turn.
+        // A pair has one divider and no predecessor, so this pass cannot touch it: parity.
+        for index in 1..edges.len() {
+            let floor = edges[index - 1].1;
+            edges[index].0 = edges[index].0.max(floor);
+            edges[index].1 = edges[index].1.max(edges[index].0);
+        }
+        // And back, against the row's far edge, which the forward pass can walk past when the
+        // dividers do not fit in the row at all: the *last* child's span ends at `hi`, so a
+        // divider pushed beyond it would invert that one instead. Lowering only, and never below
+        // the divider before it, so the order the forward pass established survives.
+        let mut ceiling = hi;
+        for index in (0..edges.len()).rev() {
+            edges[index].1 = edges[index].1.min(ceiling);
+            edges[index].0 = edges[index].0.min(edges[index].1);
+            ceiling = edges[index].0;
+        }
         // Child `k` runs from the far edge of divider `k − 1` to the near edge of divider `k`;
         // the first and the last reach the row's own edges.
         let spans = (0..children.len()).map(|index| {
@@ -1420,7 +1456,20 @@ impl<Tab> DockArea<'_, Tab> {
         } else {
             rect.height()
         };
-        let band = SeparatorBand::new(row.boundary(gap.gap), range, extra);
+        // The neighbouring boundaries, or the row's own ends where there is no neighbour: a
+        // gesture may move this line up to them and no further, because the room on either side
+        // of it is the two children's and writing past a neighbour takes a child's room away
+        // through zero. On a pair both are the ends, which is the band this always was.
+        let lo = gap
+            .gap
+            .0
+            .checked_sub(1)
+            .map_or(0.0, |before| row.boundary(GapIndex(before)));
+        let hi = row
+            .has_gap(GapIndex(gap.gap.0 + 1))
+            .then(|| row.boundary(GapIndex(gap.gap.0 + 1)))
+            .unwrap_or(1.0);
+        let band = SeparatorBand::between(row.boundary(gap.gap), lo, hi, range, extra);
         // Negated on purpose, and clippy's rewrite is not equivalent — see `SeparatorBand::new`.
         #[allow(clippy::neg_cmp_op_on_partial_ord)]
         if !(range > 0.0) || band.min >= band.max {
@@ -1839,9 +1888,32 @@ struct SeparatorBand {
 }
 
 impl SeparatorBand {
-    /// `range` is the node's extent along the split axis, `extra` is
+    /// The band for a boundary that has the whole row to itself: `range` is the node's extent
+    /// along the split axis, `extra` is
     /// [`SeparatorStyle::extra`](crate::SeparatorStyle::extra); both in points.
+    ///
+    /// What every boundary had until a row could hold three, and what **drawing** still uses:
+    /// each boundary is pushed into the row's own margins on its own, and the row's boundaries
+    /// being monotone (running sums of non-negative weights) keeps their order. See
+    /// [`between`](Self::between) for the gesture's band, which is narrower.
     fn new(fraction: f32, range: f32, extra: f32) -> Self {
+        Self::between(fraction, 0.0, 1.0, range, extra)
+    }
+
+    /// The band for a boundary hemmed in by its **neighbours**: `lo` and `hi` are the boundaries
+    /// on either side of it, `0.0` and `1.0` at the ends of the row.
+    ///
+    /// A gesture writes through this one, and on a row of three that is not a refinement but the
+    /// difference between a valid tree and an invalid one. `RowNode::set_boundary` gives child
+    /// `k` the room between `lo` and where the boundary lands and child `k + 1` the room up to
+    /// `hi`; a boundary written past either neighbour therefore leaves one of them a **negative
+    /// weight**, which is `TreeViolation::RowShareNegative`. On a pair the two neighbours are the
+    /// row's own ends, so this could not arise and the whole row was the right band — which is
+    /// why it was the only one for six stages.
+    ///
+    /// Found by the DST sweep at stage 7 rather than by reading: `DragSeparator` pulled gap 0 of
+    /// a row of three past gap 1 and the oracle reported the violation.
+    fn between(fraction: f32, lo: f32, hi: f32, range: f32, extra: f32) -> Self {
         // A node with no extent has no room for a margin and nothing to show either. Answering
         // "no constraint" keeps this a total function of its arguments instead of a special
         // case every caller has to remember; the callers that could act on it guard on `range`
@@ -1855,21 +1927,25 @@ impl SeparatorBand {
         #[allow(clippy::neg_cmp_op_on_partial_ord)]
         if !(range > 0.0) {
             return Self {
-                min: 0.0,
-                max: 1.0,
+                min: lo,
+                max: hi,
                 effective: fraction,
             };
         }
 
-        // Capping the margin at half the node is what makes an impossible margin degrade
-        // sensibly: the band shrinks to a point and the boundary sits at the centre — an equal
-        // split, which is the least-bad answer when there is no room to give. The previous
-        // normalisation `(min.min(max), max.max(min))` instead *swapped* the inverted pair, so
-        // `extra / range >= 1` produced the interval `(0, 1)`: no constraint at all, exactly on
-        // the nodes where it was the only thing standing between a child and zero size. Found
-        // by the frame harness — a drag on a 175 px node drove `fraction` to 0.0.
-        let min = (extra / range).min(0.5);
-        let max = 1.0 - min;
+        // Capping the margin at half the *room between the neighbours* is what makes an
+        // impossible margin degrade sensibly: the band shrinks to a point and the boundary sits
+        // at the centre of that room — an equal split of what there is, which is the least-bad
+        // answer when there is none to give. The previous normalisation `(min.min(max),
+        // max.max(min))` instead *swapped* the inverted pair, so `extra / range >= 1` produced
+        // the interval `(0, 1)`: no constraint at all, exactly on the nodes where it was the
+        // only thing standing between a child and zero size. Found by the frame harness — a drag
+        // on a 175 px node drove `fraction` to 0.0.
+        //
+        // `room` is the whole row for a pair, so this is the same arithmetic it always was.
+        let room = (hi - lo).max(0.0);
+        let min = lo + (extra / range).min(room * 0.5);
+        let max = hi - (extra / range).min(room * 0.5);
         Self {
             min,
             max,
@@ -2426,11 +2502,17 @@ mod tests {
         let style = style();
         let mut state = DockState::new(vec![0u32]);
         let a = state.main_surface().root().unwrap();
-        // V(V(b, c), a): `b` above `a`, then `c` below `b`.
-        let [_, b] = state.split(main(a), Split::Above, 0.5, Node::leaf(1u32));
-        let [_, c] = state.split(main(b), Split::Below, 0.5, Node::leaf(2u32));
+        // V(V(b, c), a). Built by hand at the inner step, because no gesture makes this shape
+        // any more: a second `Split::Above` would join the row it is in and give `V(c, b, a)`,
+        // which is the point of stage 7. The shape is still reachable — loading keeps a stowed
+        // row, a regrouping can leave one — so its layout is still worth pinning.
+        let [_, stack] = state.split(main(a), Split::Above, 0.5, Node::leaf(1u32));
+        let (inner, leaves) =
+            state
+                .main_surface_mut()
+                .nest_row_by_hand(stack, false, vec![vec![1u32], vec![2u32]]);
+        let (b, c) = (leaves[0], leaves[1]);
         let outer = state.main_surface().root().unwrap();
-        let inner = state.main_surface().parent(b).unwrap();
         assert_ne!(inner, outer, "the stack is nested, not the root");
         state.main_surface_mut().set_leaf_collapsed(b, true);
         state.main_surface_mut().set_leaf_collapsed(c, true);
@@ -2462,11 +2544,18 @@ mod tests {
     }
 
     /// Every row collapsed: the stack hangs from the top, one tab bar each with a separator
-    /// between, and the last one keeps the rest of the column — the vertical rule the pair had,
-    /// kept by parity and *different* from the horizontal answer above. Recorded here so that
-    /// reconciling the two is a decision someone takes, not a drift.
+    /// between, and **the rest of the column is nobody's** — the same answer as the horizontal
+    /// row above.
+    ///
+    /// It used to be the other way on this axis: the last child kept the rest, which the pair
+    /// had done and which stage 6 kept by parity while recording that the two axes disagreed.
+    /// Same picture either way — a collapsed leaf draws its bar at the top of whatever it is
+    /// given — but not the same answer to a hit test or a drop target, and a strip that is
+    /// silently a whole column is not a strip. Reconciled at stage 7 (decision 7, Стас); this
+    /// test is the one the reconciliation rewrote, and it named the old answer on purpose so
+    /// that it would have to be.
     #[test]
-    fn with_every_row_collapsed_the_stack_hangs_from_the_top_and_the_last_keeps_the_rest() {
+    fn with_every_row_collapsed_the_stack_hangs_from_the_top_and_the_rest_is_nobodys() {
         let style = style();
         let (mut state, row, leaves) = row_of_three(false, [1.0, 1.0, 1.0]);
         for leaf in leaves {
@@ -2496,9 +2585,15 @@ mod tests {
             "so is the second",
         );
         close(
+            rect_of(&layout, leaves[2]).height(),
+            bar,
+            "and so is the last — not the rest of the column",
+        );
+        assert!(
+            whole.max.y - rect_of(&layout, leaves[2]).max.y > 100.0,
+            "the rest of the column belongs to nobody: the last bar ends at {} of {}",
             rect_of(&layout, leaves[2]).max.y,
-            whole.max.y,
-            "the last reaches the bottom of the column",
+            whole.max.y
         );
         assert_eq!(divider_of(&layout, row, 0), None);
         assert_eq!(divider_of(&layout, row, 1), None);

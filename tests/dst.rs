@@ -1171,7 +1171,23 @@ enum Stillness {
 type Identities = Vec<(NodePath, LeafIdentity)>;
 
 /// Every row's stored boundaries, one per gap, in tree order. See [`Sim::boundaries`].
-type Boundaries = Vec<(GapPath, f32)>;
+/// Every boundary in the dock, each keyed by its gap **and by how many children the row held**.
+///
+/// The child list is part of the key since stage 7 of the n-ary plan, and it is what makes "the
+/// same boundary" a well-posed question. A gap is addressed by position, so a row that gains or
+/// loses a child renumbers its gaps *and* re-divides its length: a panel dropped out of a row of
+/// three leaves the survivors sharing the room proportionally (decision 5), which moves every
+/// boundary of that row on purpose. Comparing gap 0 of `[a, b, c]` against gap 0 of `[a, b]` is
+/// comparing two different lines and calling the difference drift.
+///
+/// The **whole list**, not just its length: one drag can take a panel out of a row and put a new
+/// one back into it, which leaves the count where it was and every boundary somewhere else. It
+/// is not the two neighbours of the gap either — those can be untouched while a *third* child
+/// leaves and hands its room back to them.
+///
+/// Rows whose children did not change are compared exactly as before — which is every row in
+/// every step that is not an insertion or a removal, i.e. the regime this oracle was written for.
+type Boundaries = Vec<((GapPath, Vec<NodeId>), f32)>;
 
 /// A leaf's identities, which no gesture that was not about it may disturb.
 ///
@@ -3671,8 +3687,14 @@ impl Sim {
             .iter_all_nodes()
             .filter_map(|(path, node)| node.get_row().map(|row| (path, row)))
             .flat_map(|(path, row)| {
+                let children = row.children().to_vec();
                 row.gaps()
-                    .map(move |gap| (GapPath::new(path, gap), row.boundary(gap)))
+                    .map(move |gap| {
+                        (
+                            (GapPath::new(path, gap), children.clone()),
+                            row.boundary(gap),
+                        )
+                    })
                     .collect::<Vec<_>>()
             })
             .collect()
@@ -4339,6 +4361,10 @@ struct BoundaryWatch {
     /// the clamp used to overwrite the stored number, and where a sweep that never got there
     /// would be green for free.
     under_pressure: usize,
+    /// Gaps not compared because their row's children changed during the step — see
+    /// [`Boundaries`]. Reported so that the exemption is visible rather than assumed; if this
+    /// ever became most of `checked`, the oracle would be judging almost nothing.
+    rows_that_changed_children: usize,
 }
 
 /// Checks that no step moved a boundary it did not name — see [`BoundaryRule`].
@@ -4359,21 +4385,35 @@ fn boundary_drift_complaint(
         return None;
     }
     watch.under_pressure += under_pressure;
-    for (gap, was) in before {
+    for ((gap, children), was) in before {
         if let BoundaryRule::Only(named) = &effect.boundaries
             && named.contains(gap)
         {
             continue;
         }
-        let Some((_, now)) = after.iter().find(|(other, _)| other == gap) else {
+        if after
+            .iter()
+            .any(|((other, others), _)| other == gap && others != children)
+        {
+            // The row changed which children it holds, so its gaps are not the lines they were.
+            // Counted rather than silently skipped: a rule that quietly stops judging is how an
+            // oracle becomes decoration, and this number says how often it happens.
+            watch.rows_that_changed_children += 1;
+            continue;
+        }
+        let Some((_, now)) = after
+            .iter()
+            .find(|((other, others), _)| other == gap && others == children)
+        else {
             continue;
         };
         watch.checked += 1;
         if now != was {
             return Some(format!(
-                "the boundary in {gap:?} went from {was} to {now} during a step that did not \
-                 name it ({:?}) — a boundary is persisted state, so something in the frame pass \
-                 rewrote a layout the user did not touch",
+                "the boundary in {gap:?} of a row of {} went from {was} to {now} during a \
+                 step that did not name it ({:?}) — a boundary is persisted state, so something \
+                 in the frame pass rewrote a layout the user did not touch",
+                children.len(),
                 effect.boundaries
             ));
         }
@@ -5133,20 +5173,34 @@ fn a_separator_cannot_squeeze_a_child_to_nothing() {
 #[test]
 fn a_node_too_small_for_the_margin_keeps_both_children() {
     let mut sim = Sim::new();
-    // Split down four times. The node that matters is the deepest *split*, not the deepest leaf,
-    // and the pathological case is `extra / range >= 1` — a node no taller than the margin
-    // itself. 784 px halves down to roughly 97, which is where the old guard evaporated.
-    for _ in 0..4 {
+    // Split down and across, alternating. The node that matters is the deepest *split*, not the
+    // deepest leaf, and the pathological case is `extra / range >= 1` — a node no taller than
+    // the margin itself.
+    //
+    // The axes alternate because splitting the same way twice no longer nests: a row joins the
+    // row it is in, so eight `Below`s would be one row of nine at the full 784 px and this scene
+    // would have no small node in it at all. A vertical row only becomes short by sitting inside
+    // a horizontal one, which is why the cycle is `Below`, `Right`, `Below` — 784 px halves at
+    // every second step, down to roughly 98, which is where the old guard evaporated.
+    for step in 0..8 {
         let leaf = *sim.live_leaves().last().expect("a leaf to split");
         let tab = sim.fresh_tab();
-        sim.state.split(leaf, Split::Below, 0.5, Node::leaf(tab));
+        let split = if step % 2 == 0 {
+            Split::Below
+        } else {
+            Split::Right
+        };
+        sim.state.split(leaf, split, 0.5, Node::leaf(tab));
         sim.run_frame(vec![]);
     }
 
     let layout = sim.layout();
+    // Vertical rows only: the drag below pulls upwards, so a horizontal row's separator would be
+    // the wrong line to grab. With every split going the same way this was automatic.
     let (path, at, fraction) = sim
         .separators()
         .into_iter()
+        .filter(|(gap, _, _)| sim.state[gap.row.surface][gap.row.node].is_vertical())
         .min_by(|a, b| {
             let height = |g: GapPath| layout.get(g.row).map_or(f32::MAX, |g| g.rect.height());
             height(a.0).total_cmp(&height(b.0))
@@ -5175,7 +5229,7 @@ fn a_node_too_small_for_the_margin_keeps_both_children() {
     );
     assert_eq!(
         sim.live_leaves().len(),
-        5,
+        9,
         "and every leaf must still be laid out: {}",
         sim.trace()
     );

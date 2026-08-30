@@ -1213,7 +1213,7 @@ impl<Tab> DockArea<'_, Tab> {
         // line, and the line of a pair is its only gap. A crossing on a row of three is a
         // different gesture, not a wider version of this one — see `Tree::transpose_cross`.
         self.mutations.push(DockMutation::TransposeCross {
-            outer: outer.row,
+            outer: *outer,
             at: [i, j],
             bounds: [band0.bounds.clone(), band1.bounds.clone()],
             // The one number from the other axis: where `outer`'s own boundary sits between its
@@ -1679,8 +1679,9 @@ mod tests {
             Node::leaf(2u32),
         );
 
-        // Bottom band: three columns, built so the band's own (root) divider is the
-        // right-hand one — `H(H(C, D), E)`.
+        // Bottom band: three columns — one row `H(C, D, E)`, since a second split along the
+        // same axis joins the row rather than nesting inside it. Which divider is "the band's
+        // own root one" stopped being a question here, and that is the point of the flat row.
         let bottom_path = NodePath::new(SurfaceIndex::main(), bottom_left);
         state.split(bottom_path, Split::Right, 0.75, Node::leaf(3u32));
         let [_, bottom_mid] = state.split(bottom_path, Split::Right, 0.5, Node::leaf(4u32));
@@ -1700,8 +1701,11 @@ mod tests {
         let inner_rect = rect(&ctx, bottom_inner);
         state[NodePath::new(SurfaceIndex::main(), bottom_inner)]
             .get_row_mut()
-            .expect("the bottom band's inner node is a split")
-            .set_fraction((target_x - inner_rect.min.x) / inner_rect.width());
+            .expect("the bottom band is a row")
+            .set_boundary(
+                GapIndex(0),
+                (target_x - inner_rect.min.x) / inner_rect.width(),
+            );
         render(&ctx, &mut state, &style, id);
 
         // The "+" is really on screen. Without this the assertion below could pass on a scene
@@ -2766,8 +2770,14 @@ mod tests {
         if !in_chain {
             return 1;
         }
-        let [first, second] = state.main_surface().children_pair(node).unwrap();
-        chain_parts(state, first, horizontal) + chain_parts(state, second, horizontal)
+        state
+            .main_surface()
+            .children(node)
+            .expect("a chain node is a row")
+            .to_vec()
+            .into_iter()
+            .map(|child| chain_parts(state, child, horizontal))
+            .sum()
     }
 
     /// Puts every divider of the band rooted at `root` on `targets` — absolute coordinates along
@@ -2839,16 +2849,39 @@ mod tests {
         }
         let rect = layout.rect(path).expect("laid out this frame");
         let (lo, hi) = (edge(rect, horizontal, false), edge(rect, horizontal, true));
-        let [first, second] = state.main_surface().children_pair(node).unwrap();
-        // Everything the first child contributes lies before this split's own boundary, so the
-        // number of parts down there names which target is this split's.
-        let k = chain_parts(state, first, horizontal);
-        state[path]
-            .get_row_mut()
-            .expect("a chain node is a split")
-            .set_fraction((targets[k - 1] - lo) / (hi - lo));
-        aim_sweep(state, layout, first, horizontal, &targets[..k - 1]);
-        aim_sweep(state, layout, second, horizontal, &targets[k..]);
+        let children = state
+            .main_surface()
+            .children(node)
+            .expect("a chain node is a row")
+            .to_vec();
+        // Everything a child contributes lies before the row's next boundary, so the running
+        // number of parts names which target belongs to which gap. A row of three has two of
+        // them, and each is written on its own — `set_boundary` moves only the two weights
+        // beside it, so the ones already placed stay placed.
+        let counts: Vec<usize> = children
+            .iter()
+            .map(|child| chain_parts(state, *child, horizontal))
+            .collect();
+        let mut before = 0;
+        for (gap, count) in counts.iter().enumerate().take(children.len() - 1) {
+            before += count;
+            let target = (targets[before - 1] - lo) / (hi - lo);
+            state[path]
+                .get_row_mut()
+                .expect("a chain node is a row")
+                .set_boundary(GapIndex(gap), target);
+        }
+        let mut start = 0;
+        for (child, count) in children.iter().zip(&counts) {
+            aim_sweep(
+                state,
+                layout,
+                *child,
+                horizontal,
+                &targets[start..start + count - 1],
+            );
+            start += count;
+        }
     }
 
     /// Cuts the leaf `band` into `cuts.len() + 1` parts along `horizontal`'s axis, nested per
@@ -2980,10 +3013,14 @@ mod tests {
         if !in_chain {
             return vec![root];
         }
-        let [first, second] = state.main_surface().children_pair(root).unwrap();
-        let mut parts = band_parts_of(state, first, horizontal);
-        parts.extend(band_parts_of(state, second, horizontal));
-        parts
+        state
+            .main_surface()
+            .children(root)
+            .expect("a chain node is a row")
+            .to_vec()
+            .into_iter()
+            .flat_map(|child| band_parts_of(state, child, horizontal))
+            .collect()
     }
 
     /// The bug, stated as the class it belongs to: a screen has the crossings it has, and how
@@ -3957,14 +3994,20 @@ mod tests {
     /// What a transposition does promise about ids.
     ///
     /// Not "every id names what it named" — see the test after this one for why that is
-    /// impossible. What holds is the bookkeeping: the same leaves, the same *set* of split ids
-    /// (nothing created, nothing dropped — the rebuild is handed exactly the splits it took
-    /// apart), and the crossing's own node still where its parent points.
+    /// impossible. What holds is the **leaves**: the same set of them, each with its id, and the
+    /// crossing's own node still where its parent points.
     ///
-    /// Worth pinning because the rebuild consumes its splits from a pool, and a pool is exactly
-    /// the shape of thing that leaks one or invents one when the counting is wrong. The `assert`
-    /// inside `transpose_cross_split` catches a leftover; this catches the other direction, and
-    /// catches it on the tree rather than on the arithmetic.
+    /// The *rows* are no longer part of the promise, and that changed with the n-ary row. While
+    /// every row held two, the same picture always took the same number of them, so "nothing
+    /// created, nothing dropped" was both achievable and a useful check on the rebuild's
+    /// arithmetic. A row of `n` breaks that count in both directions at once — one row of three
+    /// replaces two nested pairs, and cutting that row into a two and a one wants a node the
+    /// old shape did not need — so insisting on it would mean refusing to build the flatter
+    /// shape. `Tree::regroup` allocates what is missing and frees what is left over, and *it*
+    /// checks the part that matters: the kept subtrees, exactly, each once.
+    ///
+    /// So the row count is asserted here only as "the tree is still well formed and nothing is
+    /// orphaned", which is what a leaked or double-parented row would break.
     #[test]
     fn a_transposition_creates_and_destroys_no_nodes() {
         let ctx = Context::default();
@@ -3986,7 +4029,14 @@ mod tests {
         let after = nodes_by_kind(&state);
 
         assert_eq!(before.0, after.0, "the set of leaves changed");
-        assert_eq!(before.1, after.1, "the set of splits changed");
+        assert_eq!(
+            state.validate(),
+            Ok(()),
+            "a leaked row shows up here as an orphan, and a double-parented one as a broken \
+             link — rows before: {:?}, after: {:?}",
+            before.1,
+            after.1
+        );
         assert!(
             state.main_surface().root() == Some(outer_id),
             "the crossing's own node lost its place in the tree"

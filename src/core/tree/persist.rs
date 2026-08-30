@@ -29,7 +29,7 @@ use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
-use crate::core::tree::{ChildIndex, LeafNode, Node, NodeId, RowNode, TabIndex, Tree};
+use crate::core::tree::{ChildIndex, LeafNode, Node, NodeId, RowNode, Share, TabIndex, Tree};
 
 use super::arena::NodeEntry;
 
@@ -67,21 +67,30 @@ enum NodeOut<'a, Tab> {
         scroll: f32,
         collapsed: bool,
     },
-    Vertical {
-        fraction: f32,
-        fully_collapsed: bool,
-        collapsed_leaf_count: i32,
-        /// Unlike the two above, this one is **read back**: a stowed subtree is a decision the
-        /// user made, not a number derived from the leaves. See `SplitNode::stowed`.
+    /// A row, of however many children it has.
+    ///
+    /// **A new variant for a new shape**, and the one place in this format where an older build
+    /// loses more than a detail: `Vertical` / `Horizontal` are still *read* (see `NodeIn`), so
+    /// every layout anyone has on disk still loads — but a layout written here does not load in a
+    /// build from before rows, because an unknown variant fails the whole file. That cost was put
+    /// to Стас as a question and taken on purpose (decision 9 of the plan): the alternative was
+    /// two writers and a format whose shape depends on a count.
+    ///
+    /// The collapsing numbers the pair variants wrote are gone rather than carried: they follow
+    /// from `Leaf::collapsed`, the reader has always recomputed them, and the only reason to
+    /// write them was a reader that can no longer read this variant anyway.
+    Row {
+        /// `true` for children side by side, `false` for children stacked — what used to be the
+        /// choice between the two variants below.
+        horizontal: bool,
+        /// One weight per child, in `children` order, exactly as memory holds them:
+        /// **unnormalised**. A file whose weights add up to 7.3 is not wrong, and repairing it
+        /// would be inventing a layout nobody chose.
+        shares: Vec<f32>,
+        /// A stowed subtree is a decision the user made, not a number derived from the leaves,
+        /// so unlike the collapsing counts it is read back. See `RowNode::stowed`.
         stowed: bool,
-        children: [Box<NodeOut<'a, Tab>>; 2],
-    },
-    Horizontal {
-        fraction: f32,
-        fully_collapsed: bool,
-        collapsed_leaf_count: i32,
-        stowed: bool,
-        children: [Box<NodeOut<'a, Tab>>; 2],
+        children: Vec<Box<NodeOut<'a, Tab>>>,
     },
 }
 
@@ -102,46 +111,19 @@ fn node_out<Tab>(tree: &Tree<Tab>, id: NodeId) -> NodeOut<'_, Tab> {
             scroll: leaf.scroll,
             collapsed: leaf.collapsed,
         },
-        Node::Row(row) => {
-            // A pair because the *wire* is a pair: `NodeOut` holds `[Box<NodeOut>; 2]`, and a
-            // saved layout is read by versions of this crate that know nothing about rows. The
-            // format is stage 7's to change, and it changes on both sides at once — writer,
-            // reader and the tombstone for what is already on disk.
-            let [left, right] = row.children_pair();
-            let children = [
-                Box::new(node_out(tree, left)),
-                Box::new(node_out(tree, right)),
-            ];
-            // The wire carries one number where the model now carries a weight per child; for a
-            // row of two they say the same thing, and the conversion is exact (see
-            // `RowNode::fraction`). A row of three has no such number, which is the other half
-            // of why the format is stage 7's.
-            let fraction = row.fraction();
-            let fully_collapsed = row.fully_collapsed;
-            let collapsed_leaf_count = row.collapsed_leaf_count;
-            let stowed = row.stowed;
-            // The orientation stopped being a variant of `Node` in memory, and stayed one on
-            // the wire: a file written today is read by builds that know only `Vertical` /
-            // `Horizontal`, so the two spellings are exactly where the model and the format
-            // part company. Stage 7 changes the format; this stage may not.
-            if row.is_vertical() {
-                NodeOut::Vertical {
-                    fraction,
-                    fully_collapsed,
-                    collapsed_leaf_count,
-                    stowed,
-                    children,
-                }
-            } else {
-                NodeOut::Horizontal {
-                    fraction,
-                    fully_collapsed,
-                    collapsed_leaf_count,
-                    stowed,
-                    children,
-                }
-            }
-        }
+        // The orientation and the weights go out exactly as memory holds them: one variant, one
+        // list of children, one weight each. The model and the format said different things for
+        // six stages — a pair on the wire, a row in memory — and this is where they meet.
+        Node::Row(row) => NodeOut::Row {
+            horizontal: row.is_horizontal(),
+            shares: row.shares().iter().map(|share| share.0).collect(),
+            stowed: row.stowed,
+            children: row
+                .children()
+                .iter()
+                .map(|&child| Box::new(node_out(tree, child)))
+                .collect(),
+        },
     }
 }
 
@@ -269,12 +251,26 @@ enum NodeIn<Tab> {
         #[serde(default)]
         collapsed: bool,
     },
+    /// The current form: a row of however many children, with a weight each.
+    Row {
+        horizontal: bool,
+        shares: Vec<f32>,
+        /// Genuine state, so unlike the collapsing counts it is read rather than recomputed.
+        #[serde(default)]
+        stowed: bool,
+        children: Vec<Box<NodeIn<Tab>>>,
+    },
+
+    // The pair form, **tombstones**: written by every build before rows, and on everyone's disk.
+    // A row of three has no single `fraction`, so the writer cannot keep these — but dropping
+    // them from the *reader* would lose a whole layout per file rather than a detail, which is
+    // the one thing this format has never done.
+    //
     // A split stores `fully_collapsed` / `collapsed_leaf_count` on disk as well; they are
     // unknown fields here on purpose, for the same reason the tree-level pair is — the
     // numbers follow from `Leaf::collapsed`, which is read.
     Vertical {
         fraction: f32,
-        /// Genuine state, so unlike its neighbours on disk it is read rather than recomputed.
         /// `default` covers every file written before stowing existed: those subtrees were not
         /// put away, which is exactly what `false` says.
         #[serde(default)]
@@ -330,30 +326,102 @@ impl<Tab> Tree<Tab> {
         self.nodes.insert(NodeEntry { parent: None, node })
     }
 
-    /// Links `children` under a freshly built split.
+    /// Links `children` under a freshly built row, repairing the weights and **collapsing a
+    /// chain of same-axis rows into this one**.
     ///
-    /// The stored `fraction` is repaired here, which is the one place both forms pass through.
+    /// The weights are repaired here, which is the one place every form passes through.
     /// `Deserialize` returning `Ok` promises a tree that passes its own oracle, and a file may
-    /// name a fraction that is not one: `NaN`, an infinity, or a number outside `0..=1`
-    /// (`validate` rejects all three, and the fuzz corpus holds files with each). Nothing is
-    /// lost by repairing rather than refusing — the renderer clamps at draw time anyway, so
-    /// the number in the file was already not the layout anyone saw; what changes is that the
-    /// tree in memory now says the same thing as the screen.
-    fn adopt_split(&mut self, vertical: bool, children: [NodeId; 2], fraction: f32) -> NodeId {
-        // `NaN` fails every comparison, so it cannot be clamped — it is answered separately,
-        // with the same value a double-click on a separator writes.
+    /// name a weight that is not one: `NaN`, an infinity, or a negative number (`validate`
+    /// rejects all three, and the fuzz corpus holds files with each). Nothing is lost by
+    /// repairing rather than refusing — the renderer clamps at draw time anyway, so the number
+    /// in the file was already not the layout anyone saw; what changes is that the tree in
+    /// memory now says the same thing as the screen.
+    ///
+    /// # Why the chain collapses
+    ///
+    /// `H(a, H(b, c))` on disk is one row of three on screen, and decision 3 of the plan: read
+    /// 1:1 and the feature would never reach a layout anybody already has — two classes of
+    /// layout, identical on screen and different under the hand, for as long as anyone's file
+    /// lasts. The picture is unchanged, because nesting *meant* a division of the outer child's
+    /// weight: the inner weights are scaled into the room that child had, so every boundary
+    /// lands where the nested spelling drew it.
+    ///
+    /// One level of merging is enough, and only because the children are built first: each of
+    /// them has already collapsed whatever chain hung below it. A **stowed** inner row is left
+    /// alone — it is a subtree the user put away as a unit, and merging it up would be losing
+    /// that decision, not spelling it differently.
+    fn adopt_row(&mut self, horizontal: bool, children: Vec<NodeId>, shares: Vec<f32>) -> NodeId {
+        debug_assert_eq!(children.len(), shares.len());
+        // A weight that is not a number cannot be scaled, compared or summed, so it is answered
+        // before anything else looks at it; zero is a legal weight ("no length at all"), which
+        // is why the row's *total* is repaired separately below.
+        let repaired = shares.iter().map(|&share| {
+            if share.is_finite() && share >= 0.0 {
+                share
+            } else {
+                0.0
+            }
+        });
+        let mut shares: Vec<f32> = repaired.collect();
+        if shares.iter().sum::<f32>() <= 0.0 {
+            // Every child asked for nothing, which is a row `validate` rejects and a layout
+            // nobody can see. Equal shares are the one answer that invents no preference.
+            shares.iter_mut().for_each(|share| *share = 1.0);
+        }
+
+        let mut flat_children = Vec::with_capacity(children.len());
+        let mut flat_shares = Vec::with_capacity(children.len());
+        for (child, room) in children.into_iter().zip(shares) {
+            let inner = match self[child].get_row() {
+                Some(row) if row.is_horizontal() == horizontal && !row.stowed => row,
+                _ => {
+                    flat_children.push(child);
+                    flat_shares.push(Share(room));
+                    continue;
+                }
+            };
+            let inner_children = inner.children().to_vec();
+            let inner_shares: Vec<f32> = inner.shares().iter().map(|share| share.0).collect();
+            let total = inner.total_share();
+            for (inner_child, inner_share) in inner_children.iter().zip(&inner_shares) {
+                flat_children.push(*inner_child);
+                // A total of zero cannot divide the room; such a row is repaired above before it
+                // is ever adopted, so this is the arithmetic's own guard and it shares evenly.
+                flat_shares.push(Share(if total > 0.0 {
+                    room * inner_share / total
+                } else {
+                    room / inner_children.len() as f32
+                }));
+            }
+            // The inner row is not a node any more — its children moved up — so its slot goes
+            // back to the arena rather than sitting there unreachable and failing `validate`
+            // as an orphan.
+            self.nodes.remove(child);
+        }
+
+        let id = self.adopt(Node::Row(RowNode::new(
+            horizontal,
+            flat_children.clone(),
+            flat_shares,
+        )));
+        for child in flat_children {
+            self.nodes.get_mut(child).unwrap().parent = Some(id);
+        }
+        id
+    }
+
+    /// The pair form's `fraction`, as the two weights a row of two carries.
+    ///
+    /// The repair that used to live in `adopt_split`, kept exactly: `NaN` fails every
+    /// comparison, so it cannot be clamped and is answered separately, with the same value a
+    /// double-click on a separator writes.
+    fn pair_shares(fraction: f32) -> Vec<f32> {
         let fraction = if fraction.is_finite() {
             fraction.clamp(0.0, 1.0)
         } else {
             0.5
         };
-        // A pair, because the *file* is a pair — see `node_out`. Stage 7 changes the format, and
-        // this is where a chain of same-axis splits on disk will collapse into one row.
-        let id = self.adopt(Node::Row(RowNode::pair(!vertical, children, fraction)));
-        for child in children {
-            self.nodes.get_mut(child).unwrap().parent = Some(id);
-        }
-        id
+        vec![fraction, 1.0 - fraction]
     }
 
     /// Builds a subtree of the current form.
@@ -369,7 +437,13 @@ impl<Tab> Tree<Tab> {
     /// The root is not an exception: a stored empty root leaf answers `None` here, and the
     /// caller writes that straight into `tree.root`.
     fn build(&mut self, node: NodeIn<Tab>) -> Option<NodeId> {
-        let vertical = matches!(node, NodeIn::Vertical { .. });
+        // The pair form names its axis by variant; the row form carries it as a field. Read here
+        // so the two can share one arm below.
+        let horizontal = match node {
+            NodeIn::Row { horizontal, .. } => horizontal,
+            NodeIn::Horizontal { .. } => true,
+            NodeIn::Vertical { .. } | NodeIn::Leaf { .. } => false,
+        };
         match node {
             NodeIn::Leaf {
                 tabs,
@@ -400,23 +474,59 @@ impl<Tab> Tree<Tab> {
                 stowed,
                 children,
             } => {
+                // A tombstone read as what it always meant: two children and one boundary
+                // between them are a row of two.
                 let [left, right] = children;
-                let left = self.build(*left);
-                let right = self.build(*right);
-                match (left, right) {
-                    (Some(left), Some(right)) => {
-                        let id = self.adopt_split(vertical, [left, right], fraction);
-                        // Before the collapsing sweep the caller runs afterwards, which reads
-                        // this to decide the split's row count.
-                        self[id].set_stowed(stowed);
-                        Some(id)
-                    }
-                    // A split that lost a child is not a split any more, and the survivor takes
-                    // its place — so there is nothing left to be stowed, and `stowed` is dropped
-                    // rather than carried onto a node that never had it.
-                    (Some(only), None) | (None, Some(only)) => Some(only),
-                    (None, None) => None,
-                }
+                self.build_row(
+                    horizontal,
+                    Self::pair_shares(fraction),
+                    vec![left, right],
+                    stowed,
+                )
+            }
+            NodeIn::Row {
+                shares,
+                stowed,
+                children,
+                ..
+            } => self.build_row(horizontal, shares, children, stowed),
+        }
+    }
+
+    /// Builds the children of a row, then the row — whichever spelling the file used.
+    ///
+    /// A child that survives nothing drops out **with its weight**, so the survivors keep their
+    /// ratios to each other: the same rule `Tree::remove_leaf` and `copy_filtered` follow. A row
+    /// left with one child is not a row, and that child takes its place — so there is nothing
+    /// left to be stowed, and `stowed` is dropped rather than carried onto a node that never
+    /// had it.
+    fn build_row(
+        &mut self,
+        horizontal: bool,
+        shares: Vec<f32>,
+        children: Vec<Box<NodeIn<Tab>>>,
+        stowed: bool,
+    ) -> Option<NodeId> {
+        let mut built = Vec::with_capacity(children.len());
+        let mut kept = Vec::with_capacity(children.len());
+        // `zip` would silently answer about the shorter of the two, and a file can perfectly
+        // well name three children and two weights. A missing weight is the one a row of equals
+        // would have given; a surplus one is dropped with nothing to attach it to.
+        for (index, child) in children.into_iter().enumerate() {
+            if let Some(id) = self.build(*child) {
+                built.push(id);
+                kept.push(shares.get(index).copied().unwrap_or(1.0));
+            }
+        }
+        match built.len() {
+            0 => None,
+            1 => Some(built[0]),
+            _ => {
+                let id = self.adopt_row(horizontal, built, kept);
+                // Before the collapsing sweep the caller runs afterwards, which reads this to
+                // decide the row's bar count.
+                self[id].set_stowed(stowed);
+                Some(id)
             }
         }
     }
@@ -479,9 +589,11 @@ impl<Tab> Tree<Tab> {
                 let left = self.build_legacy(nodes, index * 2 + 1, where_it_landed);
                 let right = self.build_legacy(nodes, index * 2 + 2, where_it_landed);
                 match (left, right) {
-                    (Some(left), Some(right)) => {
-                        self.adopt_split(vertical, [left, right], split.fraction)
-                    }
+                    (Some(left), Some(right)) => self.adopt_row(
+                        !vertical,
+                        vec![left, right],
+                        Self::pair_shares(split.fraction),
+                    ),
                     // A split that lost a child in a stored file is repaired the way the
                     // in-memory tree repairs it: the surviving child takes its place.
                     (Some(only), None) | (None, Some(only)) => only,
@@ -1089,7 +1201,7 @@ mod tests {
             let mut tree: Tree<String> = Tree::new(vec!["a".to_string()]);
             let left = tree.root().unwrap();
             let right = tree.adopt(Node::leaf("b".to_string()));
-            let split = tree.adopt_split(false, [left, right], bad);
+            let split = tree.adopt_row(true, vec![left, right], Tree::<String>::pair_shares(bad));
             tree.root = Some(split);
 
             assert_eq!(tree[split].get_row().unwrap().fraction(), 0.5, "{bad}");

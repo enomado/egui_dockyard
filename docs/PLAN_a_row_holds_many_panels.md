@@ -95,6 +95,51 @@ Taken with Стас, 30.08–31.08. Not to be replayed silently.
    a fraction of a parent, a pixel extent and a boundary in 0..1 are four different things in
    this crate today and three of them are `f32`.
 
+Taken with Стас on 30.08, at the top of stage 7, from the questions §Open had been holding.
+All four are user-visible; none is a tidy-up.
+
+5. **A removed child's weight goes back to the row, not to a neighbour.** The row simply has
+   one fewer weight and the rest keep their ratios — `[1, 2, 1, 4]` minus child 1 is
+   `[1, 1, 4]`. Every boundary moves and no proportion changes. The alternatives (give it to
+   the right-hand neighbour, split it between the two) each keep some boundaries nailed at the
+   price of making one child grow for a reason it did not ask for; "the rest grow
+   proportionally" is the only answer that treats the row as a row rather than as the pair it
+   used to be.
+
+6. **Stowing a row of five puts away all five, behind one arrow.** `stowed` stays state on the
+   row, and the strip arithmetic stage 6 already wrote over `n` agrees: a stowed row is one
+   column. This is what stowing has meant since the side was introduced — the gesture names a
+   *side*, and a side does not stop being one because it holds more panels.
+
+7. **The rest of a fully collapsed row belongs to nobody, on both axes.** Стас' answer of 30.08
+   about the horizontal axis, extended to the vertical: strips flush against the near edge, the
+   remainder empty. The vertical axis today lets its last child keep the rest, which makes the
+   same picture answer differently to a hit test and to a drop target — and lets the thing
+   called a strip quietly not be one. 🚨 **This breaks parity on the vertical axis**, on
+   purpose, in the stage where parity ends anyway: `rect_probe`'s "all collapsed" scene will
+   diff, and the diff is the change, read by hand. The pin
+   `a_fully_collapsed_vertical_row_gives_the_rest_to_its_last_child` is what has to be rewritten
+   — it names today's answer, not a requirement.
+
+8. **The two snapping schemes stay apart, and the decision waits for stage 8.** Reconciling
+   them is a decision about *pixels* at a fractional `pixels_per_point`, and it is taken looking
+   at a screen (Антон's 1.25), not at a model refactor. The pins
+   `the_two_axes_snap_their_runs_differently…` stay where they are, naming the place.
+
+9. **The file carries a row, always — not a pair when it happens to hold two.** `NodeOut` gains
+   `Row { horizontal, shares, stowed, children: Vec<_> }` and loses `Vertical` / `Horizontal`;
+   the reader keeps both old variants as **tombstones**, and collapses a chain of same-axis
+   splits into one row on the way in (decision 3). One shape written, two read.
+
+   The alternative — write a pair the old way and only reach for `Row` at three children — was
+   offered and turned down. It would have kept a *new* build's files readable by an *old* one
+   for as long as nobody used the feature, at the price of two writers, two round-trip paths and
+   a format whose shape depends on a count. Стас: the clean format. The cost is stated rather
+   than hidden: **a layout saved by this build does not load in a build from before it** — it
+   fails on an unknown variant, which is a whole layout, not a focus. That matters in a rollout
+   window where two versions share one database, and it is the reason the choice was put as a
+   question rather than taken here.
+
 ## Stages
 
 Each stage is a commit, and stages 1–6 are **parity**: same pixels, same gestures, same file
@@ -621,10 +666,16 @@ left; loading collapses chains (decision 3); `regroup` and `transpose_cross` bui
 where they used to build a right-leaning ladder — `rebuild_chain` disappears, and the id pool
 arithmetic changes from `n − 1` splits to one row.
 
+Decisions 5, 6 and 7 land here: a removed child's weight goes back to the row (the rest keep
+their ratios); a row of five stows as one side behind one arrow; and a fully collapsed row
+leaves its rest to nobody **on both axes** — which rewrites the vertical pin, on purpose.
+
 **DoD**: the two `#[ignore]`s come off `a_drag_moves_the_boundary_it_grabbed.rs` and it passes
 on an ordinary run. The corpus loads and round-trips. `cargo test --all-features` green.
 `dock_shape` **changes** here, for the first time, and the diff is read by hand and recorded in
-this file.
+this file. `rect_probe`'s third scene ("all collapsed") diffs on the vertical axis by decision
+7, and that diff is read the same way — a clean one there would mean the decision did not
+land.
 
 ### Stage 8 — acceptance by clicking
 
@@ -645,23 +696,13 @@ click where it used to be two.
 
 ## Open, to be settled in the stage that hits it
 
-* **Which weight a removed child's share goes to.** Removing part `k` of a row leaves its
-  weight to be absorbed; "the row simply has one fewer weight, and the rest grow
-  proportionally" is the null answer and is probably right, but it is a *user-visible* choice
-  and belongs to stage 7, with Стас.
-* **Whether a stowed row can hold more than two.** `SplitNode::stowed` is state on the split;
-  on a row of five, stowing puts away all five behind one arrow, which is what stowing means —
-  but the strip arithmetic (`collapsed_strip_width(columns)`) then has to agree. Stage 6 stated
-  the arithmetic over `n` (`strip_columns` is a sum, a stowed row is one column) without
-  touching what stowing means; whether a row of five *should* stow as one is still stage 7's.
-* **Who owns the rest of a row with nothing open.** Stage 6 found the two axes answer
-  differently and kept both by parity: a fully collapsed *vertical* row lets its last child
-  keep the rest of the column; a fully collapsed *horizontal* row leaves the rest to nobody
-  (Стас, 30.08). Same picture — a collapsed leaf draws its bar at the top of whatever it is
-  given — different owner of the empty space, which is what a drop target or a hit test sees.
-  Reconciling them is a user-visible choice for stage 7 or 8, with Стас; the two scenes that
-  pin today's answers name where to change it.
+Three of the four questions this section held were **settled with Стас on 30.08**, at the top of
+stage 7, and moved up into §Decisions as 5, 6 and 7 (a removed child's weight; stowing a row of
+five; who owns the rest of a fully collapsed row). Decision 8 keeps the fourth one open on
+purpose:
+
 * **Two snapping schemes, one per axis.** Inherited from the pair-shaped code and kept by
   parity (see stage 6): at a fractional `pixels_per_point` a strip's divider lands a pixel
   apart depending on the axis. Unifying them changes pixels on HiDPI screens and is a decision
-  to take on purpose, once, with the pin updated.
+  to take on purpose, once, with the pin updated — **at stage 8, looking at a screen**, not
+  here.

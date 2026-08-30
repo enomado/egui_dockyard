@@ -904,7 +904,7 @@ impl<Tab> DockArea<'_, Tab> {
         // place in this feature where a hole is the answer rather than the thing to avoid.
         if self.collapse_sideways
             && self.dock_state[path.surface][path.node].is_horizontal()
-            && let (columns @ (Some(_), _) | columns @ (_, Some(_))) = (
+            && let columns @ (Some(_), _) | columns @ (_, Some(_)) = (
                 self.strip_columns(left_path),
                 self.strip_columns(right_path),
             )

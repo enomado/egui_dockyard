@@ -748,21 +748,64 @@ impl<Tab> DockArea<'_, Tab> {
         // Unconditional, both of them: a branch cannot leave a stale answer behind by saying
         // nothing, because `SplitCut` made it say something.
         self.layout.set_divider(path, cut.divider);
-        if let Some((child, side)) = cut.side_strip {
-            self.layout.set_side_strip(child, side);
+        for (child, side) in [left_path, right_path].into_iter().zip(cut.side_strips) {
+            if let Some(side) = side {
+                self.layout.set_side_strip(child, side);
+            }
         }
     }
 
-    /// Whether this child, being collapsed, can be squeezed into a strip one tab bar wide.
+    /// How many strips wide this child is, being collapsed — or [`None`] if it does not fit in
+    /// strips at all.
     ///
-    /// Two things can: a **leaf**, because a collapsed leaf *is* a single tab bar, and a split
-    /// that was **stowed** — put away as a unit, which draws one bar for whatever it contains
-    /// (see [`SplitNode::stowed`](crate::SplitNode::stowed)). What cannot is a split that is
-    /// merely fully collapsed, one leaf at a time: that is rows of tab bars, and rows do not fit
-    /// in a strip. The distinction is the whole reason stowing is state of its own rather than
-    /// "all my leaves happen to be collapsed" — the two look alike to
-    /// [`Node::is_collapsed`](crate::Node::is_collapsed) and differ exactly here.
-    fn fits_in_a_strip(&self, path: NodePath) -> bool {
+    /// One question rather than the two it used to be ("does it fit?" and, elsewhere, "how
+    /// wide?"), because the two are one fact and were free to disagree: the width was a
+    /// constant, which is the same as answering "one" to the second question wherever the first
+    /// said yes. That was true only while a *row* of strips was impossible, and it was
+    /// impossible only because this function said so.
+    ///
+    /// What counts as one strip: a **leaf**, because a collapsed leaf *is* a single tab bar, and
+    /// a split that was **stowed** — put away as a unit, which draws one bar for whatever it
+    /// contains (see [`SplitNode::stowed`](crate::SplitNode::stowed)).
+    ///
+    /// What counts as several: a **horizontal** split whose children are all strips. Side by
+    /// side is how strips stack, so a row of three collapsed leaves is three strips wide and
+    /// belongs against the edge like any one of them. This is the case the pair-shaped rule
+    /// could not express — a binary tree writes that row as `H(a, H(b, c))`, and the inner
+    /// split's two collapsed children each blocked the other, because "my sibling is open" was
+    /// how "somebody can take the width" was spelled. Somebody could: the open column further
+    /// along the row.
+    ///
+    /// What does not fit at all is a **vertical** split collapsed one leaf at a time: that is
+    /// rows of tab bars stacked downwards, and rows do not fit in something one tab bar wide.
+    /// Note that this is *not* the same distinction as stowing, which remains state of its own:
+    /// a stowed split is one bar for its whole subtree whichever way it is split, and a
+    /// horizontal split collapsed leaf-by-leaf is as many bars as it has leaves.
+    fn strip_columns(&self, path: NodePath) -> Option<i32> {
+        let node = &self.dock_state[path];
+        // Not collapsed, nothing to squeeze. Asked first so the recursion below cannot be
+        // reached by an open subtree through a collapsed ancestor.
+        if !node.is_collapsed() {
+            return None;
+        }
+        if node.is_leaf() || node.is_stowed() {
+            return Some(1);
+        }
+        if !node.is_horizontal() {
+            return None;
+        }
+        let [left, right] = self.child_paths(path);
+        Some(self.strip_columns(left)? + self.strip_columns(right)?)
+    }
+
+    /// Whether this child draws **one** bar of its own when it becomes a strip, which is what
+    /// decides whether the layout marks *it* as the strip or leaves that to its children.
+    ///
+    /// A leaf and a stowed split do; a horizontal split collapsed leaf-by-leaf does not — it is
+    /// a row of strips, one per leaf, and each of those is marked when the pass reaches it. Get
+    /// this wrong the generous way and the row draws one arrow for the whole thing while its
+    /// leaves keep their own underneath.
+    fn draws_one_bar(&self, path: NodePath) -> bool {
         self.dock_state[path].is_leaf() || self.dock_state[path].is_stowed()
     }
 
@@ -830,7 +873,7 @@ impl<Tab> DockArea<'_, Tab> {
                 // Cut at the strip's edge, not at the ratio — so the line the ratio names is
                 // not a boundary between anything, and there is nothing to draw or to grab.
                 divider: None,
-                side_strip: None,
+                side_strips: [None, None],
             };
         }
 
@@ -845,62 +888,88 @@ impl<Tab> DockArea<'_, Tab> {
         // path is the other answer to the same problem: spend *width*, which the sibling
         // column can take, so there is nothing left over to belong to nobody.
         //
-        // Three conditions, and each one is what keeps the hole from coming back:
+        // Two conditions, and each one is what keeps the hole from coming back:
         //
-        // * only something that **fits in a strip** — see `fits_in_a_strip`;
-        // * only when the **sibling is open** — squeeze both and the width they gave up has
-        //   nobody to go to, which is the hole again;
+        // * only something that **fits in strips** — see `strip_columns`;
         // * only with the knob on, because this reverses a decision users' layouts already
         //   depend on.
+        //
+        // "Only when the sibling is open" used to be a third, and it was the bug: two collapsed
+        // siblings each read the other as "nobody to take the width" and both stayed columns,
+        // although in `H(a, H(b, c))` — how a binary tree writes a row of three — the open
+        // column was one level out, holding the width for both. Now each side is given exactly
+        // the strips it needs and whatever is left over is the other child's; when *both* sides
+        // are strips there is nothing left to give away, and the leftover belongs to nobody by
+        // decision (Стас, 30.08.2026: strips for everyone, the rest empty), which is the one
+        // place in this feature where a hole is the answer rather than the thing to avoid.
         if self.collapse_sideways
             && self.dock_state[path.surface][path.node].is_horizontal()
-            && let Some(side) = {
-                let left_strips =
-                    left_collapsed && !right_collapsed && self.fits_in_a_strip(left_path);
-                let right_strips =
-                    right_collapsed && !left_collapsed && self.fits_in_a_strip(right_path);
-                match (left_strips, right_strips) {
-                    (true, false) => Some(SideStrip::Left),
-                    (false, true) => Some(SideStrip::Right),
-                    // Neither, or (impossible: the two are exclusive by construction) both.
-                    _ => None,
-                }
-            }
+            && let (columns @ (Some(_), _) | columns @ (_, Some(_))) = (
+                self.strip_columns(left_path),
+                self.strip_columns(right_path),
+            )
         {
             let rect = split_rect(parent_rect, pixels_per_point);
+            // Same arithmetic as the collapsed rows above, and for the same reason: a side is
+            // given exactly what it needs, and the divider goes *beside* it rather than through
+            // it. Take half the divider out of a strip that is already exactly one arrow wide
+            // and the arrow no longer fits in what it was given.
+            let cut_at = |x: f32| map_to_pixel(x, pixels_per_point, f32::round);
+            let width = |columns| collapsed_strip_width(columns, style);
 
-            // Same arithmetic as the collapsed rows above, and for the same reason: the strip
-            // is given exactly what it needs, and the divider goes *beside* it rather than
-            // through it. Take half the divider out of a strip that is already exactly one
-            // arrow wide and the arrow no longer fits in what it was given.
-            let (near, far) = if side == SideStrip::Left {
-                let strip_end = rect.min.x + collapsed_strip_width(style);
-                (strip_end, strip_end + style.separator.width)
-            } else {
-                let strip_start = rect.max.x - collapsed_strip_width(style);
-                (strip_start - style.separator.width, strip_start)
+            let (left_rect, right_rect, sides) = match columns {
+                // Both sides are strips: they sit against the near edge one after the other,
+                // and the rest of the row is nobody's. Pressing the right-hand one against the
+                // *far* edge instead would leave the hole in the middle of the row, which is
+                // the same amount of empty space arranged so that it separates the strips from
+                // each other rather than standing beside them.
+                (Some(left_columns), Some(right_columns)) => {
+                    let left_end = cut_at(rect.min.x + width(left_columns));
+                    let right_start = cut_at(left_end + style.separator.width);
+                    let right_end = cut_at(right_start + width(right_columns));
+                    (
+                        rect.intersect(Rect::everything_left_of(left_end)),
+                        rect.intersect(Rect::everything_right_of(right_start))
+                            .intersect(Rect::everything_left_of(right_end)),
+                        [Some(SideStrip::Left), Some(SideStrip::Left)],
+                    )
+                }
+                // One side is strips and the other takes everything it gave up — including the
+                // case where the other is collapsed too but does not fit in strips (a vertical
+                // stack of tab bars), which can hold the width perfectly well.
+                (Some(left_columns), None) => {
+                    let strip_end = cut_at(rect.min.x + width(left_columns));
+                    let sibling_start = cut_at(strip_end + style.separator.width);
+                    (
+                        rect.intersect(Rect::everything_left_of(strip_end)),
+                        rect.intersect(Rect::everything_right_of(sibling_start)),
+                        [Some(SideStrip::Left), None],
+                    )
+                }
+                (None, Some(right_columns)) => {
+                    let strip_start = cut_at(rect.max.x - width(right_columns));
+                    let sibling_end = cut_at(strip_start - style.separator.width);
+                    (
+                        rect.intersect(Rect::everything_left_of(sibling_end)),
+                        rect.intersect(Rect::everything_right_of(strip_start)),
+                        [None, Some(SideStrip::Right)],
+                    )
+                }
+                // Excluded by the pattern this branch is entered with.
+                (None, None) => unreachable!("neither side is a strip, so this is an ordinary cut"),
             };
 
-            let left_separator_border = map_to_pixel(near, pixels_per_point, f32::round);
-            let right_separator_border = map_to_pixel(far, pixels_per_point, f32::round);
-            let left = rect
-                .intersect(Rect::everything_left_of(left_separator_border))
-                .intersect(max_rect);
-            let right = rect
-                .intersect(Rect::everything_right_of(right_separator_border))
-                .intersect(max_rect);
+            // A child that is a row of strips is not marked as one itself: its leaves are, when
+            // the pass reaches them. See `draws_one_bar`.
+            let mark = |child, side| self.draws_one_bar(child).then_some(side).flatten();
             return SplitCut {
-                children: [left, right],
+                children: [
+                    left_rect.intersect(max_rect),
+                    right_rect.intersect(max_rect),
+                ],
                 // Same as the case above, one axis over.
                 divider: None,
-                side_strip: Some((
-                    if side == SideStrip::Left {
-                        left_path
-                    } else {
-                        right_path
-                    },
-                    side,
-                )),
+                side_strips: [mark(left_path, sides[0]), mark(right_path, sides[1])],
             };
         }
 
@@ -953,7 +1022,7 @@ impl<Tab> DockArea<'_, Tab> {
                 return SplitCut {
                     children: [left, right],
                     divider: Some(divider),
-                    side_strip: None,
+                    side_strips: [None, None],
                 };
             }
         }
@@ -1282,11 +1351,17 @@ pub(super) fn collapsed_strip_height(rows: i32, style: &Style) -> f32 {
 /// whichever way the parent happens to be split. At the default style that is 24 px, which is
 /// also [`Style::TAB_COLLAPSE_BUTTON_SIZE`], so the expand arrow fits a strip exactly.
 ///
-/// No `columns` parameter, unlike [`collapsed_strip_height`]: strips do not stack. Only a
-/// collapsed leaf whose sibling is open becomes one, so there is never more than a single
-/// strip against either edge of a split.
-pub(super) fn collapsed_strip_width(style: &Style) -> f32 {
-    style.tab_bar.height
+/// `columns` for the same reason [`collapsed_strip_height`] takes `rows`, and with the same
+/// arithmetic one axis over: a horizontal split collapsed leaf-by-leaf is a *row* of strips,
+/// and the `columns - 1` dividers between them are part of what it draws. This used to be a
+/// constant, on the stated grounds that "strips do not stack" — which was true only because
+/// the rule that decided what became a strip could not see past a single pair, so a row of
+/// three panels lost its strips entirely the moment the second one was collapsed.
+pub(super) fn collapsed_strip_width(columns: i32, style: &Style) -> f32 {
+    if columns <= 0 {
+        return 0.0;
+    }
+    columns as f32 * style.tab_bar.height + (columns - 1) as f32 * style.separator.width
 }
 
 /// How far inside its own rectangle a surface has to start drawing to leave the border it
@@ -1390,9 +1465,13 @@ struct SplitCut {
     /// [`NodeGeometry::divider`](crate::NodeGeometry::divider).
     divider: Option<Rect>,
 
-    /// The child squeezed to a sideways strip, and which edge it was pressed against, when this
-    /// cut made one.
-    side_strip: Option<(NodePath, SideStrip)>,
+    /// Which edge each child was pressed against, for a child this cut squeezed into a sideways
+    /// strip that draws its own bar — in the same order as [`Self::children`].
+    ///
+    /// Two entries and not one, because a row of collapsed panels puts a strip on *both* sides
+    /// of the same split; and [`None`] for a child that is a row of strips rather than one, so
+    /// that the mark lands on the leaves that draw the bars. See `DockArea::draws_one_bar`.
+    side_strips: [Option<SideStrip>; 2],
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -84,9 +84,15 @@ Taken with Стас, 30.08–31.08. Not to be replayed silently.
    long way. `is_horizontal()` / `is_vertical()` stay, so readers do not move.
 
 3. **Loading collapses chains.** `H(a, H(b, c))` in a file becomes one `Row[a, b, c]` in
-   memory. The picture is unchanged — the boundaries are where they were — but the drag
-   becomes local and the share skew goes, which means the feature reaches layouts people
-   already have. Reading 1:1 was rejected: it would leave two classes of layout, identical on
+   memory. The proportions are unchanged, the drag becomes local and the share skew goes,
+   which means the feature reaches layouts people already have.
+
+   *"The boundaries are where they were" is what this said, and stage 7 measured it and found
+   it overstated:* the two spellings divide the **dividers' own width** differently — nesting
+   takes one out of the right-hand group alone, a flat row takes them all out of the whole — so
+   they agree exactly only for a zero-width divider. A row of three or four moves by a pixel or
+   two; the fuzz corpus's fifteen-deep chains move by up to 93 px. The ratios are exact either
+   way, which is the part a user set. Reading 1:1 was rejected: it would leave two classes of layout, identical on
    screen and different under the hand, for as long as anyone's file lasts.
 
    This is where parity ends, and it ends **on purpose**. Everything before stage 7 keeps it.
@@ -658,7 +664,7 @@ column), which the mutant fails with `expected 49, got 24`.
 does not resolve a dependency's symbols — see the stage 4 findings). Consumers built against
 the new pin, not assumed.
 
-### Stage 7 — rows actually hold more than two
+### Stage 7 — rows actually hold more than two ✅ done 30.08
 
 The move: `split()` inserts into an existing row of the same orientation instead of allocating
 a new split; `remove_leaf` removes a child from its row and dissolves the row only at one child
@@ -676,6 +682,89 @@ on an ordinary run. The corpus loads and round-trips. `cargo test --all-features
 this file. `rect_probe`'s third scene ("all collapsed") diffs on the vertical axis by decision
 7, and that diff is read the same way — a clean one there would mean the decision did not
 land.
+
+**Done**, in two commits: `3d575dd` the move, `d095aeb` the oracles it turned out to need.
+`cargo test --all-features` 320/320, the three tests of the acceptance file among them —
+positive control included, so the green is not the green of a gesture that never arrived.
+
+**The transposition is addressed by the gap, not the row**, which was not in the plan and is
+the shape the rest of the crate had already taken at stage 5. `DockMutation::TransposeCross`
+carried `outer: NodePath`, and `junction.rs` reached it by throwing the gap away
+(`outer: outer.row`) — harmless while a row was its own single gap, a panic the moment one was
+not, on any of a three-row's two dividers. So a crossing now names the gap it sits on, and
+transposing replaces **its two neighbours** with one node; when that leaves the row with a
+single child, the row *is* that node, which is exactly what this operation was before. The rest
+of the row is not part of the gesture.
+
+`Regroup` went n-ary with it, and `Tree::regroup`'s contract changed with that: it used to
+demand the new shape be built out of *exactly* the rows it found, which was checkable only
+because the same picture always took the same number of pair-shaped rows. It now reuses, and
+allocates or frees the difference. **The promise that survives is the one about the kept
+subtrees** — each once, none invented or dropped — and that is still checked, on the frontier
+of the shape's `Keep`s rather than on its reused ids.
+
+**Two defects, both found by oracles rather than by reading.**
+
+* The DST sweep pulled gap 0 of a row of three past gap 1 and got `RowShareNegative`. The
+  drag's clamp was the whole row, which is right for a pair and wrong for anything else: a
+  boundary written past a *neighbour* takes that neighbour's room away through zero.
+  `SeparatorBand::between` bounds it by the two boundaries beside it; on a pair those are the
+  row's ends, so it is the band it always was.
+* `rect_probe` found **86 inside-out rectangles across 544 layouts** where the previous build
+  had none. Two boundaries of a row can coincide, and the child between them was then asked to
+  fit between the far edge of one divider and the near edge of the next — a divider's width
+  backwards. Stage 6 wrote that branch and recorded the hole as unreachable while rows were
+  pairs; it is closed by one forward pass over the divider edges, and pinned by
+  `a_child_squeezed_between_two_boundaries_is_given_nothing_not_less`.
+
+**Four properties this stage rested on had no oracle at all**, and the mutation round is what
+said so — every one of them a thing the stage was *for*, and every one green until it was
+written down. Which side of a `Split` keeps `fraction` when the newcomer joins a row (the
+acceptance file asserts locality, and a row of equal thirds is equal thirds either way round);
+that loading collapses a chain, and that the inner weights are scaled into the outer child's
+room; and which weight a removal drops. Recorded in the mutant table below.
+
+**`dock_shape` changed, and the diff reads as decision 3 doing its work.** A 37-node ladder of
+horizontal pairs comes back as 23 nodes with one row of fifteen, the leaves in the same order:
+
+```text
+before  0: horizontal fraction=0.5545 children=[1, 2]     (and 17 more rows)
+after   0: horizontal children=[1 … 15]                    one row, fifteen panels
+```
+
+544 layouts read before and after, 7679 unreadable before and after — nothing stopped loading.
+
+**`rect_probe` moved, and by how much is measured rather than waved at.** The dump is keyed by
+`NodeId` and flattening renumbers those, so the comparison is per layout over the *sorted*
+multiset of leaf edges (the first attempt sorted rectangles as text and paired them by line,
+which pairs unrelated rectangles the moment one changes and reported a 1102 px "shift" nothing
+on screen did). The leaf count is identical in all 544, and:
+
+| scene | layouts moved | worst edge |
+|---|---|---|
+| as-saved | 119 of 514 | 93 px |
+| odd leaves collapsed | 134 of 514 | 835 px |
+| every leaf collapsed | 160 of 514 | 835 px |
+
+The 835 px is decision 7 on a 892 px column — the last child of a fully collapsed vertical row
+no longer taking the rest — and it is the change, not a surprise. The 93 px is decision 3, and
+it says the plan's wording overstated: **a chain that collapses keeps its proportions exactly
+and its pixels only nearly.** Nesting took one divider's width out of the right-hand group
+alone, a flat row takes them all out of the whole; the two agree only in the limit of a
+zero-width divider, and a fifteen-deep chain — a fuzzer shape, not a layout anyone built —
+accumulates that into 93 px. A row of three or four moves by a pixel or two.
+
+**Mutants, six, of which four survived until an oracle was written for them.**
+
+| mutation | what caught it |
+|---|---|
+| `insert_beside` swaps which side of the split keeps `fraction` | **nothing** → `splitting_a_panel_of_a_row_joins_it_at_the_fraction_asked_for` (a quarter, not a half — at a half the two sides are one number) |
+| loading stops collapsing chains | **nothing** → `a_chain_of_same_axis_splits_loads_as_one_row` |
+| the inner weights are not scaled into the outer child's room | the same test, on its ratios |
+| `remove_child` drops the last weight instead of the child's own | **nothing** → `a_row_of_three_that_loses_a_panel_keeps_the_others_in_proportion` (weights `[¼, ½, ¼]`, because equal ones make both answers the same two numbers) |
+| the divider edges are not made monotone | **nothing** → `a_child_squeezed_between_two_boundaries_is_given_nothing_not_less`; the mutant reproduces the corpus's 86 inside-out rectangles exactly |
+| the gesture's band forgets the neighbouring boundaries | the DST sweep, `RowShareNegative` — the same oracle that found the defect |
+| `remove_leaf` dissolves at three children instead of two | five proptests and `removing_a_collapsed_leaf_updates_ancestor_counts` |
 
 ### Stage 8 — acceptance by clicking
 

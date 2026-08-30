@@ -182,6 +182,35 @@ impl Sim {
         self.settle();
     }
 
+    /// A click at `at`: press and release in two frames, with nothing held.
+    fn click(&mut self, at: Pos2) {
+        self.frame(vec![Event::PointerMoved(at)], Modifiers::default());
+        for pressed in [true, false] {
+            self.frame(
+                vec![Event::PointerButton {
+                    pos: at,
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers: Modifiers::default(),
+                }],
+                Modifiers::default(),
+            );
+        }
+    }
+
+    /// Two clicks close enough together for egui to call them one double click.
+    ///
+    /// Preceded by quiet frames so the *previous* gesture is forgotten: two clicks inside egui's
+    /// window are a double click whether or not the caller meant them as one.
+    fn double_click(&mut self, at: Pos2) {
+        for _ in 0..60 {
+            self.frame(Vec::new(), Modifiers::default());
+        }
+        self.click(at);
+        self.click(at);
+        self.settle();
+    }
+
     fn rect_of(&self, node: NodeId) -> Rect {
         DockLayout::load(&self.ctx, Id::new(DOCK_ID))
             .rect(path(node))
@@ -255,7 +284,6 @@ fn a_pair_drag_leaves_the_far_panel_alone() {
 ///
 /// Red today — the clamp stops the line at `b`'s margin and `c` never hears about it.
 #[test]
-#[ignore = "stage 0 of PLAN_a_drag_chooses_who_pays_for_it: red until the plan lands"]
 fn a_plain_drag_pushes_past_the_neighbour_that_ran_out() {
     let mut sim = Sim::row_of_three();
     let near_before = sim.width_of(1);
@@ -276,13 +304,48 @@ fn a_plain_drag_pushes_past_the_neighbour_that_ran_out() {
     );
 }
 
+/// A double-click centres a divider **in the room it has**, which on a row of three is not the
+/// middle of the row.
+///
+/// Found by the sweep, once it could build a row of three: the rule was written as the constant
+/// `0.5` — right for a pair, whose divider owns the whole row — so double-clicking the *second*
+/// divider sent it to the middle of the row, which is behind the first one. What that leaves is a
+/// panel of negative weight, and a picture where two dividers have swapped places.
+///
+/// The scene is pulled off-centre first, because a double-click on an already-centred divider is
+/// the one case both the right answer and the wrong one leave alone.
+#[test]
+fn a_double_click_centres_a_divider_between_its_neighbours() {
+    let mut sim = Sim::row_of_three();
+    sim.drag(sim.grab_point(0), SOFT_PULL, Modifiers::SHIFT);
+
+    let first = sim.boundary(0);
+    let grab = sim.grab_point(1);
+    sim.double_click(grab);
+
+    // Half way between the first boundary and the far end of the row — where a hand pointing at
+    // "the middle" of that divider's room means.
+    let row = sim.rect_of(sim.panels[0]).min.x;
+    let end = sim.rect_of(sim.panels[2]).max.x;
+    let expected = 0.5 * (first + end);
+    let landed = sim.boundary(1);
+    assert!(
+        (landed - expected).abs() < 2.0,
+        "the second divider went to {landed} px, not to {expected} — the row runs {row}..{end} \
+         and its first divider is at {first}"
+    );
+    assert!(
+        landed > first,
+        "and it stayed on its own side of the divider before it ({landed} against {first})"
+    );
+}
+
 /// With Ctrl held, both panels ahead of the boundary pay from the first pixel, in proportion to
 /// what they have — no minimum has to be reached first.
 ///
 /// Red today, and red for a second reason on top of the clamp: the mutation carries one boundary,
 /// and this gesture moves two.
 #[test]
-#[ignore = "stage 0 of PLAN_a_drag_chooses_who_pays_for_it: red until the plan lands"]
 fn a_proportional_drag_moves_every_boundary_of_the_row() {
     let mut sim = Sim::row_of_three();
     let second_before = sim.boundary(1);

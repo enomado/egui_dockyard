@@ -115,6 +115,36 @@ impl TabViewer for Viewer {
     }
 }
 
+/// What a hand holds while it drags a separator, and therefore which children pay for the drag.
+///
+/// Named for the *gesture* rather than for the mode it selects, because the harness's business is
+/// what the user does: the mapping from a key to a [`SepBehavior`] is the crate's, stated once in
+/// `docs/MODIFIERS.md` and judged by its own unit test. A sweep that spelled the modes here would
+/// be re-deciding the key map every time it pressed a key.
+///
+/// [`SepBehavior`]: egui_dockyard::SepBehavior
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SepHold {
+    /// Nothing held — the chain: the near neighbour pays until it reaches its minimum, then the
+    /// one behind it, to the end of the row.
+    Plain,
+    /// Shift — exactly the two children the gap lies between, which is what this crate did for
+    /// every drag before modifiers meant anything.
+    Pair,
+    /// Ctrl / ⌘ — every child of the row pays, in proportion to what it has.
+    Spread,
+}
+
+impl SepHold {
+    fn modifiers(self) -> Modifiers {
+        match self {
+            SepHold::Plain => Modifiers::NONE,
+            SepHold::Pair => Modifiers::SHIFT,
+            SepHold::Spread => Modifiers::COMMAND,
+        }
+    }
+}
+
 /// One scripted step of a scenario.
 ///
 /// Steps address leaves as "the k-th live leaf", never by id: ids are handed out by the arena
@@ -182,11 +212,18 @@ enum Step {
     /// crate's documented behaviour rather than a hole in this step, and [`CollapseWatch`] counts
     /// which of the two the press turned out to be.
     Stow { arrow: usize },
-    /// Drag the separator of a split node, moving the boundary between its two children.
+    /// Drag the separator of a row, moving the boundary between two of its children.
     ///
-    /// The only gesture here that edits a number rather than the shape — and that number,
-    /// `fraction`, is persisted state. Nothing else in this harness ever moves it.
-    DragSeparator { node: usize, by: i16 },
+    /// The only gesture here that edits a number rather than the shape — and that number is
+    /// persisted state. Nothing else in this harness ever moves it.
+    ///
+    /// `hold` is what the hand is holding, and it decides **who pays** for the drag: a plain drag
+    /// pushes the chain along, Shift trades between the two neighbours only, Ctrl moves every
+    /// weight in the row (`docs/MODIFIERS.md`). Part of the step rather than a separate one
+    /// because all three are the same gesture judged the same way — and the shrinker may then
+    /// simplify a failure by dropping the modifier, which is exactly the reduction a reader wants
+    /// to see.
+    DragSeparator { node: usize, by: i16, hold: SepHold },
     /// Press a separator and let it go without moving. Nothing may happen, and — the part that
     /// needs a frame to judge — the dock must not *say* anything happened.
     GrabSeparator { node: usize },
@@ -203,6 +240,19 @@ enum Step {
     ///
     /// `deepen` says how far past a bare 2x2 to go — see [`Deepen`].
     BuildCross { leaf: usize, deepen: Deepen },
+    /// Split one leaf **twice along the same axis**, through the model, leaving a row of three.
+    ///
+    /// Scaffolding, for the same reason [`BuildCross`](Self::BuildCross) is, and measured the
+    /// same way before it was written: with independent draws deciding each split's direction, a
+    /// sweep of 96 seeds dragged a divider of a row longer than two **twice** in 24 drags — so
+    /// every question a row of three is the only witness to (a chain that passes the neighbour
+    /// that ran out, a proportional drag that moves the far side, a gap that is neither the first
+    /// nor the last) was decided by luck rather than asked.
+    ///
+    /// Not a flag on [`Split`](Self::Split): one split cannot make a row of three, and the second
+    /// has to name the *same* leaf and the *same* direction as the first, which two independent
+    /// draws produce once in sixteen.
+    BuildRow { leaf: usize, horizontal: bool },
     /// Press the toggle the dock offers where two perpendicular dividers cross, which swaps
     /// the grouping of a 2x2 (rows-of-columns <-> columns-of-rows) in place.
     ///
@@ -909,6 +959,28 @@ struct SeparatorWatch {
     quiet_grabs: usize,
     /// Double-clicks that re-centred an off-centre separator.
     centrings: usize,
+    /// Drags that grabbed a divider of a row with **more than one gap**.
+    ///
+    /// The number that tells the two zeros below apart: with none of these, no hold could
+    /// possibly have reached further than its neighbours, and `pushed_on`/`spread` are reporting
+    /// the shape of the scenes rather than the behaviour of the modes.
+    on_a_long_row: usize,
+    /// Plain drags that moved a boundary they did not grab — the chain actually reaching past
+    /// the neighbour that ran out.
+    ///
+    /// An **outcome** and not a step count, and the difference is the whole point of the number:
+    /// on a row of two a chain and a pair are the same arithmetic, so "a plain drag ran" says
+    /// nothing about the mode. A zero here means the sweep never once built a row of three and
+    /// pushed a child to its minimum, so the mode went untested however many times it was asked
+    /// for.
+    pushed_on: usize,
+    /// Ctrl drags that moved a boundary they did not grab — proportional actually spreading.
+    ///
+    /// Separate from [`pushed_on`](Self::pushed_on) because the two reach the far side for
+    /// different reasons: a chain gets there only after a neighbour runs out, and proportional
+    /// from the first point. One counter for both would be satisfied by whichever of them the
+    /// sweep happened to draw.
+    spread: usize,
 }
 
 /// Coverage of the cross-split toggle, counted while the run happens.
@@ -2102,6 +2174,32 @@ impl Sim {
             .any(|cross| Rect::from_center_size(cross.at, Vec2::splat(side)).contains(point))
     }
 
+    /// Whether a divider **other than** `gap`'s answers to a press at `point`.
+    ///
+    /// The same refusal as [`handle_over`](Self::handle_over) and for the same reason: a step
+    /// whose press lands on a different widget than the one it named is no longer the step it
+    /// says it is. What makes it reachable is a row where two boundaries have been squeezed
+    /// together — a child of no width between two dividers, which a window small enough for the
+    /// margins not to fit produces honestly. The two dividers are then a pixel apart, their
+    /// interaction bands overlap, and egui gives the press to one of them.
+    ///
+    /// Read off the layout's divider rectangles, not off [`separators`](Self::separators): that
+    /// list drops a gap whose two children touch, which is precisely the divider doing the
+    /// stealing. Found by the sweep once it could build a row of four — a double-click aimed at
+    /// one divider centred the invisible one beside it, and the change was invisible to the
+    /// fraction trace for the same reason it was invisible to `separators`.
+    fn another_divider_over(&self, gap: GapPath, point: Pos2) -> bool {
+        let layout = self.layout();
+        let reach = self.style.separator.extra_interact_width / 2.0;
+        self.state
+            .iter_all_nodes()
+            .filter_map(|(path, node)| node.get_row().map(|row| (path, row)))
+            .flat_map(|(path, row)| row.gaps().map(move |index| GapPath::new(path, index)))
+            .filter(|other| *other != gap)
+            .filter_map(|other| layout.divider(other))
+            .any(|rect| rect.expand(reach).contains(point))
+    }
+
     /// Runs quiet frames until the geometry stops moving; `false` if it never did.
     ///
     /// A floating window is not still the moment it appears: egui animates and auto-sizes it,
@@ -2320,12 +2418,27 @@ impl Sim {
     }
 
     fn drag(&mut self, from: Pos2, to: Pos2) {
-        self.run_frame(vec![Event::PointerMoved(from)]);
+        self.drag_holding(from, to, Modifiers::NONE);
+    }
+
+    /// A drag with `modifiers` held **for the whole gesture**, released at the end.
+    ///
+    /// Declared as their own [`Event::ModifiersChanged`] for the reason
+    /// [`click_holding`](Self::click_holding) spells out — that event is the only thing egui
+    /// updates `InputState::modifiers` from, and a widget reads nothing else. Held across every
+    /// frame of the drag and not only the press: what decides a separator's mode is read on each
+    /// frame the boundary moves, so a modifier taken back after the press would change the
+    /// gesture half way through, which is not a thing a hand does.
+    fn drag_holding(&mut self, from: Pos2, to: Pos2, modifiers: Modifiers) {
+        self.run_frame(vec![
+            Event::ModifiersChanged(modifiers),
+            Event::PointerMoved(from),
+        ]);
         self.run_frame(vec![Event::PointerButton {
             pos: from,
             button: PointerButton::Primary,
             pressed: true,
-            modifiers: Modifiers::NONE,
+            modifiers,
         }]);
         for step in 1..=4u8 {
             let t = f32::from(step) / 4.0;
@@ -2346,11 +2459,15 @@ impl Sim {
             pos: to,
             button: PointerButton::Primary,
             pressed: false,
-            modifiers: Modifiers::NONE,
+            modifiers,
         }]);
         // One quiet frame: removals and detachments are applied at the end of the pass that
-        // follows the drop.
-        self.run_frame(vec![Event::PointerMoved(to)]);
+        // follows the drop. The modifiers are taken back in it, so one step's Shift does not
+        // travel into the steps after it.
+        self.run_frame(vec![
+            Event::ModifiersChanged(Modifiers::NONE),
+            Event::PointerMoved(to),
+        ]);
     }
 
     fn click(&mut self, at: Pos2) {
@@ -2939,6 +3056,25 @@ impl Sim {
                 vec![target]
             }
 
+            Step::BuildRow { leaf, horizontal } => {
+                let target = leaves[leaf % leaves.len()];
+                let split = if horizontal {
+                    Split::Right
+                } else {
+                    Split::Below
+                };
+                // Twice on the *same* leaf and in the same direction: the first call wraps it in
+                // a row of two, and the second joins that row rather than nesting a second one
+                // inside it — which is what a row does since stage 7 of the n-ary plan, and the
+                // only way this vocabulary can name a row of three.
+                for _ in 0..2 {
+                    let tab = self.fresh_tab();
+                    self.state.split(target, split, 0.5, Node::leaf(tab));
+                }
+                self.run_frame(vec![]);
+                vec![target]
+            }
+
             Step::CloseLeaf { leaf } => {
                 let target = leaves[leaf % leaves.len()];
                 self.state.remove_leaf(target);
@@ -3056,13 +3192,16 @@ impl Sim {
                 Vec::new()
             }
 
-            Step::DragSeparator { node, by } => {
+            Step::DragSeparator { node, by, hold } => {
                 let separators = self.separators();
                 if separators.is_empty() {
                     return None;
                 }
                 let (gap, at, fraction) = separators[node % separators.len()];
-                if self.window_over(at, gap.row.surface) || self.handle_over(at) {
+                if self.window_over(at, gap.row.surface)
+                    || self.handle_over(at)
+                    || self.another_divider_over(gap, at)
+                {
                     // A separator under a floating window — or under the cross-split toggle —
                     // is not the thing the pointer would reach; the same refusal the tab aims
                     // make, for the same reason.
@@ -3083,12 +3222,48 @@ impl Sim {
                     at + Vec2::new(delta, 0.0)
                 };
                 let focus_before = self.focus_trace();
-                self.drag(at, to);
+                // Every boundary of the row the grabbed divider belongs to, as it stands before
+                // the gesture: what the rule below is stated over, and what says afterwards
+                // whether the drag actually reached anyone but its own neighbours.
+                let row_gaps = self.gaps_of(gap.row);
+                let before: Vec<Option<f32>> = row_gaps
+                    .iter()
+                    .map(|&sibling| self.boundary_of(sibling))
+                    .collect();
+                self.drag_holding(at, to, hold.modifiers());
                 self.separator.drags += 1;
-                // This divider and no other. Holding it changes the *range* of every split
-                // beneath it, which is precisely the pressure the frame pass must not answer by
-                // rewriting their stored ratios.
-                boundaries = BoundaryRule::Only(vec![gap]);
+                if row_gaps.len() > 1 {
+                    self.separator.on_a_long_row += 1;
+                }
+                // What the drag was *allowed* to move, which is now a question about the hold.
+                //
+                // Shift is the rule this always was: this divider and no other. Without a
+                // modifier — the chain — and under Ctrl, the drag may move any boundary **of the
+                // same row**, because travelling past the neighbour that ran out is the whole
+                // point of it. Neither may touch a boundary of any other row, and that is the
+                // part still being judged: holding a divider changes the *range* of every split
+                // beneath it, and answering that pressure by rewriting their stored ratios is
+                // exactly the fault this rule was written for.
+                boundaries = match hold {
+                    SepHold::Pair => BoundaryRule::Only(vec![gap]),
+                    SepHold::Plain | SepHold::Spread => BoundaryRule::Only(row_gaps.clone()),
+                };
+                // Coverage in terms of **outcomes**, not of steps taken: "a chain drag ran" is
+                // satisfied by a row of two, where a chain and a pair are the same picture. What
+                // has to be seen at least once is a drag that moved a boundary it did not grab.
+                let reached_further = row_gaps
+                    .iter()
+                    .zip(&before)
+                    .any(|(&sibling, &was)| sibling != gap && self.boundary_of(sibling) != was);
+                if reached_further {
+                    match hold {
+                        SepHold::Plain => self.separator.pushed_on += 1,
+                        SepHold::Spread => self.separator.spread += 1,
+                        // A pair drag that moved a boundary it did not grab is not coverage, it
+                        // is the fault above — and `boundaries` reports it in those words.
+                        SepHold::Pair => {}
+                    }
+                }
 
                 // The rule is read off the model, not predicted from the delta: a drag that ran
                 // into the clamp moved nothing, and a dock that announces a commit for it is
@@ -3124,7 +3299,10 @@ impl Sim {
                     return None;
                 }
                 let (gap, at, fraction) = separators[node % separators.len()];
-                if self.window_over(at, gap.row.surface) || self.handle_over(at) {
+                if self.window_over(at, gap.row.surface)
+                    || self.handle_over(at)
+                    || self.another_divider_over(gap, at)
+                {
                     self.refused[refused_index(Refused::Contested)] += 1;
                     return None;
                 }
@@ -3168,7 +3346,10 @@ impl Sim {
                     return None;
                 }
                 let (gap, at, fraction) = separators[node % separators.len()];
-                if self.window_over(at, gap.row.surface) || self.handle_over(at) {
+                if self.window_over(at, gap.row.surface)
+                    || self.handle_over(at)
+                    || self.another_divider_over(gap, at)
+                {
                     self.refused[refused_index(Refused::Contested)] += 1;
                     return None;
                 }
@@ -3731,6 +3912,19 @@ impl Sim {
             .count()
     }
 
+    /// Every gap of the node at `path`, or nothing where it is not a row (any more).
+    ///
+    /// A row of two answers with one gap, which is what makes a rule stated over this the same
+    /// rule as the old `Only(vec![gap])` wherever the sweep never built a longer row.
+    fn gaps_of(&self, path: NodePath) -> Vec<GapPath> {
+        self.state
+            .node(path)
+            .ok()
+            .and_then(|node| node.get_row())
+            .map(|row| row.gaps().map(|gap| GapPath::new(path, gap)).collect())
+            .unwrap_or_default()
+    }
+
     /// The boundary stored in a gap, if its row is still there, still a row, and still has
     /// that gap.
     fn boundary_of(&self, gap: GapPath) -> Option<f32> {
@@ -4036,7 +4230,7 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
             steps.push(Step::Collapse { arrow });
             continue;
         }
-        let step = match rng.below(40) {
+        let step = match rng.below(42) {
             0..=4 => Step::Drag {
                 from: rng.below(8),
                 to: rng.below(8),
@@ -4067,10 +4261,37 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
             // The separator gestures. Drawn often enough that a sweep reaches the clamp at both
             // ends: `by` spans a wide range on purpose, so some drags move the boundary a little
             // and some try to shove it out of the node entirely.
-            10..=11 => Step::DragSeparator {
-                node: rng.below(6),
-                by: [-2000i16, -120, -16, 16, 120, 2000][rng.below(6)],
-            },
+            10..=11 => {
+                let node = rng.below(6);
+                let by = rng.below(6);
+                Step::DragSeparator {
+                    node,
+                    by: [-2000i16, -120, -16, 16, 120, 2000][by],
+                    // The hold is **derived from the travel drawn, not drawn itself**, and both
+                    // halves of that are measured decisions rather than taste.
+                    //
+                    // Derived, because an extra draw here shifts every random value in the run
+                    // after it: the first attempt at one duly emptied an unrelated coverage
+                    // number (junction presses that fall short of egui's drag threshold went from
+                    // some to none across every seed).
+                    //
+                    // From the travel, because a mode is only *visible* at the right distance.
+                    // The two extremes go to the chain, which reaches past its neighbour only
+                    // once that neighbour has run out of room; the middling ones to proportional,
+                    // which moves the far side from the first point but gives nothing at all when
+                    // every child is already at its minimum — a `-2000` px Ctrl drag was drawn,
+                    // ran, and moved no boundary but its own for exactly that reason; and the
+                    // shortest to the pair, whose whole claim is that it moves nobody else.
+                    hold: [
+                        SepHold::Plain,
+                        SepHold::Spread,
+                        SepHold::Pair,
+                        SepHold::Pair,
+                        SepHold::Spread,
+                        SepHold::Plain,
+                    ][by],
+                }
+            }
             12 => Step::GrabSeparator { node: rng.below(6) },
             13 => Step::CentreSeparator { node: rng.below(6) },
             // The cross-split toggle. Drawn as often as the separator drags because a cross is
@@ -4181,6 +4402,13 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
             // The plain click, drawn on its own rather than folded into the hold: a click is a
             // press and a release inside egui's click window, and a hold's release is a step
             // away.
+            // The row of three. Two draws, the same idiom and the same reason as `BuildCross`
+            // above: the scene it builds is one independent draws produce about once per sweep,
+            // and three separate gates are vacuous without it.
+            39..=40 => Step::BuildRow {
+                leaf: rng.below(8),
+                horizontal: rng.below(2) == 0,
+            },
             _ => Step::ClickJunction {
                 junction: rng.below(6),
             },
@@ -5764,7 +5992,16 @@ const SEEDS: u64 = 96;
 /// the scheduling that brings a fold back and the burst that folds a row whole, all take their
 /// share of a scenario of fixed length. Measured across the sweep, the 25 % more steps put every
 /// counter back roughly where it was and cost about a second and a half of wall time.
-const STEPS: usize = 30;
+///
+/// Raised again from 30 when a separator drag grew a *mode* (stage 5 of
+/// `docs/PLAN_a_drag_chooses_who_pays_for_it.md`). The two new coverage numbers — a chain that
+/// reached past the neighbour that ran out, a proportional drag that moved the far side — need a
+/// row of three, a divider of it under the pointer, and room for a child to give: at 30 steps the
+/// whole sweep managed six drags on a long row and neither outcome once. At 40 it is 11 drags,
+/// one and two. **Lengthening rather than adding seeds is what keeps this honest**: every seed
+/// draws the same first 30 steps it always did, so a counter that moves is coverage gained and
+/// not a stream reshuffled into a different sweep.
+const STEPS: usize = 40;
 
 /// The sweep: every seed must leave the dock well-formed at every step.
 ///
@@ -5805,6 +6042,9 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         separator.grabs += outcome.separator.grabs;
         separator.quiet_grabs += outcome.separator.quiet_grabs;
         separator.centrings += outcome.separator.centrings;
+        separator.on_a_long_row += outcome.separator.on_a_long_row;
+        separator.pushed_on += outcome.separator.pushed_on;
+        separator.spread += outcome.separator.spread;
         cross.offered += outcome.cross.offered;
         cross.flipped += outcome.cross.flipped;
         cross.in_a_long_band += outcome.cross.in_a_long_band;
@@ -6099,6 +6339,24 @@ fn seeded_scenarios_keep_the_dock_well_formed() {
         separator.centrings > 0,
         "no double-click ever re-centred an off-centre separator — either the sweep never \
          offset one, or the gesture stopped working"
+    );
+    // The two modes that exist because a drag can reach further than its own neighbours. Judged
+    // as outcomes and not as steps: on a row of two all three holds are the same arithmetic, so
+    // "a plain drag ran" and "a Ctrl drag ran" would both be satisfied by a sweep that never
+    // built a row of three — which is exactly the sweep this crate had until stage 7 of the n-ary
+    // plan, and exactly the vacuum these numbers exist to report.
+    assert!(
+        separator.pushed_on > 0,
+        "{} separator drags and not one plain drag ever moved a boundary it had not grabbed — \
+         the chain never reached past the neighbour that ran out, so the mode a plain drag now \
+         means went untested across {SEEDS} seeds",
+        separator.drags
+    );
+    assert!(
+        separator.spread > 0,
+        "{} separator drags and not one Ctrl drag ever moved a boundary it had not grabbed — \
+         the proportional mode was asked for and never once spread, so nothing here judges it",
+        separator.drags
     );
 
     // The hold, and the reason the whole vocabulary grew: every one of these was *unreachable*

@@ -22,7 +22,7 @@ pub use state::{DragInFlight, DragSubject, JunctionArms, WindowEdge};
 use tab_removal::TabRemoval;
 
 use crate::layout::DockLayout;
-use crate::{GapPath, NodePath, Style, SurfaceIndex, TabIndex, TabPath, core::DockState};
+use crate::{GapPath, NodePath, Share, Style, SurfaceIndex, TabIndex, TabPath, core::DockState};
 
 /// Displays a [`DockState`] in `egui`.
 pub struct DockArea<'tree, Tab> {
@@ -166,6 +166,27 @@ pub(in crate::widgets::dock_area) enum DockMutation {
     SetBoundary {
         gap: GapPath,
         at: f32,
+    },
+    /// Every weight of one row at once — see
+    /// [`RowNode::set_shares`](crate::RowNode::set_shares).
+    ///
+    /// The post-image of a drag that moves more than one boundary: a
+    /// [`Chain`](crate::SepBehavior::Chain) that pushed past the neighbour that ran out, or a
+    /// [`Proportional`](crate::SepBehavior::Proportional) one, which moves every boundary of the
+    /// row from the first point. Neither has a single boundary to name, which is what
+    /// [`SetBoundary`](Self::SetBoundary) carries — so this is a second variant and not a wider
+    /// field on that one: a pair drag still writes the two weights `set_boundary` writes, to the
+    /// bit, and the parity of every earlier stage rests on that.
+    ///
+    /// Free of the one-frame shift for exactly the reason `SetBoundary` is: the weights are read
+    /// in the layout pass that has already happened by the time a drag is heard.
+    ///
+    /// Carries the weights rather than a delta and a mode, for the reason every request here
+    /// carries a value: two of them in one frame must not compound, and the clamp stays where it
+    /// was computed.
+    SetShares {
+        row: NodePath,
+        shares: Vec<Share>,
     },
     /// Minimize or restore a floating window. Carries the target value, like
     /// [`SetLeafCollapsed`](Self::SetLeafCollapsed) and for the same reason.

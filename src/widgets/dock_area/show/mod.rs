@@ -14,6 +14,7 @@ use super::{
     state::{DragSubject, State},
     tab_removal::TabRemoval,
 };
+use crate::core::resize::SepBehavior;
 use crate::dock_area::tab_removal::ForcedRemoval;
 use crate::layout::{DockLayout, SideStrip};
 use crate::tab_viewer::OnCloseResponse;
@@ -26,6 +27,7 @@ use crate::{GapIndex, GapPath, NodePath, RowGap};
 mod junction;
 mod leaf;
 mod main_surface;
+mod modifiers;
 mod window_surface;
 
 impl<Tab> DockArea<'_, Tab> {
@@ -276,6 +278,7 @@ impl<Tab> DockArea<'_, Tab> {
             | DockMutation::SetSplitStowed { .. }
             | DockMutation::SetLeafScroll { .. }
             | DockMutation::SetBoundary { .. }
+            | DockMutation::SetShares { .. }
             | DockMutation::SetWindowMinimized { .. }
             | DockMutation::WindowShown { .. }
             | DockMutation::TransposeCross { .. }
@@ -379,6 +382,17 @@ impl<Tab> DockArea<'_, Tab> {
                     // No event either: the gesture that asked already said what it was —
                     // `SeparatorDragging` while the hand moves, `LayoutCommitted` on release or
                     // on the double-click reset.
+                }
+                DockMutation::SetShares { row, ref shares } => {
+                    // Cloned rather than moved: the request list is borrowed for the whole loop
+                    // (a `TransposeCross` further down reads its own `bounds` the same way), and
+                    // a row's worth of weights is a handful of floats.
+                    self.dock_state[row.surface][row.node]
+                        .get_row_mut()
+                        .expect("weights are only requested for a row")
+                        .set_shares(shares.clone());
+                    // No event, for the same reason `SetBoundary` pushes none: the gesture that
+                    // asked has already said what it was.
                 }
                 DockMutation::SetWindowMinimized { surface, minimized } => {
                     // Pushes `LayoutCommitted` itself, as it did when it ran during the click.
@@ -1375,7 +1389,16 @@ impl<Tab> DockArea<'_, Tab> {
                 // handles, which move two or three of these at once.
                 let is_arrow = arrow_key_offset.is_some();
                 let delta = arrow_key_offset.unwrap_or(response.drag_delta()).dim_point;
-                if self.nudge_boundary(gap, pixels_per_point, separator_style.extra, delta) {
+                // What the hand is holding says who pays for this drag — the divider row of
+                // `docs/MODIFIERS.md`. A keyboard nudge is `Pair` whatever is held, and not by
+                // taste: taking focus at all costs a modifier (`should_respond_to_arrow_keys`
+                // above), so Ctrl+arrow has already spent its Ctrl on steering this divider.
+                let behavior = if is_arrow {
+                    SepBehavior::Pair
+                } else {
+                    SepBehavior::from_modifiers(ui.input(|i| i.modifiers))
+                };
+                if self.drag_boundary(gap, pixels_per_point, separator_style.extra, delta, &behavior) {
                     if is_arrow {
                         self.events.push(DockEvent::LayoutCommitted);
                     } else {
@@ -1405,9 +1428,19 @@ impl<Tab> DockArea<'_, Tab> {
                     self.events.push(DockEvent::LayoutCommitted);
                 }
 
-                if response.double_clicked() && self.boundary_at(gap) != 0.5 {
-                    self.mutations.push(DockMutation::SetBoundary { gap, at: 0.5 });
-                    self.events.push(DockEvent::LayoutCommitted);
+                // The middle of the room *this divider* has, which is `0.5` on a pair and is not
+                // on anything longer. Written as `0.5` flat until stage 4 of
+                // `docs/PLAN_a_drag_chooses_who_pays_for_it.md`, where the sweep — once it could
+                // build a row of three — caught a double-click writing a boundary clean past its
+                // neighbour: the divider between the second and third panels was sent to the
+                // middle of the whole row, which is behind the first one.
+                if response.double_clicked() {
+                    let centre = self.gap_centre(gap);
+                    if self.boundary_at(gap) != centre {
+                        self.mutations
+                            .push(DockMutation::SetBoundary { gap, at: centre });
+                        self.events.push(DockEvent::LayoutCommitted);
+                    }
                 }
             }
         }
@@ -1428,6 +1461,23 @@ impl<Tab> DockArea<'_, Tab> {
             .boundary(gap.gap)
     }
 
+    /// Half way between the boundaries either side of `gap` — where a double-click puts it.
+    ///
+    /// `0.5` for a pair, whose divider has the whole row to itself, and the midpoint of its own
+    /// room for anything longer. See [`RowNode::neighbour_boundaries`].
+    ///
+    /// # Panics
+    ///
+    /// If `gap` does not name a gap of a row.
+    #[track_caller]
+    fn gap_centre(&self, gap: GapPath) -> f32 {
+        let (lo, hi) = self.dock_state[gap.row]
+            .get_row()
+            .expect("only a row has a boundary")
+            .neighbour_boundaries(gap.gap);
+        0.5 * (lo + hi)
+    }
+
     /// The interval the row of `gap` is cut from this frame, and the band the boundary in that
     /// gap may be moved in — `None` wherever a gesture cannot move it at all.
     ///
@@ -1442,15 +1492,22 @@ impl<Tab> DockArea<'_, Tab> {
     ///
     /// The band is the *row's* whole interval less the margins, which is right for a pair and
     /// is stage 7's to narrow to the two neighbouring boundaries once a row can hold more.
-    fn boundary_gesture(
-        &self,
-        gap: GapPath,
-        pixels_per_point: f32,
-        extra: f32,
-    ) -> Option<(f32, SeparatorBand)> {
+    /// How long the row of `gap` is along its own axis this frame, or `None` if a gesture cannot
+    /// address it at all.
+    ///
+    /// The `None` cases are the guards every write has to pass, stated once: a node with no
+    /// rectangle, no row, or no such gap has no boundary — a gesture can outlive the shape it
+    /// grabbed — and a range of zero makes `delta / range` not finite.
+    ///
+    /// This is also the number a drag converts points into weight with (`RowNode::shares_after_drag`
+    /// takes it as the row's extent), and deliberately the *whole* row rather than the part its
+    /// weighted children divide: [`SeparatorBand`] already measures its margins as `extra / range`
+    /// of the same interval, so the two agree by construction. Measuring one of them against the
+    /// children's own total would make a minimum mean two slightly different lengths depending on
+    /// which of the two clamps a drag ended up in.
+    fn row_extent(&self, gap: GapPath, pixels_per_point: f32) -> Option<f32> {
         let node = &self.dock_state[gap.row];
         let row = node.get_row()?;
-        // A gap the row no longer has — a gesture can outlive the shape it grabbed.
         row.has_gap(gap.gap).then_some(())?;
         let rect = split_rect(self.layout.rect(gap.row)?, pixels_per_point);
         let range = if node.is_horizontal() {
@@ -1458,26 +1515,85 @@ impl<Tab> DockArea<'_, Tab> {
         } else {
             rect.height()
         };
+        // Negated on purpose, and clippy's rewrite is not equivalent — see `SeparatorBand::new`.
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        if !(range > 0.0) {
+            return None;
+        }
+        Some(range)
+    }
+
+    fn boundary_gesture(
+        &self,
+        gap: GapPath,
+        pixels_per_point: f32,
+        extra: f32,
+    ) -> Option<(f32, SeparatorBand)> {
+        let range = self.row_extent(gap, pixels_per_point)?;
+        let row = self.dock_state[gap.row].get_row()?;
         // The neighbouring boundaries, or the row's own ends where there is no neighbour: a
         // gesture may move this line up to them and no further, because the room on either side
         // of it is the two children's and writing past a neighbour takes a child's room away
         // through zero. On a pair both are the ends, which is the band this always was.
-        let lo = gap
-            .gap
-            .0
-            .checked_sub(1)
-            .map_or(0.0, |before| row.boundary(GapIndex(before)));
-        let hi = row
-            .has_gap(GapIndex(gap.gap.0 + 1))
-            .then(|| row.boundary(GapIndex(gap.gap.0 + 1)))
-            .unwrap_or(1.0);
+        let (lo, hi) = row.neighbour_boundaries(gap.gap);
         let band = SeparatorBand::between(row.boundary(gap.gap), lo, hi, range, extra);
-        // Negated on purpose, and clippy's rewrite is not equivalent — see `SeparatorBand::new`.
-        #[allow(clippy::neg_cmp_op_on_partial_ord)]
-        if !(range > 0.0) || band.min >= band.max {
+        // `band.min < band.max` because on a node too short to leave the margin on both sides the
+        // band is the single point `0.5`, so the clamp answers `0.5` whatever the delta was —
+        // writing that "answer" replaces the stored ratio with dead centre, which is the loss
+        // `SeparatorBand` exists to prevent. Found by the frame sweep, on a divider a tab drag
+        // grabbed by accident: 0.75 became 0.5 during a step that never named it.
+        if band.min >= band.max {
             return None;
         }
         Some((range, band))
+    }
+
+    /// Moves the boundary in `gap` by `delta` points under `behavior` — the whole of what a
+    /// divider drag does, whichever key the hand is holding. Answers whether anything changed.
+    ///
+    /// Two paths, and the split is a decision rather than a shortcut:
+    ///
+    /// * [`Pair`](SepBehavior::Pair) goes through [`nudge_boundary`](Self::nudge_boundary), which
+    ///   writes one boundary through `RowNode::set_boundary`. A pair drag therefore writes the
+    ///   same bits it wrote before this feature existed, which is what every earlier stage's
+    ///   parity rests on, and it is also what the junction handles and the arrow keys ask for.
+    /// * the other modes rewrite the *whole* weight vector, because neither has a single boundary
+    ///   to name: a chain travels past the neighbour that ran out, a proportional drag moves
+    ///   every boundary of the row at once. Their clamp is `min_size` inside
+    ///   [`RowNode::shares_after_drag`](crate::RowNode::shares_after_drag) — travelling past a
+    ///   neighbour is the *point* of them, so `SeparatorBand`'s neighbour-to-neighbour band would
+    ///   be clamping away the feature.
+    fn drag_boundary(
+        &mut self,
+        gap: GapPath,
+        pixels_per_point: f32,
+        extra: f32,
+        delta: f32,
+        behavior: &SepBehavior,
+    ) -> bool {
+        if let SepBehavior::Pair = behavior {
+            return self.nudge_boundary(gap, pixels_per_point, extra, delta);
+        }
+        if delta == 0.0 {
+            return false;
+        }
+        let Some(range) = self.row_extent(gap, pixels_per_point) else {
+            return false;
+        };
+        let row = self.dock_state[gap.row]
+            .get_row()
+            .expect("`row_extent` answered, so this node is a row");
+        let shares = row.shares_after_drag(gap.gap, delta, behavior, range, extra);
+        // A drag that asked a row with nothing left to give changes no weight, and reporting it as
+        // a write would put a commit event behind a layout that did not move.
+        if shares == row.shares() {
+            return false;
+        }
+        self.mutations.push(DockMutation::SetShares {
+            row: gap.row,
+            shares,
+        });
+        true
     }
 
     /// Moves the boundary in `gap` by `delta` points along its row's own axis. Answers whether
@@ -1945,9 +2061,22 @@ impl SeparatorBand {
         // on a 175 px node drove `fraction` to 0.0.
         //
         // `room` is the whole row for a pair, so this is the same arithmetic it always was.
+        //
+        // The capped case is written as *one* point rather than as two ends that happen to meet,
+        // and that is not tidiness: `lo + room/2` and `hi - room/2` are the same number in
+        // arithmetic and need not be in `f32`. The sweep found them 3e-8 apart the wrong way
+        // round (`min = 0.26666668`, `max = 0.26666665`) on a squeezed window, and
+        // `f32::clamp` **panics** when its min exceeds its max — so the crate went down inside a
+        // junction drag, on a row whose two neighbours had been squeezed to the margin.
         let room = (hi - lo).max(0.0);
-        let min = lo + (extra / range).min(room * 0.5);
-        let max = hi - (extra / range).min(room * 0.5);
+        let margin = extra / range;
+        let half = room * 0.5;
+        let (min, max) = if margin >= half {
+            let centre = lo + half;
+            (centre, centre)
+        } else {
+            (lo + margin, hi - margin)
+        };
         Self {
             min,
             max,
@@ -2692,5 +2821,33 @@ mod tests {
             "the least-bad answer with no room to give is an equal split, got {}",
             band.effective
         );
+    }
+
+    /// **A band squeezed between two neighbours collapses to a point, and never past it.**
+    ///
+    /// `lo + room/2` and `hi - room/2` are one number in arithmetic and two in `f32`, and the
+    /// order they come out in is not fixed: the sweep found them 3e-8 apart the wrong way round
+    /// on a squeezed window, which made `f32::clamp` panic (`min > max`) inside a junction drag —
+    /// the crate going down, not a boundary going astray. Fixed by writing the capped case as one
+    /// point instead of two ends that ought to meet, and pinned here over a spread of positions
+    /// and rooms rather than at the one triple that happened to fail.
+    #[test]
+    fn a_band_with_no_room_between_its_neighbours_is_a_single_point() {
+        for lo in [0.0, 0.1, 0.26666668, 1.0 / 3.0, 0.7] {
+            for room in [0.0, 1e-6, 0.05, 0.2] {
+                let hi = lo + room;
+                // A margin far larger than half the room, which is the regime the cap is for.
+                let band = SeparatorBand::between(0.5 * (lo + hi), lo, hi, 100.0, 175.0);
+                assert!(
+                    band.min <= band.max,
+                    "lo {lo}, room {room}: band came out inverted ({}, {})",
+                    band.min,
+                    band.max
+                );
+                assert_eq!(band.min, band.max, "lo {lo}, room {room}: not a point");
+                // The clamp the callers run, which is what panicked.
+                let _ = 0.42_f32.clamp(band.min, band.max);
+            }
+        }
     }
 }

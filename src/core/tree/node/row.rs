@@ -436,6 +436,39 @@ impl RowNode {
         self.shares[gap.0 + 1] = Share(after - cut);
     }
 
+    /// The boundaries either side of `gap` — the room this divider has to move in.
+    ///
+    /// The row's own ends (`0.0` / `1.0`) where there is no neighbour, so a pair answers
+    /// `(0.0, 1.0)`: the interval a two-child row's only divider has always had, which is why
+    /// every caller of this reads the same numbers it used to compute inline.
+    ///
+    /// One place rather than two, because it was two: the drag's clamp worked it out for itself
+    /// and the double-click did not work it out at all — it centred every divider on `0.5`, which
+    /// is the middle of the row and only *coincidentally* the middle of a pair's divider. On a
+    /// row of three that wrote a boundary past its neighbour.
+    ///
+    /// # Panics
+    ///
+    /// If `gap` is not one of this row's gaps — see [`boundary`](Self::boundary).
+    #[track_caller]
+    pub fn neighbour_boundaries(&self, gap: GapIndex) -> (f32, f32) {
+        assert!(
+            self.has_gap(gap),
+            "the neighbours of boundary {} were asked of a row with {} gaps",
+            gap.0,
+            self.gap_count()
+        );
+        let lo = gap
+            .0
+            .checked_sub(1)
+            .map_or(0.0, |before| self.boundary(GapIndex(before)));
+        let hi = self
+            .has_gap(GapIndex(gap.0 + 1))
+            .then(|| self.boundary(GapIndex(gap.0 + 1)))
+            .unwrap_or(1.0);
+        (lo, hi)
+    }
+
     /// What this row's weights become when boundary `gap` is dragged by `delta` **points** under
     /// `behavior` — the *whole* vector, not just the two beside the gap.
     ///

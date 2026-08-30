@@ -215,7 +215,7 @@ impl Sim {
         self.state.main_surface()[node]
             .get_row()
             .expect("the node is a split")
-            .fraction
+            .fraction()
     }
 
     /// Where the divider sits while both halves are open: the seam between the two rectangles.

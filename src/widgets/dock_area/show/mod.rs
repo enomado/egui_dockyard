@@ -371,7 +371,7 @@ impl<Tab> DockArea<'_, Tab> {
                     self.dock_state[path.surface][path.node]
                         .get_row_mut()
                         .expect("a fraction is only requested for a split")
-                        .fraction = fraction;
+                        .set_fraction(fraction);
                     // No event either: the gesture that asked already said what it was —
                     // `SeparatorDragging` while the hand moves, `LayoutCommitted` on release or
                     // on the double-click reset.
@@ -995,7 +995,7 @@ impl<Tab> DockArea<'_, Tab> {
             if let Node::Row(split) = &self.dock_state[path.surface][path.node]
                 && split.is_orientation()
             {
-                let fraction = split.fraction;
+                let fraction = split.fraction();
                 let rect = split_rect(parent_rect, pixels_per_point);
 
                 // The children are cut at where the boundary *is*, which is the stored ratio
@@ -1255,7 +1255,7 @@ impl<Tab> DockArea<'_, Tab> {
         self.dock_state[path]
             .get_row()
             .expect("only a split has a fraction")
-            .fraction
+            .fraction()
     }
 
     /// The interval the split at `path` is cut from this frame, and the band its boundary may
@@ -1283,7 +1283,7 @@ impl<Tab> DockArea<'_, Tab> {
         } else {
             rect.height()
         };
-        let band = SeparatorBand::new(split.fraction, range, extra);
+        let band = SeparatorBand::new(split.fraction(), range, extra);
         // Negated on purpose, and clippy's rewrite is not equivalent — see `SeparatorBand::new`.
         #[allow(clippy::neg_cmp_op_on_partial_ord)]
         if !(range > 0.0) || band.min >= band.max {
@@ -1456,9 +1456,9 @@ fn split_rect(node_rect: Rect, pixels_per_point: f32) -> Rect {
 /// * [`DockState::split`] and friends, where the number comes from the caller.
 ///
 /// Nothing derived from geometry escapes unasked today. What keeps that true is not this list —
-/// lists go stale — but [`TreeViolation::SplitFractionOutOfRange`](crate::TreeViolation), which
-/// catches the arithmetic that answers outside the interval it was measuring, wherever it is
-/// written from.
+/// lists go stale — but [`TreeViolation::RowShareNegative`](crate::TreeViolation), which catches
+/// the arithmetic that answers outside the row it was measuring, wherever it is written from: a
+/// boundary written past either end of a row leaves a negative weight on the child that lost.
 /// Everything the layout pass decided about one split, in one value.
 ///
 /// The type exists to make a branch unable to stay silent. Cutting a split answers three

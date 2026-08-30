@@ -1698,7 +1698,7 @@ impl Sim {
                     .find(|point| !self.handle_over(*point))
                     // All three covered: leave the middle, and let the steps refuse it.
                     .unwrap_or_else(|| along(0.5));
-                Some((path, at, split.fraction))
+                Some((path, at, split.fraction()))
             })
             .collect()
     }
@@ -1737,7 +1737,7 @@ impl Sim {
             self.state[chain_path]
                 .get_row_mut()
                 .expect("a chain node is a split")
-                .fraction = fraction;
+                .set_fraction(fraction);
         }
         self.run_frame(vec![]);
     }
@@ -3652,7 +3652,7 @@ impl Sim {
     fn boundaries(&self) -> Boundaries {
         self.state
             .iter_all_nodes()
-            .filter_map(|(path, node)| node.get_row().map(|split| (path, split.fraction)))
+            .filter_map(|(path, node)| node.get_row().map(|split| (path, split.fraction())))
             .collect()
     }
 
@@ -3690,7 +3690,7 @@ impl Sim {
             .node(path)
             .ok()
             .and_then(|node| node.get_row())
-            .map(|split| split.fraction)
+            .map(|split| split.fraction())
     }
 
     /// Whether a floating window other than `owner` sits over `point`.
@@ -4542,7 +4542,7 @@ fn commit_complaint(effect: &Effect, commits: Commits) -> Option<String> {
 fn fraction_complaint(sim: &Sim) -> Option<String> {
     sim.state
         .iter_all_nodes()
-        .filter_map(|(path, node)| node.get_row().map(|split| (path, split.fraction)))
+        .filter_map(|(path, node)| node.get_row().map(|split| (path, split.fraction())))
         .find(|(_, fraction)| !(fraction.is_finite() && *fraction > 0.0 && *fraction < 1.0))
         .map(|(path, fraction)| {
             format!(

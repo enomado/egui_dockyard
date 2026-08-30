@@ -137,7 +137,7 @@ pub fn dock_shape<Tab>(state: &DockState<Tab>, tab_label: impl Fn(&Tab) -> Strin
                         } else {
                             "horizontal"
                         },
-                        row.fraction,
+                        row.fraction(),
                         row.fully_collapsed,
                         // A `Vec` where this used to hand `[Option<usize>; 2]` to `{:?}`: both
                         // print `[Some(1), Some(2)]`, so the dump is unchanged while the count
@@ -234,7 +234,7 @@ mod tests {
         let mut moved = state.clone();
         let split_id = moved.main_surface().root().unwrap();
         match &mut moved.main_surface_mut()[split_id] {
-            Node::Row(row) => row.fraction = 0.25,
+            Node::Row(row) => row.set_fraction(0.25),
             Node::Leaf(_) => unreachable!("the scene's root is a row by construction"),
         }
         assert_ne!(

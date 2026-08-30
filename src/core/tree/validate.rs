@@ -148,30 +148,48 @@ pub enum TreeViolation {
         node: NodeId,
     },
 
-    /// A split's `fraction` is `NaN` or infinite.
+    /// One of a row's [`Share`](crate::Share)s is `NaN` or infinite.
     ///
-    /// This is how a division by a zero-extent rectangle arrives: the layout pass multiplies the
-    /// fraction by an extent, so a `NaN` here is a `NaN` rectangle, and a `NaN` rectangle fails
-    /// every comparison it is put through — including the ones that decide which branch the
-    /// renderer takes. The crate has been bitten by exactly this once.
-    SplitFractionNotFinite {
-        /// The split node. Its `fraction` is readable through [`Node::get_split`].
+    /// This is how a division by a zero-extent rectangle arrives: the layout pass hands each
+    /// child its weight's part of an extent, so a `NaN` here is a `NaN` rectangle, and a `NaN`
+    /// rectangle fails every comparison it is put through — including the ones that decide which
+    /// branch the renderer takes. The crate has been bitten by exactly this once.
+    RowShareNotFinite {
+        /// The row. Its weights are readable through [`RowNode::shares`](crate::RowNode::shares).
         node: NodeId,
     },
 
-    /// A split's `fraction` is outside `0.0..=1.0`, so it is not a fraction of anything.
+    /// One of a row's [`Share`](crate::Share)s is negative, so it is not a length anything can be
+    /// given.
     ///
-    /// Nothing in the crate can produce one: the only two writers are a drag, which clamps to
-    /// what the geometry can honour, and a double-click, which writes `0.5`. It arrives from
-    /// outside — a hand-built tree, a loaded layout, or an arithmetic slip in code that derives
-    /// a fraction from measured pixels and does not ask whether the interval it measured can
-    /// hold the answer.
+    /// The **local** spelling of what used to be a global rule. While a row was a pair holding
+    /// one `fraction`, "not a fraction of anything" meant "outside `0.0..=1.0`" — a statement
+    /// about the interval, which every writer had to keep in mind. Weights make it a statement
+    /// about one number: writing a boundary outside the row puts a negative weight on the child
+    /// that lost, and this catches it in exactly the cases the range check used to.
+    ///
+    /// Nothing in the crate can produce one: the writers are a drag, which clamps to what the
+    /// geometry can honour, and a double-click, which writes `0.5`. It arrives from outside — a
+    /// hand-built tree, a loaded layout, or an arithmetic slip in code that derives a boundary
+    /// from measured pixels and does not ask whether the interval it measured can hold the
+    /// answer.
     ///
     /// It does not crash: the renderer clamps at draw time. That is the reason to report it —
     /// the layout the tree describes and the layout on screen have quietly stopped being the
     /// same thing, and every later edit is made against the wrong one.
-    SplitFractionOutOfRange {
-        /// The split node. Its `fraction` is readable through [`Node::get_split`].
+    RowShareNegative {
+        /// The row. Its weights are readable through [`RowNode::shares`](crate::RowNode::shares).
+        node: NodeId,
+    },
+
+    /// Every one of a row's [`Share`](crate::Share)s is zero, so there is nothing to divide by.
+    ///
+    /// Not implied by the two above — a row of `[0, 0]` is finite and not negative — and it is
+    /// the one shape that makes [`RowNode::fraction`](crate::RowNode::fraction) and the layout's
+    /// own division answer `NaN`. A single zero weight is legal and means a child with no length,
+    /// which is what a `fraction` of exactly `0.0` has always meant here.
+    RowSharesAllZero {
+        /// The row. Its weights are readable through [`RowNode::shares`](crate::RowNode::shares).
         node: NodeId,
     },
 }
@@ -290,15 +308,21 @@ impl<Tab> Tree<Tab> {
                             violations.push(TreeViolation::ChildLinkBroken { node: id, child });
                         }
                     }
-                    // The two faults are reported apart because they arrive from different
-                    // places: a non-finite fraction is a division that should not have been
-                    // done, an out-of-range one is arithmetic that answered outside the interval
-                    // it was measuring. Only the first is checked first — `NaN` fails every
-                    // comparison, so the range test would let it through.
-                    if !row.fraction.is_finite() {
-                        violations.push(TreeViolation::SplitFractionNotFinite { node: id });
-                    } else if !(0.0..=1.0).contains(&row.fraction) {
-                        violations.push(TreeViolation::SplitFractionOutOfRange { node: id });
+                    // The faults are reported apart because they arrive from different places: a
+                    // non-finite weight is a division that should not have been done, a negative
+                    // one is arithmetic that answered outside the row it was measuring, and an
+                    // all-zero row is a division nobody can do. Finiteness is checked first —
+                    // `NaN` fails every comparison, so the sign test would let it through, and
+                    // summing `NaN`s would make the third test answer about the wrong fault.
+                    //
+                    // One report per row, not per weight: a row whose weights are all `NaN` is
+                    // one thing wrong, and the node is what a reader has to go and look at.
+                    if row.shares().iter().any(|share| !share.0.is_finite()) {
+                        violations.push(TreeViolation::RowShareNotFinite { node: id });
+                    } else if row.shares().iter().any(|share| share.0 < 0.0) {
+                        violations.push(TreeViolation::RowShareNegative { node: id });
+                    } else if row.total_share() <= 0.0 {
+                        violations.push(TreeViolation::RowSharesAllZero { node: id });
                     }
                 }
 
@@ -409,7 +433,7 @@ impl<Tab> crate::core::DockState<Tab> {
 #[cfg(test)]
 mod tests {
     use super::{DockViolation, HistoryProblem, TreeViolation};
-    use crate::core::tree::{Node, NodePath, Split, TabIndex, Tree};
+    use crate::core::tree::{Node, NodePath, RowNode, Share, Split, TabIndex, Tree};
     use crate::core::{DockState, SurfaceIndex};
 
     /// The oracle must accept trees built through the public API — otherwise every later test
@@ -438,55 +462,85 @@ mod tests {
     /// Note what it takes to corrupt an arena tree: the public API cannot produce any of
     /// these states, so each test reaches into the private links directly. That is the
     /// point — the states that used to be reachable by ordinary use are gone.
-    /// A fraction is a fraction: finite, and between the two ends of the interval it names.
+    /// A weight is a length a child may be given: finite and not negative, and a row's weights
+    /// have to add up to something one can divide by.
     ///
-    /// Neither fault crashes anything — the layout pass clamps at draw time — which is exactly
-    /// why they need an oracle. Once one is stored, the tree and the screen describe different
-    /// layouts, and every later edit is made against the wrong one. The `NaN` case has been real
-    /// once (a division by a zero-extent rectangle) and the out-of-range case has been real
-    /// once too, from test scaffolding that computed a fraction against one rectangle and wrote
-    /// it into a node that had since been given a shorter one.
+    /// None of the three faults crashes anything — the layout pass clamps at draw time — which
+    /// is exactly why they need an oracle. Once one is stored, the tree and the screen describe
+    /// different layouts, and every later edit is made against the wrong one. The `NaN` case has
+    /// been real once (a division by a zero-extent rectangle) and the negative case has been
+    /// real once too, as a fraction outside `0..=1`: test scaffolding computed it against one
+    /// rectangle and wrote it into a node that had since been given a shorter one.
     ///
-    /// The two are checked in that order in `validate`, and this pins the order: `NaN` fails
-    /// every comparison including `>` and `<`, so a range test asked first would pass it.
+    /// **A fraction outside `0..=1` is written here as the negative weight it becomes**, which
+    /// is the whole argument for weights in one line: the rule stopped being about the interval
+    /// a number is measured against and became about the number.
+    ///
+    /// The three are checked in that order in `validate`, and this pins it: `NaN` fails every
+    /// comparison including `<`, so a sign test asked first would pass it, and a sum of `NaN`s
+    /// would report the wrong fault.
     #[test]
-    fn oracle_bites_on_a_fraction_that_is_not_one() {
+    fn oracle_bites_on_a_weight_that_is_not_a_length() {
         let build = |fraction: f32| {
             let mut tree = Tree::new(vec![1, 2]);
             let root = tree.root().unwrap();
             tree.split_right(root, 0.5, vec![3]);
             let split = tree.root().unwrap();
-            tree[split].get_row_mut().unwrap().fraction = fraction;
+            tree[split].get_row_mut().unwrap().set_fraction(fraction);
             (tree.validate().unwrap_err(), split)
         };
 
         for bad in [1.003_f32, -0.2, 12.0] {
             let (violations, split) = build(bad);
             assert!(
-                violations.contains(&TreeViolation::SplitFractionOutOfRange { node: split }),
-                "a fraction of {bad} was accepted: {violations:?}"
+                violations.contains(&TreeViolation::RowShareNegative { node: split }),
+                "a boundary at {bad} was accepted: {violations:?}"
             );
         }
 
         for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             let (violations, split) = build(bad);
             assert!(
-                violations.contains(&TreeViolation::SplitFractionNotFinite { node: split }),
-                "a fraction of {bad} was accepted, or was reported as merely out of range: \
+                violations.contains(&TreeViolation::RowShareNotFinite { node: split }),
+                "a boundary at {bad} was accepted, or was reported as merely negative: \
                  {violations:?}"
             );
         }
 
-        // And the ends of the interval are fractions. A split at 0.0 gives one child no room,
-        // which the separator margin then takes back at draw time — a legitimate layout, saved
-        // and loaded like any other, and not the oracle's business.
+        // A row with nothing to divide by. Not reachable through `set_fraction`, which always
+        // writes weights summing to one, so it is built directly — and it is checked because
+        // the *type* admits it: the two rules above both pass on `[0, 0]`, and the layout's
+        // division by the sum does not.
+        {
+            let mut tree = Tree::new(vec![1, 2]);
+            let root = tree.root().unwrap();
+            let [left, right] = tree.split_right(root, 0.5, vec![3]);
+            let split = tree.root().unwrap();
+            let horizontal = tree[split].is_horizontal();
+            tree[split] = Node::Row(RowNode::new(
+                horizontal,
+                vec![left, right],
+                vec![Share(0.0), Share(0.0)],
+            ));
+            assert!(
+                tree.validate()
+                    .unwrap_err()
+                    .contains(&TreeViolation::RowSharesAllZero { node: split }),
+                "a row of weights that add up to nothing was accepted"
+            );
+        }
+
+        // And the ends of the interval are still boundaries. A split at 0.0 gives one child no
+        // room, which the separator margin then takes back at draw time — a legitimate layout,
+        // saved and loaded like any other, and not the oracle's business. A single zero weight
+        // is what that is now, and it stays legal: only *all* of them being zero is a fault.
         for fine in [0.0_f32, 1.0, 0.5] {
             let mut tree = Tree::new(vec![1, 2]);
             let root = tree.root().unwrap();
             tree.split_right(root, 0.5, vec![3]);
             let split = tree.root().unwrap();
-            tree[split].get_row_mut().unwrap().fraction = fine;
-            assert_eq!(tree.validate(), Ok(()), "a fraction of {fine} was rejected");
+            tree[split].get_row_mut().unwrap().set_fraction(fine);
+            assert_eq!(tree.validate(), Ok(()), "a boundary at {fine} was rejected");
         }
     }
 

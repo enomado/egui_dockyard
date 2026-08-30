@@ -78,7 +78,10 @@ impl Regroup {
         };
 
         let child_ids = [children[0].id(), children[1].id()];
-        tree[*id] = Node::Row(RowNode::new(*horizontal, child_ids, *fraction));
+        // A pair, and owed a row by stage 7: a regrouping builds a right-leaning ladder of
+        // splits where one row of `n` is what it means, and `Regroup::Split` is the vocabulary
+        // that says so.
+        tree[*id] = Node::Row(RowNode::pair(*horizontal, child_ids, *fraction));
 
         // The back-pointers, which assigning a `Node` cannot carry: a `Node` holds its
         // children's ids, but a child holds its parent's, and that half lives in the arena.

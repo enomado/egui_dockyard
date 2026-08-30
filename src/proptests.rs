@@ -90,7 +90,7 @@ fn split_fractions(state: &DockState<u32>) -> HashMap<NodePath, f32> {
         };
         for id in tree.breadth_first() {
             if let Some(split) = tree[id].get_row() {
-                fractions.insert(NodePath::new(surface_index, id), split.fraction);
+                fractions.insert(NodePath::new(surface_index, id), split.fraction());
             }
         }
     }

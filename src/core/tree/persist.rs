@@ -112,7 +112,11 @@ fn node_out<Tab>(tree: &Tree<Tab>, id: NodeId) -> NodeOut<'_, Tab> {
                 Box::new(node_out(tree, left)),
                 Box::new(node_out(tree, right)),
             ];
-            let fraction = row.fraction;
+            // The wire carries one number where the model now carries a weight per child; for a
+            // row of two they say the same thing, and the conversion is exact (see
+            // `RowNode::fraction`). A row of three has no such number, which is the other half
+            // of why the format is stage 7's.
+            let fraction = row.fraction();
             let fully_collapsed = row.fully_collapsed;
             let collapsed_leaf_count = row.collapsed_leaf_count;
             let stowed = row.stowed;
@@ -343,7 +347,9 @@ impl<Tab> Tree<Tab> {
         } else {
             0.5
         };
-        let id = self.adopt(Node::Row(RowNode::new(!vertical, children, fraction)));
+        // A pair, because the *file* is a pair — see `node_out`. Stage 7 changes the format, and
+        // this is where a chain of same-axis splits on disk will collapse into one row.
+        let id = self.adopt(Node::Row(RowNode::pair(!vertical, children, fraction)));
         for child in children {
             self.nodes.get_mut(child).unwrap().parent = Some(id);
         }
@@ -762,7 +768,7 @@ mod tests {
         let fractions: Vec<f32> = back
             .breadth_first()
             .into_iter()
-            .filter_map(|id| back[id].get_row().map(|split| split.fraction))
+            .filter_map(|id| back[id].get_row().map(|split| split.fraction()))
             .collect();
         assert_eq!(fractions, vec![0.25, 0.75]);
     }
@@ -947,7 +953,7 @@ mod tests {
         assert_eq!(tree.num_tabs(), 3);
 
         let root = tree.root().unwrap();
-        assert_eq!(tree[root].get_row().unwrap().fraction, 0.75);
+        assert_eq!(tree[root].get_row().unwrap().fraction(), 0.75);
         // The pair this very JSON literal describes — see the note in
         // `round_trip_keeps_a_subtree_stowed_and_its_insides_untouched`.
         let [left, right] = tree.children_pair(root).unwrap();
@@ -1041,7 +1047,9 @@ mod tests {
     }
 
     /// Found by replaying the `tree_persist` corpus: a file naming a split fraction of 5.5
-    /// loaded into a tree that failed its own oracle (`SplitFractionOutOfRange`).
+    /// loaded into a tree that failed its own oracle (`RowShareNegative` today, and
+    /// `SplitFractionOutOfRange` when it was found — the same fault seen from the other side:
+    /// `5.5` of a row leaves `-4.5` for the other child).
     ///
     /// Each of the three ways a stored fraction can fail to be one is repaired, and each is
     /// checked here — a clamp alone would let `NaN` through, because `NaN` fails the
@@ -1067,7 +1075,7 @@ mod tests {
             assert_eq!(tree.validate(), Ok(()), "stored fraction {stored}");
             let root = tree.root().unwrap();
             assert_eq!(
-                tree[root].get_row().unwrap().fraction,
+                tree[root].get_row().unwrap().fraction(),
                 expected,
                 "stored fraction {stored}"
             );
@@ -1084,7 +1092,7 @@ mod tests {
             let split = tree.adopt_split(false, [left, right], bad);
             tree.root = Some(split);
 
-            assert_eq!(tree[split].get_row().unwrap().fraction, 0.5, "{bad}");
+            assert_eq!(tree[split].get_row().unwrap().fraction(), 0.5, "{bad}");
             assert_eq!(tree.validate(), Ok(()), "{bad}");
         }
     }

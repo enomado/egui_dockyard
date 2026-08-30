@@ -421,7 +421,7 @@ mod test {
         let fraction = tree[outer]
             .get_row()
             .expect("`outer` stays a split")
-            .fraction;
+            .fraction();
         assert!(
             (fraction - 0.75).abs() < 1e-6,
             "the line was at 0.75 of the span, and the cut is there: {fraction}"

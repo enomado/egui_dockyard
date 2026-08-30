@@ -50,6 +50,7 @@ use std::{
 pub use node::LeafNode;
 pub use node::Node;
 pub use node::RowNode;
+pub use node::Share;
 pub use node::TabId;
 pub use node_id::{ChildIndex, NodeId, NodePath};
 pub use tab_index::{TabIndex, TabPath};
@@ -631,7 +632,10 @@ impl<Tab> Tree<Tab> {
         // linked. Inheriting it from `target` would be writing down a value that is about to
         // be overwritten anyway — and the wrong one, since the split now holds `new` too.
         let horizontal = matches!(split, Split::Left | Split::Right);
-        let split_node = Node::Row(RowNode::new(horizontal, children, fraction));
+        // A pair, and stage 7's to change: the row that will hold three is the one this method
+        // allocates, and going n-ary here means inserting into an existing row of the same
+        // orientation instead of wrapping a new one around the target.
+        let split_node = Node::Row(RowNode::pair(horizontal, children, fraction));
         let split_id = self.nodes.insert(NodeEntry {
             parent: grandparent,
             node: split_node,
@@ -872,11 +876,20 @@ impl<Tab> Tree<Tab> {
                     (Some(only), None) | (None, Some(only)) => return Some(only),
                     (None, None) => return None,
                     (Some(left), Some(right)) => {
-                        // Only `fraction` is carried across: it is a decision of the user's.
+                        // Only the weights are carried across: they are a decision of the user's.
                         // The collapsing counts describe the subtree that *was* here, and the
                         // sweep may have just dropped leaves out of it — `recompute_collapsed`
                         // in the caller settles them from the shape that actually got built.
-                        let node = RowNode::new(row.is_horizontal(), [left, right], row.fraction);
+                        //
+                        // Copied rather than re-derived through a fraction, so that a row whose
+                        // weights do not add up to one keeps the ones it has: the file may carry
+                        // any positive numbers, and a copy that renormalised them would be
+                        // inventing a layout nobody chose.
+                        let node = RowNode::new(
+                            row.is_horizontal(),
+                            vec![left, right],
+                            row.shares().to_vec(),
+                        );
                         let copied = target.nodes.insert(NodeEntry {
                             parent: None,
                             node: Node::Row(node),
@@ -1379,5 +1392,43 @@ mod test {
         let root = filtered.root().unwrap();
         assert_eq!(filtered[root].collapsed_leaf_count(), 1);
         assert_eq!(filtered.validate(), Ok(()));
+    }
+
+    /// **What a copying sweep may not throw away.** The counts above are *derived* and the sweep
+    /// is right to recompute them; the weights are not — they are where the user last left the
+    /// boundaries, and a copy that recentred them would silently rearrange a dock that was only
+    /// asked to drop a tab.
+    ///
+    /// `copy_filtered` has always said so in a comment beside the line, and nothing checked it:
+    /// a mutant writing `0.5` there passed the whole suite (293 tests) during stage 4's mutant
+    /// round. Found because the line changed — from carrying one `fraction` to carrying the
+    /// weights — and the class is one this crate keeps paying for: a property stated in prose
+    /// next to the code that implements it, with no oracle anywhere.
+    #[test]
+    fn a_copying_sweep_keeps_the_boundaries_the_user_left() {
+        let mut tree = Tree::new(vec![1, 2]);
+        let root = tree.root().unwrap();
+        let [left, _] = tree.split_right(root, 0.25, vec![3]);
+        tree.split_below(left, 0.8, vec![4]);
+
+        // Every tab survives, so the filtered tree is the same dock — and has to look like it.
+        let filtered = tree.filter_tabs(|_| true);
+
+        let boundaries = |tree: &Tree<i32>| {
+            tree.breadth_first()
+                .into_iter()
+                .filter_map(|id| tree[id].get_row().map(RowNode::fraction))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            boundaries(&filtered),
+            boundaries(&tree),
+            "the copy moved a boundary nobody asked it to move"
+        );
+        assert_eq!(
+            boundaries(&tree),
+            vec![0.25, 0.8],
+            "the scene has two of them"
+        );
     }
 }

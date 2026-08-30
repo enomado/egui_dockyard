@@ -3,7 +3,7 @@ use crate::core::tree::TabIndex;
 mod leaf;
 mod row;
 pub use leaf::{LeafNode, TabId};
-pub use row::RowNode;
+pub use row::{RowNode, Share};
 
 /// Represents an abstract node of a [`Tree`](crate::Tree).
 ///

@@ -1,12 +1,43 @@
 use crate::core::tree::{ChildIndex, NodeId};
 
-/// The inner data of a [`Node::Row`](crate::Node): the children laid out along one axis, and
-/// where the boundary between them sits.
+/// How much of a row's length one of its children asks for, **relative to its siblings**.
+///
+/// Positive (zero is allowed and means "no length at all"), finite, and deliberately **not
+/// normalised**: the row divides by the sum when it lays out, so `[Share(1.0), Share(1.0)]` and
+/// `[Share(0.5), Share(0.5)]` are the same picture. That is what keeps edits total — inserting a
+/// child is a `push`, removing one is a `remove`, and no other child's number changes. A
+/// normalised vector would have to be rewritten whole on every edit, which is a second place for
+/// rounding to accumulate.
+///
+/// # Why weights and not boundaries
+///
+/// A row could as well have stored where its boundaries sit (`0 ≤ b₀ ≤ b₁ ≤ … ≤ 1`). Weights win
+/// twice, and both reasons are about what the type makes *impossible*:
+///
+/// * the invariant is **local** — "this weight is finite and not negative", one number at a time.
+///   Boundaries carry a global one, monotonicity, which makes "a boundary overtook its
+///   neighbour" an expressible state that then has to be defended against at every writer;
+/// * a weight is where growth goes: a minimum size, a fixed-size child, a child that does not
+///   grow — the `flex-grow` shape every mature layout engine converges on. A boundary has
+///   nowhere to put any of that.
+///
+/// Pixel extents were rejected separately: they would put screen state back into the model,
+/// which is exactly what this crate spent a refactor taking out (`rect` / `viewport` off the
+/// nodes and into [`DockLayout`](crate::layout::DockLayout)).
+///
+/// A newtype from the first line rather than a bare `f32` to be tidied later, because a weight,
+/// a fraction of a parent, a pixel extent and a boundary in `0..1` are four different things in
+/// this crate and three of them are `f32`.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct Share(pub f32);
+
+/// The inner data of a [`Node::Row`](crate::Node): the children laid out along one axis, and how
+/// much of the row's length each of them takes.
 ///
 /// Carries no geometry: the rectangle a row occupies is derived by the layout pass
 /// every frame and lives in [`DockLayout`](crate::layout::DockLayout), keyed by
-/// `(surface, node)`. `fraction` — *where* the boundary sits inside whatever rectangle the row
-/// is given — is genuine state and stays here.
+/// `(surface, node)`. The [`shares`](Self::shares) — *how the row's length is divided*, whatever
+/// rectangle it is given — are genuine state and stay here.
 ///
 /// The children are named explicitly. Before the arena they were implied by position
 /// (`2i + 1` / `2i + 2`) and a split could perfectly well be missing one of them — that
@@ -38,11 +69,22 @@ pub struct RowNode {
     /// regrouping builds the row it wants (see [`Regroup`](crate::core::tree::regroup::Regroup)).
     horizontal: bool,
 
-    /// The children, first (left / top) then second (right / bottom).
-    children: [NodeId; 2],
+    /// The children, in order along the axis: leftmost / topmost first.
+    ///
+    /// A `Vec` although a row holds exactly two of them today — the type is n-ary and the
+    /// content is not, which is the whole of stage 4 in
+    /// `docs/PLAN_a_row_holds_many_panels.md`. Every reader that walks them was already written
+    /// against a slice (stage 2); what is left to change is the four places that *build* a row,
+    /// and they are stage 7's.
+    children: Vec<NodeId>,
 
-    /// The fraction taken by the first child of this node.
-    pub fraction: f32,
+    /// One weight per child, in [`children`](Self::children) order.
+    ///
+    /// Kept the same length as `children` by construction — the only writer of either is
+    /// [`new`](Self::new), which checks it, and [`set_fraction`](Self::set_fraction), which
+    /// replaces both weights of a pair at once. Nothing in the crate can grow one and not the
+    /// other yet; the operations that could are stage 7's, and they will take the two together.
+    shares: Vec<Share>,
 
     /// Whether all subnodes are collapsed.
     ///
@@ -86,15 +128,45 @@ impl RowNode {
     /// `horizontal` is the first argument because it is the one thing a caller cannot derive
     /// from the others: it used to be the choice of *variant* wrapped around this value, and
     /// a constructor that took it last would read as though it were a modifier.
-    pub(crate) const fn new(horizontal: bool, children: [NodeId; 2], fraction: f32) -> Self {
+    ///
+    /// # Panics
+    ///
+    /// If `children` and `shares` are of different lengths, or if the row would be empty. That
+    /// the two vectors agree is the one invariant of this type a *reader* cannot check for
+    /// itself, and the constructor is the only place in the crate where they are set — so it is
+    /// stated here rather than left to [`validate`](crate::Tree::validate), which would be
+    /// judging a state nothing can build.
+    pub(crate) fn new(horizontal: bool, children: Vec<NodeId>, shares: Vec<Share>) -> Self {
+        assert_eq!(
+            children.len(),
+            shares.len(),
+            "a row has one weight per child"
+        );
+        assert!(!children.is_empty(), "a row with no children is not a row");
         Self {
             horizontal,
             children,
-            fraction,
+            shares,
             fully_collapsed: false,
             stowed: false,
             collapsed_leaf_count: 0,
         }
+    }
+
+    /// A row of exactly two children, whose boundary sits at `fraction` of its length.
+    ///
+    /// The pair spelling, named apart from [`new`](Self::new) for the same reason
+    /// [`children_pair`](Self::children_pair) is named apart from [`children`](Self::children):
+    /// every place that still *builds* a row of two is then a grep for one identifier instead of
+    /// a reading of the crate. All four of them are owed a row by stage 7 of
+    /// `docs/PLAN_a_row_holds_many_panels.md` — splitting a node, regrouping a subtree, copying
+    /// a filtered tree, and loading a file, which is where the binary shape enters from disk.
+    pub(crate) fn pair(horizontal: bool, children: [NodeId; 2], fraction: f32) -> Self {
+        Self::new(
+            horizontal,
+            children.to_vec(),
+            vec![Share(fraction), Share(1.0 - fraction)],
+        )
     }
 
     /// Whether this row lays its children out side by side.
@@ -127,9 +199,23 @@ impl RowNode {
     /// [`children`](Self::children): every place that still needs a row to hold exactly two
     /// is then a grep for one identifier instead of a reading of the crate. Each caller carries
     /// a note saying why a pair is the honest shape there, or which stage owes it a row.
-    #[inline(always)]
-    pub const fn children_pair(&self) -> [NodeId; 2] {
-        self.children
+    ///
+    /// # Panics
+    ///
+    /// If this row does not hold exactly two children. Unreachable while the tree is binary by
+    /// content, and deliberately loud rather than silently answering about the first two: a
+    /// caller here is one that has *not* been taught rows yet, and the moment stage 7 builds a
+    /// row of three, this is the list of places that have to be visited.
+    #[inline]
+    #[track_caller]
+    pub fn children_pair(&self) -> [NodeId; 2] {
+        match self.children[..] {
+            [first, second] => [first, second],
+            ref children => panic!(
+                "a pair was asked of a row of {}; see `RowNode::children`",
+                children.len()
+            ),
+        }
     }
 
     /// The child at the given position, or `None` if this row has no child there.
@@ -164,5 +250,135 @@ impl RowNode {
     #[inline(always)]
     pub(crate) fn set_child(&mut self, index: ChildIndex, child: NodeId) {
         self.children[index.0] = child;
+    }
+
+    /// This row's weights, one per child, in [`children`](Self::children) order.
+    ///
+    /// Relative to each other and not to anything else — see [`Share`]. A reader that wants a
+    /// proportion divides by [`total_share`](Self::total_share).
+    #[inline(always)]
+    pub fn shares(&self) -> &[Share] {
+        &self.shares
+    }
+
+    /// What this row's weights add up to. Always finite and greater than zero for a row that
+    /// passes [`validate`](crate::Tree::validate), which is what makes dividing by it total.
+    #[inline]
+    pub fn total_share(&self) -> f32 {
+        self.shares.iter().map(|share| share.0).sum()
+    }
+
+    /// The proportion of this row taken by its first child.
+    ///
+    /// The pair spelling of "where the boundary sits", and the one every reader of the layout
+    /// still asks: while a row holds two children it has exactly one boundary, and this is it.
+    /// A row of three has two, which is why they get names of their own in stage 5 of
+    /// `docs/PLAN_a_row_holds_many_panels.md` (`GapIndex` there); until then a caller of this
+    /// is a caller that reads a row as a pair.
+    ///
+    /// # Parity
+    ///
+    /// Exactly the number [`pair`](Self::pair) was built from, for every `fraction` in `0..=1`,
+    /// and not approximately: `f + fl(1 − f)` rounds to exactly `1.0` in `f32` there — the error
+    /// of `fl(1 − f)` is at most half an ulp of a value below one, which is at most half the ulp
+    /// just below `1.0` — so the division below is by exactly one. That is what lets this stage
+    /// claim the pixels did not move, rather than claim they moved by less than anyone can see.
+    ///
+    /// Pinned by `the_boundary_a_pair_was_built_from_comes_back_exactly`, because an argument
+    /// about floating point in a comment is a claim and not a check.
+    #[inline]
+    pub fn fraction(&self) -> f32 {
+        self.shares[0].0 / self.total_share()
+    }
+
+    /// Moves the boundary of a two-child row to `fraction` of its length.
+    ///
+    /// Writes *both* weights, because that is what "the boundary is here" means when the row is
+    /// a pair: `[fraction, 1 − fraction]`. A caller passing a `fraction` outside `0..=1` gets a
+    /// negative weight, which [`validate`](crate::Tree::validate) rejects — the old global rule
+    /// "the fraction is within the interval it measures" is exactly the local rule "no weight is
+    /// negative", seen from the other side.
+    ///
+    /// # Panics
+    ///
+    /// If this row does not hold exactly two children — see
+    /// [`children_pair`](Self::children_pair), which this shares its fate with. Over a row of
+    /// three, "the fraction" names nothing.
+    #[inline]
+    #[track_caller]
+    pub fn set_fraction(&mut self, fraction: f32) {
+        assert_eq!(
+            self.shares.len(),
+            2,
+            "a fraction was written to a row of {}; a row of three has no single boundary",
+            self.shares.len()
+        );
+        self.shares = vec![Share(fraction), Share(1.0 - fraction)];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RowNode, Share};
+    use crate::core::tree::NodeId;
+
+    /// Two ids, which is all a row needs to be built directly: nothing here walks the tree.
+    fn row(shares: Vec<Share>) -> RowNode {
+        let children = (0..shares.len())
+            .map(|_| NodeId::new(0, 0))
+            .collect::<Vec<_>>();
+        RowNode::new(true, children, shares)
+    }
+
+    /// **Weights are relative, and nothing in the crate says so yet.**
+    ///
+    /// Every row alive at this stage is built by [`RowNode::pair`], whose weights always add up
+    /// to exactly one — so "the row divides by the sum" and "the row reads the first weight" are
+    /// the same function everywhere it is called, and a mutant replacing
+    /// [`total_share`](RowNode::total_share) with the constant `1.0` survives the whole suite,
+    /// the corpus probes included. That is the *central* decision of this stage going unjudged:
+    /// weights are deliberately **not** normalised, precisely so that stage 7 can push and remove
+    /// children without rewriting everyone else's number.
+    ///
+    /// So it is stated here, on rows built by hand, where it is reachable. When stage 7 makes it
+    /// reachable through ordinary use, this test stops being the only thing holding it.
+    #[test]
+    fn weights_that_do_not_add_up_to_one_still_name_a_proportion() {
+        assert_eq!(row(vec![Share(3.0), Share(1.0)]).fraction(), 0.75);
+        assert_eq!(row(vec![Share(1.0), Share(1.0)]).fraction(), 0.5);
+        assert_eq!(row(vec![Share(0.0), Share(2.0)]).fraction(), 0.0);
+        // A row of three, which no writer builds yet: "the first child's share of the row" is
+        // the question that survives the shape change, and it is already answerable.
+        assert_eq!(
+            row(vec![Share(2.0), Share(1.0), Share(1.0)]).fraction(),
+            0.5
+        );
+        assert_eq!(row(vec![Share(3.0), Share(1.0)]).total_share(), 4.0);
+    }
+
+    /// The parity claim of stage 4, checked rather than argued.
+    ///
+    /// `RowNode::fraction` is documented to answer *exactly* the number `RowNode::pair` was
+    /// built from — not within an epsilon — because that is what lets this stage say the pixels
+    /// did not move at all. The reasoning is that `f + fl(1 − f)` rounds to exactly `1.0` for
+    /// every `f` in `0..=1`; the reasoning is in the doc, and this is the check.
+    ///
+    /// An epsilon comparison here would pass on an implementation that drifts, which is the one
+    /// thing this test exists to catch: a drift of one ulp in a stored boundary is invisible on
+    /// screen and shows up as a corpus dump that no longer diffs clean, six stages later.
+    #[test]
+    fn the_boundary_a_pair_was_built_from_comes_back_exactly() {
+        let mut checked = 0;
+        for step in 0..=10_000u32 {
+            let fraction = step as f32 / 10_000.0;
+            let back = RowNode::pair(true, [NodeId::new(0, 0); 2], fraction).fraction();
+            assert_eq!(
+                back.to_bits(),
+                fraction.to_bits(),
+                "a boundary at {fraction} came back as {back}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 10_001, "the sweep ran");
     }
 }

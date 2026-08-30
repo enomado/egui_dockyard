@@ -1514,7 +1514,7 @@ mod tests {
         state[NodePath::new(SurfaceIndex::main(), id)]
             .get_row()
             .expect("node is a split")
-            .fraction
+            .fraction()
     }
 
     fn leaf_rects(layout: &DockLayout, leaves: &[NodeId]) -> Vec<Rect> {
@@ -1679,7 +1679,7 @@ mod tests {
         state[NodePath::new(SurfaceIndex::main(), bottom_inner)]
             .get_row_mut()
             .expect("the bottom band's inner node is a split")
-            .fraction = (target_x - inner_rect.min.x) / inner_rect.width();
+            .set_fraction((target_x - inner_rect.min.x) / inner_rect.width());
         render(&ctx, &mut state, &style, id);
 
         // The "+" is really on screen. Without this the assertion below could pass on a scene
@@ -2824,7 +2824,7 @@ mod tests {
         state[path]
             .get_row_mut()
             .expect("a chain node is a split")
-            .fraction = (targets[k - 1] - lo) / (hi - lo);
+            .set_fraction((targets[k - 1] - lo) / (hi - lo));
         aim_sweep(state, layout, first, horizontal, &targets[..k - 1]);
         aim_sweep(state, layout, second, horizontal, &targets[k..]);
     }

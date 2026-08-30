@@ -22,6 +22,13 @@ pub mod window_state;
 /// saving.
 pub mod shape;
 
+/// How a boundary drag divides the room it takes: chain, pair, proportional, frame.
+///
+/// The arithmetic only — which behaviour a separator has is policy, and lives with whoever
+/// draws it. Shared with the application's grid screens, which had held the one copy of this
+/// until now.
+pub mod resize;
+
 /// Vocabulary of dock operations shared by the property tests and the fuzzer.
 ///
 /// Available to this crate's own tests always, and to outside harnesses (the `fuzz/` crate)

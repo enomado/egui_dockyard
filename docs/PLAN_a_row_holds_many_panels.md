@@ -105,21 +105,38 @@ Run the suite as `cargo test --all-features` **from the fork's directory**: with
 feature `persist.rs` does not compile at all and reports "0 passed" rather than "skipped"
 (25 binaries, 244 tests against 122).
 
-### Stage 0 — the oracle that is red today
+### Stage 0 — the oracle that is red today ✅ done 31.08
 
-Before anything moves: a property that states what the binary shape costs, and watch it fail.
+`tests/a_drag_moves_the_boundary_it_grabbed.rs`. Two properties, both `#[ignore]`d with the
+reason naming stage 7, plus a positive control that runs on every ordinary pass:
 
 > Dragging the divider between parts `k` and `k+1` of a row moves **no other boundary** of
-> that row.
+> that row, and resizes **no panel** it does not lie between.
 
-In `H(a, H(b, c))` this is false: dragging `a|bc` rewrites the rectangle the inner split
-takes its fraction of, so `b|c` slides with it. Assert on measured boundaries across a frame,
-both spellings of the row (`H(a,H(b,c))` and `H(H(a,b),c)`), rows of three and four.
+**Measured, 1200 px screen, three equal columns, a 150 px pull:**
 
-**DoD**: the test exists, is red, and its failure message names the boundary that moved and by
-how much. If it comes out green, the scene is wrong — a row of two cannot show this — and the
-hunt continues rather than the stage being declared done. A green stage 0 is the same failure
-as the strip oracle that passed on a scene where no truncation happened (28.08 findings).
+```
+RightLeaning  H(a,H(b,c)):  drag boundary 0  →  boundary 1 moved 75 px (797.5 → 872.5)
+                                                panel 2 resized 394 → 319
+LeftLeaning   H(H(a,b),c):  drag boundary 1  →  boundary 0 moved 75 px (402.5 → 477.5)
+                                                panel 0 resized 394 → 469
+```
+
+Exactly **half the pull**, because the infected boundary sits at 0.5 of a rectangle that just
+lost 150 px — and the drift lands on a **different boundary in each spelling**, which is the
+30.08 signature again: the tree, not the row, is what the rule was reading. The other two of
+the four cases pass, and that asymmetry is the finding, which is why the failures are collected
+rather than asserted one at a time.
+
+Run it with `cargo test --all-features --test a_drag_moves_the_boundary_it_grabbed --
+--include-ignored`. An ordinary pass reports `2 ignored` and stays green: six stages of red
+suite would be six stages of nobody reading it.
+
+**DoD** (met): the property is red, its message names the boundary and the drift, and the
+positive control is green — without it every assertion would also pass on a drag that never
+reached the dock. A green stage 0 would have been the same failure as the strip oracle that
+passed on a scene where no truncation happened (28.08 findings), and the hunt would have
+continued rather than the stage being declared done.
 
 ### Stage 0b — the sweep learns to collapse
 
@@ -208,9 +225,10 @@ left; loading collapses chains (decision 3); `regroup` and `transpose_cross` bui
 where they used to build a right-leaning ladder — `rebuild_chain` disappears, and the id pool
 arithmetic changes from `n − 1` splits to one row.
 
-**DoD**: stage 0 turns green. The corpus loads and round-trips. `cargo test --all-features`
-green. `dock_shape` **changes** here, for the first time, and the diff is read by hand and
-recorded in this file.
+**DoD**: the two `#[ignore]`s come off `a_drag_moves_the_boundary_it_grabbed.rs` and it passes
+on an ordinary run. The corpus loads and round-trips. `cargo test --all-features` green.
+`dock_shape` **changes** here, for the first time, and the diff is read by hand and recorded in
+this file.
 
 ### Stage 8 — acceptance by clicking
 

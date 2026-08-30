@@ -135,6 +135,32 @@ existing watches must not change on `Pair` steps — that is the parity half.
 * **The depth screen** (stage 2). `wl_depth_ui` calls the same crate and gets the move for free.
   Whether its separators should grow the same modifiers is a question for its own screen.
 
+## Found on the way (30.08, stages 0–2)
+
+* 🚨 **The n-ary plan's acceptance file will be judging something else.**
+  `tests/a_drag_moves_the_boundary_it_grabbed.rs` drags with **nothing held** and asserts
+  `dragging_a_boundary_resizes_only_the_two_panels_it_lies_between` — which is `Pair`, and after
+  stage 4 a plain drag is `Chain`. It stays green only because its `PULL` of 150 px is inside the
+  near neighbour's room, so the chain never reaches anyone else. That is an accident of the
+  numbers, not the property the file names. **Stage 4 owes that file a decision**: either its
+  drags hold Shift, or its comment says it is pinning "a chain that never ran out behaves like a
+  pair" — silently leaving it is how a green test comes to mean the opposite of its own title.
+* 📐 **The two minima are the same role and two orders of magnitude apart**: this crate's
+  `SeparatorStyle::extra` is **175 px**, the application's grid `MIN_SIZE` is **32**. Both are
+  "the room a child keeps", arrived at independently. Making `min_size` a parameter was therefore
+  not a generalisation for its own sake — a shared constant would have moved one screen's panels.
+* ⚠️ **`Ctrl+click` on a junction handle already transposes**, so after stage 4 Ctrl over a
+  handle means "transpose" and Ctrl over a divider means "proportional", one hand's width apart.
+  Recorded in Open above; it is the strongest argument for handles ignoring modifiers.
+* 🕳️ **A file added and the `mod` line that publishes it are one change, and were committed as
+  two.** Stage 1 went in without `core/mod.rs`, so that commit would not have built; caught by
+  `git status` before the push, and the same class as the project's `pathspec` rule about
+  untracked files. The tests were green throughout — they ran against the working tree, which
+  had the line.
+* 🔧 **egui 0.36 has no `RawInput::modifiers`.** A synthetic gesture declares what is held with
+  `Event::ModifiersChanged`, and the state is sticky between frames. Worth knowing before the
+  stage 5 sweep, which will hold modifiers across steps.
+
 ## Definition of done
 
 * The stage 0 oracle is green, and its `Pair` positive control never went red.

@@ -266,14 +266,54 @@ and 6 below add three more callers of that kind, since their parity is *this dum
 against *this dump after*. Pinned now by
 `the_dock_shape_writes_a_line_per_node_naming_children_by_position`, which the mutant fails.
 
-### Stage 3 — orientation becomes a field
+### Stage 3 — orientation becomes a field ✅ done 31.08
 
-`SplitNode` → `RowNode`, `Node::{Leaf, Row}`. Watch the `duplicate!` macros in `show/mod.rs`
-and `junction.rs`: they generate one arm per orientation off the *variant*, and they have to
-keep generating the same two arms off the field.
+`SplitNode` → `RowNode` (`split.rs` → `row.rs`) with `horizontal: bool` inside, and
+`Node::{Leaf, Row}`. `is_horizontal()` / `is_vertical()` stay on both, so no reader moved for
+the sake of it; the accessors followed the type they hand back (`get_split` → `get_row`,
+`get_split_mut` → `get_row_mut`), because an accessor named after the old type is the second
+name for one thing that this track has already paid for twice.
 
-**DoD**: `core::shape::dock_shape` of the corpus is byte-identical before and after. That dump
-exists for exactly this kind of question and its own test pins its format.
+The `duplicate!` macros turned out to be **only in `show/mod.rs`** — two of them; `junction.rs`
+mentions the variants in a doc comment and nowhere else. Both still generate one arm per axis,
+with the axis now a *predicate* in the table beside the name: `paste!` still needs the name as a
+token (`Rect::everything_left_of`, `CursorIcon::ResizeHorizontal`), so the two live side by side
+rather than one replacing the other.
+
+**The wire did not move.** `NodeOut` keeps `Vertical` / `Horizontal`, because a file written
+today is read by builds that know nothing about rows. This is exactly where the model and the
+format part company, and the format is stage 7's to change.
+
+**DoD** (met): `core::shape::dock_shape` over the corpus is byte-identical — **544 layouts of
+`fuzz/corpus/tree_persist`, same md5** before and after. The probe that says so is new
+(`cargo run --manifest-path fuzz/corpus_tool/Cargo.toml --bin shape_probe -- <corpus-dir>`) and
+is a probe rather than a test on purpose: a diff of two dumps names *which* layout moved, where
+an assertion would only say that one did. Stages 4 and 6 re-run it for their own parity; at
+stage 7 the dump is *expected* to change and the diff is the record.
+
+Eight mutants, each killed. The first one is the load-bearing one — it is what says the probe
+is not vacuous, the failure mode this plan's stage 0 exists to avoid:
+
+| Mutant | Killed by |
+|---|---|
+| the reader's orientation inverted (`adopt_split`) | **the probe itself**, and 5 persist tests |
+| `RowNode::is_vertical` answering `horizontal` | 42 tests |
+| the `duplicate!` predicates swapped (layout cuts along the wrong axis) | 25 tests |
+| `copy_filtered` building every row horizontal | 6 tests |
+| `node_out` writing the other orientation to disk | 2 tests |
+| `Node::is_horizontal` losing its guard on the field — the arm genuinely new here | 24 tests |
+| `Tree::split` reading `Above \| Below` as horizontal | 26 tests |
+| `regroup` rebuilding a row on the perpendicular axis | 15 tests |
+
+`cargo test --all-features`: 291 passed, 0 failed, plus stage 0's two ignored. Fork commit
+`b64a91a`, pushed.
+
+**This stage was the first in the track to need code in the application.** `rust_app` matched
+the two variants in three places (`live_api/host/panels.rs`, `tree_layout/layouts.rs`, and a
+`dock_layout_gate` test) — every one of them only *reading* the orientation, so the fix was to
+read the field. Recorded here because the previous five stages all landed with "the knob was
+already there", and the next reader of this plan should not inherit that expectation: stages 5
+and 7 change `DockMutation` and the file format, which the application does touch.
 
 ### Stage 4 — `fraction` becomes `shares`
 

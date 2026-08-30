@@ -369,7 +369,7 @@ impl<Tab> DockArea<'_, Tab> {
                 }
                 DockMutation::SetSplitFraction { path, fraction } => {
                     self.dock_state[path.surface][path.node]
-                        .get_split_mut()
+                        .get_row_mut()
                         .expect("a fraction is only requested for a split")
                         .fraction = fraction;
                     // No event either: the gesture that asked already said what it was —
@@ -689,7 +689,7 @@ impl<Tab> DockArea<'_, Tab> {
         // the n-ary plan turns `cut_split` into `cut_row` and this into a list of paths; until
         // then a `Vec` here would only be a pair wearing a wider type.
         let [left, right] = self.dock_state[path]
-            .get_split()
+            .get_row()
             .expect("only a split has children")
             .children_pair();
         [
@@ -979,15 +979,22 @@ impl<Tab> DockArea<'_, Tab> {
             };
         }
 
+        // One arm per axis, as before — only the axis is now read off the node's *field*
+        // (`is_horizontal` / `is_vertical`) instead of being the variant matched. The `paste!`
+        // below still needs the axis as a *token* (`Rect::everything_left_of`,
+        // `CursorIcon::ResizeHorizontal`), which is why the name stays in the table beside the
+        // predicate rather than being replaced by it.
         duplicate! {
             [
-                orientation   dim_point  dim_size  left_of    right_of;
-                [Horizontal]  [x]        [width]   [left_of]  [right_of];
-                [Vertical]    [y]        [height]  [above]    [below];
+                orientation   is_orientation   dim_point  dim_size  left_of    right_of;
+                [Horizontal]  [is_horizontal]  [x]        [width]   [left_of]  [right_of];
+                [Vertical]    [is_vertical]    [y]        [height]  [above]    [below];
             ]
             // Copy the fraction out before touching `self.layout`: holding a borrow of
             // the node while writing the geometry map would borrow `self` twice.
-            if let Node::orientation(split) = &self.dock_state[path.surface][path.node] {
+            if let Node::Row(split) = &self.dock_state[path.surface][path.node]
+                && split.is_orientation()
+            {
                 let fraction = split.fraction;
                 let rect = split_rect(parent_rect, pixels_per_point);
 
@@ -1092,11 +1099,13 @@ impl<Tab> DockArea<'_, Tab> {
 
         duplicate! {
             [
-                orientation   dim_point;
-                [Horizontal]  [x];
-                [Vertical]    [y];
+                orientation   is_orientation   dim_point;
+                [Horizontal]  [is_horizontal]  [x];
+                [Vertical]    [is_vertical]    [y];
             ]
-            if let Node::orientation(_) = &self.dock_state[path.surface][path.node] {
+            if let Node::Row(row) = &self.dock_state[path.surface][path.node]
+                && row.is_orientation()
+            {
                 // Which axis this split divides, and nothing else is read off the node: the
                 // borrow of the tree ends here, because every write below goes through
                 // `nudge_split`, which takes `&mut self`. What the gesture answers to — the band
@@ -1244,7 +1253,7 @@ impl<Tab> DockArea<'_, Tab> {
     #[track_caller]
     fn split_fraction(&self, path: NodePath) -> f32 {
         self.dock_state[path]
-            .get_split()
+            .get_row()
             .expect("only a split has a fraction")
             .fraction
     }
@@ -1267,7 +1276,7 @@ impl<Tab> DockArea<'_, Tab> {
         extra: f32,
     ) -> Option<(f32, SeparatorBand)> {
         let node = &self.dock_state[path];
-        let split = node.get_split()?;
+        let split = node.get_row()?;
         let rect = split_rect(self.layout.rect(path)?, pixels_per_point);
         let range = if node.is_horizontal() {
             rect.width()

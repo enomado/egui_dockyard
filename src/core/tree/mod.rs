@@ -49,7 +49,7 @@ use std::{
 
 pub use node::LeafNode;
 pub use node::Node;
-pub use node::SplitNode;
+pub use node::RowNode;
 pub use node::TabId;
 pub use node_id::{ChildIndex, NodeId, NodePath};
 pub use tab_index::{TabIndex, TabPath};
@@ -234,23 +234,20 @@ impl<Tab> Tree<Tab> {
 
     /// The children of `id`, in order, or `None` if it is a leaf (or not in this tree).
     ///
-    /// See [`SplitNode::children`] for why this is a slice; [`children_pair`](Self::children_pair)
+    /// See [`RowNode::children`] for why this is a slice; [`children_pair`](Self::children_pair)
     /// is the spelling for callers that need exactly two.
     #[inline]
     pub fn children(&self, id: NodeId) -> Option<&[NodeId]> {
-        self.node(id).ok()?.get_split().map(SplitNode::children)
+        self.node(id).ok()?.get_row().map(RowNode::children)
     }
 
     /// The two children of `id`, or `None` if it is a leaf (or not in this tree).
     ///
-    /// See [`SplitNode::children_pair`]: a caller of this one is a caller that still needs a
+    /// See [`RowNode::children_pair`]: a caller of this one is a caller that still needs a
     /// split to hold exactly two children.
     #[inline]
     pub fn children_pair(&self, id: NodeId) -> Option<[NodeId; 2]> {
-        self.node(id)
-            .ok()?
-            .get_split()
-            .map(SplitNode::children_pair)
+        self.node(id).ok()?.get_row().map(RowNode::children_pair)
     }
 
     /// Immutably borrows the node `id` names.
@@ -372,7 +369,7 @@ impl<Tab> Tree<Tab> {
     /// Every node that is inside a stowed subtree, and so is not on screen at all.
     ///
     /// A split that was put away as a unit draws one bar for whatever it contains (see
-    /// [`SplitNode::stowed`]), so everything below it has no rectangle this frame: not a
+    /// [`RowNode::stowed`]), so everything below it has no rectangle this frame: not a
     /// smaller one, none. The layout pass asks this once and then lays out — and forgets —
     /// accordingly.
     ///
@@ -613,7 +610,7 @@ impl<Tab> Tree<Tab> {
         let grandparent = self.parent(target);
         let where_target_sat = grandparent.map(|split_id| {
             self[split_id]
-                .get_split()
+                .get_row()
                 .expect("a parent is always a split")
                 .index_of(target)
                 .expect("a child is known to its parent")
@@ -633,11 +630,8 @@ impl<Tab> Tree<Tab> {
         // below settles it, and the whole chain of ancestors with it, once the children are
         // linked. Inheriting it from `target` would be writing down a value that is about to
         // be overwritten anyway — and the wrong one, since the split now holds `new` too.
-        let fresh = SplitNode::new(children, fraction);
-        let split_node = match split {
-            Split::Left | Split::Right => Node::Horizontal(fresh),
-            Split::Above | Split::Below => Node::Vertical(fresh),
-        };
+        let horizontal = matches!(split, Split::Left | Split::Right);
+        let split_node = Node::Row(RowNode::new(horizontal, children, fraction));
         let split_id = self.nodes.insert(NodeEntry {
             parent: grandparent,
             node: split_node,
@@ -648,7 +642,7 @@ impl<Tab> Tree<Tab> {
 
         match (grandparent, where_target_sat) {
             (Some(grandparent), Some(index)) => self[grandparent]
-                .get_split_mut()
+                .get_row_mut()
                 .expect("a parent is always a split")
                 .set_child(index, split_id),
             _ => self.root = Some(split_id),
@@ -695,7 +689,7 @@ impl<Tab> Tree<Tab> {
         let grandparent = self.parent(parent);
         let where_parent_sat = grandparent.map(|split_id| {
             self[split_id]
-                .get_split()
+                .get_row()
                 .expect("a parent is always a split")
                 .index_of(parent)
                 .expect("a child is known to its parent")
@@ -705,7 +699,7 @@ impl<Tab> Tree<Tab> {
         self.nodes.get_mut(sibling).unwrap().parent = grandparent;
         match (grandparent, where_parent_sat) {
             (Some(grandparent), Some(index)) => self[grandparent]
-                .get_split_mut()
+                .get_row_mut()
                 .expect("a parent is always a split")
                 .set_child(index, sibling),
             _ => self.root = Some(sibling),
@@ -863,12 +857,12 @@ impl<Tab> Tree<Tab> {
                     node: Node::Leaf(leaf),
                 })
             }
-            Node::Vertical(split) | Node::Horizontal(split) => {
+            Node::Row(row) => {
                 // A pair, and the arithmetic below is why: "one child survived, so it takes the
-                // split's place" is a rule about two. Over a row it becomes "keep the survivors,
-                // dissolve at one left", which is stage 7's business and not a rewrite this
-                // stage can make honestly — the shares would have to be filtered with them.
-                let [left, right] = split.children_pair();
+                // row's place" is a rule about two. Over a row of five it becomes "keep the
+                // survivors, dissolve at one left", which is stage 7's business and not a rewrite
+                // this stage can make honestly — the shares would have to be filtered with them.
+                let [left, right] = row.children_pair();
                 let left = self.copy_filtered(left, target, function, focus);
                 let right = self.copy_filtered(right, target, function, focus);
                 match (left, right) {
@@ -882,13 +876,11 @@ impl<Tab> Tree<Tab> {
                         // The collapsing counts describe the subtree that *was* here, and the
                         // sweep may have just dropped leaves out of it — `recompute_collapsed`
                         // in the caller settles them from the shape that actually got built.
-                        let node = SplitNode::new([left, right], split.fraction);
-                        let node = if self[id].is_vertical() {
-                            Node::Vertical(node)
-                        } else {
-                            Node::Horizontal(node)
-                        };
-                        let copied = target.nodes.insert(NodeEntry { parent: None, node });
+                        let node = RowNode::new(row.is_horizontal(), [left, right], row.fraction);
+                        let copied = target.nodes.insert(NodeEntry {
+                            parent: None,
+                            node: Node::Row(node),
+                        });
                         target.nodes.get_mut(left).unwrap().parent = Some(copied);
                         target.nodes.get_mut(right).unwrap().parent = Some(copied);
                         copied
@@ -977,7 +969,7 @@ impl<Tab> Tree<Tab> {
     }
 
     /// Puts a whole split away behind one arrow, or brings it back — see
-    /// [`SplitNode::stowed`](crate::SplitNode::stowed).
+    /// [`RowNode::stowed`](crate::RowNode::stowed).
     ///
     /// Nothing inside is touched, which is the difference from collapsing each of its leaves:
     /// a subtree comes back exactly as it went away.

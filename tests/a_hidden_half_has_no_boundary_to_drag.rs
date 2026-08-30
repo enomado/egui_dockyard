@@ -213,7 +213,7 @@ impl Sim {
 
     fn fraction_of(&self, node: NodeId) -> f32 {
         self.state.main_surface()[node]
-            .get_split()
+            .get_row()
             .expect("the node is a split")
             .fraction
     }

@@ -1446,7 +1446,7 @@ impl Sim {
         let layout = self.layout();
         self.state
             .iter_all_nodes()
-            .filter_map(|(path, node)| node.get_split().map(|_| path))
+            .filter_map(|(path, node)| node.get_row().map(|_| path))
             .filter(|path| {
                 let Some(children) = self.state[path.surface].children(path.node) else {
                     return false;
@@ -1656,8 +1656,8 @@ impl Sim {
         self.state
             .iter_all_nodes()
             .filter_map(|(path, node)| {
-                let split = node.get_split()?;
-                let vertical = matches!(node, Node::Vertical(_));
+                let split = node.get_row()?;
+                let vertical = node.is_vertical();
 
                 // A pair, like the divider it is measuring: this reads the gap *between* two
                 // children, which is what a split has exactly one of today. Stage 5 of the
@@ -1735,7 +1735,7 @@ impl Sim {
         let margin = self.style.separator.extra / shrunk.height();
         if (margin..=1.0 - margin).contains(&fraction) {
             self.state[chain_path]
-                .get_split_mut()
+                .get_row_mut()
                 .expect("a chain node is a split")
                 .fraction = fraction;
         }
@@ -1785,12 +1785,12 @@ impl Sim {
         self.state
             .iter_all_nodes()
             .filter_map(|(path, node)| {
-                node.get_split()?;
+                node.get_row()?;
                 // The line the junctions would sit *on*, same rule as for the arms: a split with
                 // a folded child is cut at the strip's edge and draws no divider, so there is no
                 // line here for anything to meet.
                 layout.divider(path)?;
-                let outer_horizontal = matches!(node, Node::Horizontal(_));
+                let outer_horizontal = node.is_horizontal();
                 let inner_horizontal = !outer_horizontal;
                 let at = |id: NodeId| NodePath::new(path.surface, id);
 
@@ -1963,9 +1963,8 @@ impl Sim {
             dividers: &mut Vec<NodeId>,
         ) {
             let in_chain = match &tree[node] {
-                Node::Horizontal(_) => horizontal,
-                Node::Vertical(_) => !horizontal,
-                _ => false,
+                Node::Row(row) => row.is_horizontal() == horizontal,
+                Node::Leaf(_) => false,
             };
             // A pair for the same reason `Tree::collect_chain` uses one: a divider is named by
             // the node of the split that draws it, so a loop here would push one id twice.
@@ -2257,9 +2256,9 @@ impl Sim {
         self.state
             .iter_all_nodes()
             .filter_map(|(_, node)| match node {
-                Node::Horizontal(_) => Some('H'),
-                Node::Vertical(_) => Some('V'),
-                _ => None,
+                Node::Row(row) if row.is_horizontal() => Some('H'),
+                Node::Row(_) => Some('V'),
+                Node::Leaf(_) => None,
             })
             .collect()
     }
@@ -3043,7 +3042,7 @@ impl Sim {
                 // the pointer was released over gets focused instead. 8 px and up moves the
                 // boundary and commits exactly once. A generator that drew smaller offsets would
                 // be testing the click path under the name of the drag one.
-                let vertical = matches!(self.state[path], Node::Vertical(_));
+                let vertical = self.state[path].is_vertical();
                 let delta = f32::from(by);
                 let to = if vertical {
                     at + Vec2::new(0.0, delta)
@@ -3240,7 +3239,7 @@ impl Sim {
                     self.refused[refused_index(Refused::Contested)] += 1;
                     return None;
                 }
-                let horizontal_before = matches!(self.state[path], Node::Horizontal(_));
+                let horizontal_before = self.state[path].is_horizontal();
                 let rects_before = self.leaf_rects();
                 let focus_before = self.focus_trace();
                 self.cross.offered += 1;
@@ -3264,7 +3263,7 @@ impl Sim {
                 // nothing, so that the press a drag falls short of cannot rewrite the tree.
                 self.click_holding(at, Modifiers::COMMAND);
 
-                let flipped = matches!(self.state[path], Node::Horizontal(_)) != horizontal_before;
+                let flipped = self.state[path].is_horizontal() != horizontal_before;
                 if flipped && !can_transpose {
                     forbidden = Some(format!(
                         "a ctrl+click transposed the cross at {path:?}, whose bands carry a part \
@@ -3653,7 +3652,7 @@ impl Sim {
     fn boundaries(&self) -> Boundaries {
         self.state
             .iter_all_nodes()
-            .filter_map(|(path, node)| node.get_split().map(|split| (path, split.fraction)))
+            .filter_map(|(path, node)| node.get_row().map(|split| (path, split.fraction)))
             .collect()
     }
 
@@ -3669,12 +3668,12 @@ impl Sim {
         let layout = self.layout();
         self.state
             .iter_all_nodes()
-            .filter(|(_, node)| node.get_split().is_some())
+            .filter(|(_, node)| node.get_row().is_some())
             .filter(|(path, _)| {
                 let Some(geometry) = layout.get(*path) else {
                     return false;
                 };
-                let range = if matches!(self.state[*path], Node::Vertical(_)) {
+                let range = if self.state[*path].is_vertical() {
                     geometry.rect.height()
                 } else {
                     geometry.rect.width()
@@ -3690,7 +3689,7 @@ impl Sim {
         self.state
             .node(path)
             .ok()
-            .and_then(|node| node.get_split())
+            .and_then(|node| node.get_row())
             .map(|split| split.fraction)
     }
 
@@ -4543,7 +4542,7 @@ fn commit_complaint(effect: &Effect, commits: Commits) -> Option<String> {
 fn fraction_complaint(sim: &Sim) -> Option<String> {
     sim.state
         .iter_all_nodes()
-        .filter_map(|(path, node)| node.get_split().map(|split| (path, split.fraction)))
+        .filter_map(|(path, node)| node.get_row().map(|split| (path, split.fraction)))
         .find(|(_, fraction)| !(fraction.is_finite() && *fraction > 0.0 && *fraction < 1.0))
         .map(|(path, fraction)| {
             format!(

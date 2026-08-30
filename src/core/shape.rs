@@ -128,22 +128,21 @@ pub fn dock_shape<Tab>(state: &DockState<Tab>, tab_label: impl Fn(&Tab) -> Strin
                     )
                     .unwrap();
                 }
-                node @ (Node::Horizontal(split) | Node::Vertical(split)) => {
+                Node::Row(row) => {
                     writeln!(
                         out,
                         "  {index}: {} fraction={} collapsed={} children={:?}",
-                        if node.is_vertical() {
+                        if row.is_vertical() {
                             "vertical"
                         } else {
                             "horizontal"
                         },
-                        split.fraction,
-                        split.fully_collapsed,
+                        row.fraction,
+                        row.fully_collapsed,
                         // A `Vec` where this used to hand `[Option<usize>; 2]` to `{:?}`: both
                         // print `[Some(1), Some(2)]`, so the dump is unchanged while the count
                         // stops being fixed.
-                        split
-                            .children()
+                        row.children()
                             .iter()
                             .map(|child| position(*child))
                             .collect::<Vec<_>>(),
@@ -235,8 +234,8 @@ mod tests {
         let mut moved = state.clone();
         let split_id = moved.main_surface().root().unwrap();
         match &mut moved.main_surface_mut()[split_id] {
-            Node::Horizontal(split) | Node::Vertical(split) => split.fraction = 0.25,
-            Node::Leaf(_) => unreachable!("the scene's root is a split by construction"),
+            Node::Row(row) => row.fraction = 0.25,
+            Node::Leaf(_) => unreachable!("the scene's root is a row by construction"),
         }
         assert_ne!(
             base,

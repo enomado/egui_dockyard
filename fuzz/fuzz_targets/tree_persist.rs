@@ -80,18 +80,17 @@ fn shape(state: &DockState<Tab>) -> String {
                         leaf.collapsed,
                     );
                 }
-                Node::Vertical(split) => {
+                Node::Row(row) => {
                     let _ = writeln!(
                         out,
-                        "  {position}: vertical fraction={} collapsed={}",
-                        split.fraction, split.fully_collapsed
-                    );
-                }
-                Node::Horizontal(split) => {
-                    let _ = writeln!(
-                        out,
-                        "  {position}: horizontal fraction={} collapsed={}",
-                        split.fraction, split.fully_collapsed
+                        "  {position}: {} fraction={} collapsed={}",
+                        if row.is_vertical() {
+                            "vertical"
+                        } else {
+                            "horizontal"
+                        },
+                        row.fraction,
+                        row.fully_collapsed
                     );
                 }
             }

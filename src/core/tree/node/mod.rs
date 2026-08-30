@@ -1,27 +1,29 @@
 use crate::core::tree::TabIndex;
 
 mod leaf;
-mod split;
+mod row;
 pub use leaf::{LeafNode, TabId};
-pub use split::SplitNode;
+pub use row::RowNode;
 
 /// Represents an abstract node of a [`Tree`](crate::Tree).
 ///
 /// There is no `Empty` variant: a node either exists in the tree's arena or it does not.
 /// The old implicit-heap layout needed one to describe holes in the `Vec`, and those holes
 /// were a source of their own bugs — a "removed" subtree that still owned its tabs, a
-/// split with one live child, a serialized layout mostly made of `Empty`.
+/// row with one live child, a serialized layout mostly made of `Empty`.
+///
+/// There is no `Vertical` / `Horizontal` pair either, for a reason that took longer to see:
+/// they carried identical data and were matched *together* in fourteen places, which is a
+/// field spelled as a variant. The axis now lives in [`RowNode::is_horizontal`], and the
+/// question every reader was actually asking — [`is_horizontal`](Self::is_horizontal) /
+/// [`is_vertical`](Self::is_vertical) — is unchanged.
 #[derive(Clone, Debug)]
 pub enum Node<Tab> {
     /// Contains the actual tabs.
     Leaf(LeafNode<Tab>),
 
-    /// Parent node in the vertical orientation: first child on top, second below.
-    Vertical(SplitNode),
-
-    /// Parent node in the horizontal orientation: first child on the left, second on the
-    /// right.
-    Horizontal(SplitNode),
+    /// Parent node: children laid out along one axis, which [`RowNode`] names.
+    Row(RowNode),
 }
 
 impl<Tab> Node<Tab> {
@@ -53,18 +55,18 @@ impl<Tab> Node<Tab> {
         }
     }
 
-    /// Get immutable access to the split data of this node, if it is a split.
-    pub fn get_split(&self) -> Option<&SplitNode> {
+    /// Get immutable access to the row data of this node, if it is a row.
+    pub fn get_row(&self) -> Option<&RowNode> {
         match self {
-            Node::Vertical(split) | Node::Horizontal(split) => Some(split),
+            Node::Row(row) => Some(row),
             Node::Leaf(_) => None,
         }
     }
 
-    /// Get mutable access to the split data of this node, if it is a split.
-    pub fn get_split_mut(&mut self) -> Option<&mut SplitNode> {
+    /// Get mutable access to the row data of this node, if it is a row.
+    pub fn get_row_mut(&mut self) -> Option<&mut RowNode> {
         match self {
-            Node::Vertical(split) | Node::Horizontal(split) => Some(split),
+            Node::Row(row) => Some(row),
             Node::Leaf(_) => None,
         }
     }
@@ -75,63 +77,65 @@ impl<Tab> Node<Tab> {
         matches!(self, Self::Leaf { .. })
     }
 
-    /// Returns `true` if the node is a [`Horizontal`](Node::Horizontal), otherwise `false`.
+    /// Returns `true` if the node is a row laying its children out side by side.
+    ///
+    /// Kept as a question about the *node*, although the axis now lives one level down: every
+    /// reader in the crate asked it here when it was a variant, and a refactor whose whole
+    /// claim is parity is not the place to move them. A leaf answers `false` to both this and
+    /// [`is_vertical`](Self::is_vertical), exactly as it did when neither variant matched it.
     #[inline(always)]
     pub const fn is_horizontal(&self) -> bool {
-        matches!(self, Self::Horizontal { .. })
+        matches!(self, Self::Row(row) if row.is_horizontal())
     }
 
-    /// Returns `true` if the node is a [`Vertical`](Node::Vertical), otherwise `false`.
+    /// Returns `true` if the node is a row stacking its children.
     #[inline(always)]
     pub const fn is_vertical(&self) -> bool {
-        matches!(self, Self::Vertical { .. })
+        matches!(self, Self::Row(row) if row.is_vertical())
     }
 
-    /// Returns `true` if the node is either [`Horizontal`](Node::Horizontal) or [`Vertical`](Node::Vertical),
-    /// otherwise `false`.
+    /// Returns `true` if the node is a [`Row`](Node::Row), otherwise `false`.
     #[inline(always)]
     pub const fn is_parent(&self) -> bool {
-        self.is_horizontal() || self.is_vertical()
+        matches!(self, Self::Row(_))
     }
 
     /// Returns `true` if the node is collapsed, otherwise `false`.
     #[inline(always)]
     /// Whether this node shows a bar instead of its contents — which is the question every
-    /// caller here is really asking, and why a stowed split answers yes as readily as one whose
-    /// leaves were collapsed one by one. How it got that way is [`SplitNode::stowed`]'s
+    /// caller here is really asking, and why a stowed row answers yes as readily as one whose
+    /// leaves were collapsed one by one. How it got that way is [`RowNode::stowed`]'s
     /// business, and matters only when bringing it back.
     pub fn is_collapsed(&self) -> bool {
         match self {
             Node::Leaf(leaf) => leaf.collapsed,
-            Node::Horizontal(split) | Node::Vertical(split) => {
-                split.stowed || split.fully_collapsed
-            }
+            Node::Row(row) => row.stowed || row.fully_collapsed,
         }
     }
 
-    /// Whether this node is a split that was put away as a unit — see [`SplitNode::stowed`].
+    /// Whether this node is a row that was put away as a unit — see [`RowNode::stowed`].
     ///
     /// Always `false` for a leaf: a leaf has nothing inside to keep, so collapsing it is the
     /// whole of what can happen to it.
     pub fn is_stowed(&self) -> bool {
         match self {
             Node::Leaf(_) => false,
-            Node::Horizontal(split) | Node::Vertical(split) => split.stowed,
+            Node::Row(row) => row.stowed,
         }
     }
 
-    /// Puts this split away as a unit, or brings it back. No-op on a leaf.
+    /// Puts this row away as a unit, or brings it back. No-op on a leaf.
     pub(crate) fn set_stowed(&mut self, stowed: bool) {
         match self {
             Node::Leaf(_) => {}
-            Node::Horizontal(split) | Node::Vertical(split) => split.stowed = stowed,
+            Node::Row(row) => row.stowed = stowed,
         }
     }
 
     /// Returns the number of layers of collapsed leaf subnodes.
     pub fn collapsed_leaf_count(&self) -> i32 {
         match self {
-            Node::Horizontal(split) | Node::Vertical(split) => split.collapsed_leaf_count,
+            Node::Row(row) => row.collapsed_leaf_count,
             Node::Leaf(leaf) => i32::from(leaf.collapsed),
         }
     }
@@ -185,13 +189,13 @@ impl<Tab> Node<Tab> {
     /// Sets the collapsing state of the node.
     ///
     /// Deliberately not public: on its own it makes the tree inconsistent, because every
-    /// split above the node derives its bookkeeping from what it contains. The operation
+    /// row above the node derives its bookkeeping from what it contains. The operation
     /// callers want is [`Tree::set_leaf_collapsed`](crate::Tree::set_leaf_collapsed).
     #[inline]
     pub(crate) fn set_collapsed(&mut self, collapsed: bool) {
         match self {
             Node::Leaf(leaf) => leaf.collapsed = collapsed,
-            Node::Vertical(split) | Node::Horizontal(split) => split.fully_collapsed = collapsed,
+            Node::Row(row) => row.fully_collapsed = collapsed,
         }
     }
 
@@ -202,13 +206,13 @@ impl<Tab> Node<Tab> {
     ///
     /// # Panics
     ///
-    /// Panics if `self` is neither a [`Vertical`](Node::Vertical) nor a [`Horizontal`](Node::Horizontal) node.
+    /// Panics if `self` is not a [`Row`](Node::Row).
     #[track_caller]
     #[inline]
     pub(crate) fn set_collapsed_leaf_count(&mut self, count: i32) {
         match self {
-            Node::Horizontal(split) | Node::Vertical(split) => split.collapsed_leaf_count = count,
-            _ => panic!("node was neither vertical nor horizontal"),
+            Node::Row(row) => row.collapsed_leaf_count = count,
+            Node::Leaf(_) => panic!("node was not a row"),
         }
     }
 

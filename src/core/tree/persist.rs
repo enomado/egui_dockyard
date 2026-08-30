@@ -29,7 +29,7 @@ use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
-use crate::core::tree::{ChildIndex, LeafNode, Node, NodeId, SplitNode, TabIndex, Tree};
+use crate::core::tree::{ChildIndex, LeafNode, Node, NodeId, RowNode, TabIndex, Tree};
 
 use super::arena::NodeEntry;
 
@@ -102,21 +102,25 @@ fn node_out<Tab>(tree: &Tree<Tab>, id: NodeId) -> NodeOut<'_, Tab> {
             scroll: leaf.scroll,
             collapsed: leaf.collapsed,
         },
-        node @ (Node::Vertical(split) | Node::Horizontal(split)) => {
+        Node::Row(row) => {
             // A pair because the *wire* is a pair: `NodeOut` holds `[Box<NodeOut>; 2]`, and a
             // saved layout is read by versions of this crate that know nothing about rows. The
             // format is stage 7's to change, and it changes on both sides at once — writer,
             // reader and the tombstone for what is already on disk.
-            let [left, right] = split.children_pair();
+            let [left, right] = row.children_pair();
             let children = [
                 Box::new(node_out(tree, left)),
                 Box::new(node_out(tree, right)),
             ];
-            let fraction = split.fraction;
-            let fully_collapsed = split.fully_collapsed;
-            let collapsed_leaf_count = split.collapsed_leaf_count;
-            let stowed = split.stowed;
-            if node.is_vertical() {
+            let fraction = row.fraction;
+            let fully_collapsed = row.fully_collapsed;
+            let collapsed_leaf_count = row.collapsed_leaf_count;
+            let stowed = row.stowed;
+            // The orientation stopped being a variant of `Node` in memory, and stayed one on
+            // the wire: a file written today is read by builds that know only `Vertical` /
+            // `Horizontal`, so the two spellings are exactly where the model and the format
+            // part company. Stage 7 changes the format; this stage may not.
+            if row.is_vertical() {
                 NodeOut::Vertical {
                     fraction,
                     fully_collapsed,
@@ -142,7 +146,7 @@ fn path_to<Tab>(tree: &Tree<Tab>, node: NodeId) -> Option<Vec<ChildIndex>> {
     let mut path = Vec::new();
     let mut current = node;
     while let Some(parent) = tree.parent(current) {
-        let index = tree[parent].get_split()?.index_of(current)?;
+        let index = tree[parent].get_row()?.index_of(current)?;
         path.push(index);
         current = parent;
     }
@@ -339,13 +343,7 @@ impl<Tab> Tree<Tab> {
         } else {
             0.5
         };
-        let split = SplitNode::new(children, fraction);
-        let node = if vertical {
-            Node::Vertical(split)
-        } else {
-            Node::Horizontal(split)
-        };
-        let id = self.adopt(node);
+        let id = self.adopt(Node::Row(RowNode::new(!vertical, children, fraction)));
         for child in children {
             self.nodes.get_mut(child).unwrap().parent = Some(id);
         }
@@ -497,7 +495,7 @@ impl<Tab> Tree<Tab> {
     fn walk(&self, path: &[ChildIndex]) -> Option<NodeId> {
         let mut current = self.root()?;
         for index in path {
-            current = self.node(current).ok()?.get_split()?.child(*index)?;
+            current = self.node(current).ok()?.get_row()?.child(*index)?;
         }
         Some(current)
     }
@@ -723,8 +721,8 @@ mod tests {
             .into_iter()
             .map(|id| match &tree[id] {
                 Node::Leaf(leaf) => (0, leaf.iter_tabs().cloned().collect()),
-                Node::Vertical(_) => (1, vec![]),
-                Node::Horizontal(_) => (2, vec![]),
+                Node::Row(row) if row.is_vertical() => (1, vec![]),
+                Node::Row(_) => (2, vec![]),
             })
             .collect()
     }
@@ -764,7 +762,7 @@ mod tests {
         let fractions: Vec<f32> = back
             .breadth_first()
             .into_iter()
-            .filter_map(|id| back[id].get_split().map(|split| split.fraction))
+            .filter_map(|id| back[id].get_row().map(|split| split.fraction))
             .collect();
         assert_eq!(fractions, vec![0.25, 0.75]);
     }
@@ -783,10 +781,10 @@ mod tests {
         // `children_pair` throughout this test: `sample()` builds the scene two children at a
         // time, so naming both is naming what the fixture just made, not an assumption about
         // what a split can hold.
-        let [_, right] = tree[root].get_split().unwrap().children_pair();
+        let [_, right] = tree[root].get_row().unwrap().children_pair();
         // A leaf collapsed *inside* what is about to be put away: the state that "collapse
         // every leaf" would have destroyed and cannot tell apart afterwards.
-        let [inner_top, _] = tree[right].get_split().unwrap().children_pair();
+        let [inner_top, _] = tree[right].get_row().unwrap().children_pair();
         tree.set_leaf_collapsed(inner_top, true);
         tree.set_split_stowed(right, true);
 
@@ -797,7 +795,7 @@ mod tests {
         assert_eq!(shape(&back), shape(&tree));
 
         let root = back.root().unwrap();
-        let [_, right] = back[root].get_split().unwrap().children_pair();
+        let [_, right] = back[root].get_row().unwrap().children_pair();
         assert!(back[right].is_stowed(), "the subtree came back put away");
         assert_eq!(
             back[right].collapsed_leaf_count(),
@@ -805,7 +803,7 @@ mod tests {
             "one bar, one row — recomputed on load from the field that was read back"
         );
 
-        let [inner_top, inner_bottom] = back[right].get_split().unwrap().children_pair();
+        let [inner_top, inner_bottom] = back[right].get_row().unwrap().children_pair();
         assert!(
             back[inner_top].is_collapsed(),
             "the leaf that was collapsed inside is still collapsed"
@@ -949,7 +947,7 @@ mod tests {
         assert_eq!(tree.num_tabs(), 3);
 
         let root = tree.root().unwrap();
-        assert_eq!(tree[root].get_split().unwrap().fraction, 0.75);
+        assert_eq!(tree[root].get_row().unwrap().fraction, 0.75);
         // The pair this very JSON literal describes — see the note in
         // `round_trip_keeps_a_subtree_stowed_and_its_insides_untouched`.
         let [left, right] = tree.children_pair(root).unwrap();
@@ -1069,7 +1067,7 @@ mod tests {
             assert_eq!(tree.validate(), Ok(()), "stored fraction {stored}");
             let root = tree.root().unwrap();
             assert_eq!(
-                tree[root].get_split().unwrap().fraction,
+                tree[root].get_row().unwrap().fraction,
                 expected,
                 "stored fraction {stored}"
             );
@@ -1086,7 +1084,7 @@ mod tests {
             let split = tree.adopt_split(false, [left, right], bad);
             tree.root = Some(split);
 
-            assert_eq!(tree[split].get_split().unwrap().fraction, 0.5, "{bad}");
+            assert_eq!(tree[split].get_row().unwrap().fraction, 0.5, "{bad}");
             assert_eq!(tree.validate(), Ok(()), "{bad}");
         }
     }

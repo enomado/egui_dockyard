@@ -88,7 +88,7 @@ impl<Tab> Tree<Tab> {
         // dividers. Stage 5 of the n-ary plan gives a divider its own address (a gap in a row),
         // and that is what turns this into a loop.
         let [first, second] = self[node]
-            .get_split()
+            .get_row()
             .expect("a node in a chain is a split")
             .children_pair();
         self.collect_chain(first, horizontal, chain);
@@ -135,7 +135,7 @@ impl<Tab> Tree<Tab> {
         // transposition of a row of three is a different gesture, not a wider version of this
         // one, so nothing here is waiting for a row.
         let [first, second] = self[outer]
-            .get_split()
+            .get_row()
             .expect("a transposition is rooted at the split between the two chains")
             .children_pair();
         let chains = [
@@ -419,7 +419,7 @@ mod test {
         tree.transpose_cross(outer, [0, 0], [&bounds, &bounds], 0.5);
 
         let fraction = tree[outer]
-            .get_split()
+            .get_row()
             .expect("`outer` stays a split")
             .fraction;
         assert!(

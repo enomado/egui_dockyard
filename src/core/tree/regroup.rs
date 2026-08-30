@@ -8,7 +8,7 @@
 
 use std::collections::HashSet;
 
-use crate::core::tree::{Node, NodeId, SplitNode, Tree};
+use crate::core::tree::{Node, NodeId, RowNode, Tree};
 
 /// The shape to write over a subtree.
 ///
@@ -30,8 +30,9 @@ pub(crate) enum Regroup {
         /// A node that is a split in the tree right now. It stays a split; everything else
         /// about it is replaced.
         id: NodeId,
-        /// `true` for [`Node::Horizontal`] (children side by side), `false` for
-        /// [`Node::Vertical`] (children stacked).
+        /// `true` for children side by side, `false` for children stacked — the same flag
+        /// [`RowNode::is_horizontal`] answers, and what used to be the choice of `Node` variant
+        /// wrapped around the split.
         horizontal: bool,
         /// The share of the parent rectangle taken by the first child.
         fraction: f32,
@@ -77,12 +78,7 @@ impl Regroup {
         };
 
         let child_ids = [children[0].id(), children[1].id()];
-        let split = SplitNode::new(child_ids, *fraction);
-        tree[*id] = if *horizontal {
-            Node::Horizontal(split)
-        } else {
-            Node::Vertical(split)
-        };
+        tree[*id] = Node::Row(RowNode::new(*horizontal, child_ids, *fraction));
 
         // The back-pointers, which assigning a `Node` cannot carry: a `Node` holds its
         // children's ids, but a child holds its parent's, and that half lives in the arena.

@@ -1512,7 +1512,7 @@ mod tests {
 
     fn fraction_of(state: &DockState<u32>, id: NodeId) -> f32 {
         state[NodePath::new(SurfaceIndex::main(), id)]
-            .get_split()
+            .get_row()
             .expect("node is a split")
             .fraction
     }
@@ -1677,7 +1677,7 @@ mod tests {
         let target_x = 0.5 * (rect(&ctx, top_left).right() + rect(&ctx, top_right).left());
         let inner_rect = rect(&ctx, bottom_inner);
         state[NodePath::new(SurfaceIndex::main(), bottom_inner)]
-            .get_split_mut()
+            .get_row_mut()
             .expect("the bottom band's inner node is a split")
             .fraction = (target_x - inner_rect.min.x) / inner_rect.width();
         render(&ctx, &mut state, &style, id);
@@ -2822,7 +2822,7 @@ mod tests {
         // number of parts down there names which target is this split's.
         let k = chain_parts(state, first, horizontal);
         state[path]
-            .get_split_mut()
+            .get_row_mut()
             .expect("a chain node is a split")
             .fraction = (targets[k - 1] - lo) / (hi - lo);
         aim_sweep(state, layout, first, horizontal, &targets[..k - 1]);

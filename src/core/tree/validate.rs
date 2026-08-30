@@ -243,7 +243,7 @@ impl<Tab> Tree<Tab> {
             }
             if let Ok(children) = self
                 .node(id)
-                .map(|node| node.get_split().map(|s| s.children()))
+                .map(|node| node.get_row().map(|s| s.children()))
             {
                 stack.extend(children.into_iter().flatten().copied().filter(|child| {
                     // Broken child links are reported below; do not walk into them.
@@ -270,7 +270,7 @@ impl<Tab> Tree<Tab> {
                     let claims_it = self
                         .node(parent)
                         .ok()
-                        .and_then(Node::get_split)
+                        .and_then(Node::get_row)
                         .is_some_and(|split| split.index_of(id).is_some());
                     if !claims_it {
                         violations.push(TreeViolation::ParentLinkBroken { node: id, parent });
@@ -284,8 +284,8 @@ impl<Tab> Tree<Tab> {
             }
 
             match node {
-                Node::Vertical(split) | Node::Horizontal(split) => {
-                    for &child in split.children() {
+                Node::Row(row) => {
+                    for &child in row.children() {
                         if self.parent(child) != Some(id) {
                             violations.push(TreeViolation::ChildLinkBroken { node: id, child });
                         }
@@ -295,9 +295,9 @@ impl<Tab> Tree<Tab> {
                     // done, an out-of-range one is arithmetic that answered outside the interval
                     // it was measuring. Only the first is checked first — `NaN` fails every
                     // comparison, so the range test would let it through.
-                    if !split.fraction.is_finite() {
+                    if !row.fraction.is_finite() {
                         violations.push(TreeViolation::SplitFractionNotFinite { node: id });
-                    } else if !(0.0..=1.0).contains(&split.fraction) {
+                    } else if !(0.0..=1.0).contains(&row.fraction) {
                         violations.push(TreeViolation::SplitFractionOutOfRange { node: id });
                     }
                 }
@@ -456,7 +456,7 @@ mod tests {
             let root = tree.root().unwrap();
             tree.split_right(root, 0.5, vec![3]);
             let split = tree.root().unwrap();
-            tree[split].get_split_mut().unwrap().fraction = fraction;
+            tree[split].get_row_mut().unwrap().fraction = fraction;
             (tree.validate().unwrap_err(), split)
         };
 
@@ -485,7 +485,7 @@ mod tests {
             let root = tree.root().unwrap();
             tree.split_right(root, 0.5, vec![3]);
             let split = tree.root().unwrap();
-            tree[split].get_split_mut().unwrap().fraction = fine;
+            tree[split].get_row_mut().unwrap().fraction = fine;
             assert_eq!(tree.validate(), Ok(()), "a fraction of {fine} was rejected");
         }
     }
@@ -521,8 +521,8 @@ mod tests {
         // Cut the middle split loose: everything under it is now unreachable.
         let middle = tree.parent(deep).unwrap();
         let top = tree.parent(middle).unwrap();
-        let index = tree[top].get_split().unwrap().index_of(middle).unwrap();
-        tree[top].get_split_mut().unwrap().set_child(index, deep);
+        let index = tree[top].get_row().unwrap().index_of(middle).unwrap();
+        tree[top].get_row_mut().unwrap().set_child(index, deep);
 
         let violations = tree.validate().unwrap_err();
         assert!(
@@ -543,8 +543,8 @@ mod tests {
         let inner = tree.parent(deep).unwrap();
 
         // Point the inner split's own child back at the outer split.
-        let index = tree[inner].get_split().unwrap().index_of(deep).unwrap();
-        tree[inner].get_split_mut().unwrap().set_child(index, split);
+        let index = tree[inner].get_row().unwrap().index_of(deep).unwrap();
+        tree[inner].get_row_mut().unwrap().set_child(index, split);
 
         let violations = tree.validate().unwrap_err();
         assert!(

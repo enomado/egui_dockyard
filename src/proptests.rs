@@ -89,7 +89,7 @@ fn split_fractions(state: &DockState<u32>) -> HashMap<NodePath, f32> {
             continue;
         };
         for id in tree.breadth_first() {
-            if let Some(split) = tree[id].get_split() {
+            if let Some(split) = tree[id].get_row() {
                 fractions.insert(NodePath::new(surface_index, id), split.fraction);
             }
         }
@@ -177,7 +177,7 @@ proptest! {
                 let Some(tree) = surface.node_tree() else { continue };
 
                 for id in tree.breadth_first() {
-                    let Some(split) = tree[id].get_split() else { continue };
+                    let Some(split) = tree[id].get_row() else { continue };
                     let children = split.children();
                     let counts = || children.iter().map(|child| tree[*child].collapsed_leaf_count());
                     // A stowed split draws one bar for whatever it contains, so it costs one

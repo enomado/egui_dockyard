@@ -14,7 +14,8 @@ use super::{
     state::{DragSubject, State},
     tab_removal::TabRemoval,
 };
-use crate::core::resize::SepBehavior;
+use crate::Share;
+use crate::core::resize::{SepBehavior, apply_drag};
 use crate::dock_area::tab_removal::ForcedRemoval;
 use crate::layout::{DockLayout, SideStrip};
 use crate::tab_viewer::OnCloseResponse;
@@ -888,6 +889,110 @@ impl<Tab> DockArea<'_, Tab> {
         self.dock_state[path].is_leaf() || self.dock_state[path].is_stowed()
     }
 
+    /// How long each child of the row at `path` is *asked* to be this frame — a fixed length for
+    /// a collapsed child squeezed into a strip, a weight for everything else — or [`None`] where
+    /// every child takes a share and the row is simply cut at its stored boundaries.
+    ///
+    /// **One home for "which children are strips this frame".** Two readers depend on the
+    /// answer: [`cut_row`](Self::cut_row) turns it into rectangles, and
+    /// [`trading_pair`](Self::trading_pair) turns it into "which two children does a drag on
+    /// this divider actually trade between". Written out twice — the layout deciding and the
+    /// gesture guessing from the tree — they would be free to disagree, which is the shape of
+    /// the bug this file already records once (the "is there a divider?" rule that lived inline
+    /// in two places and heard about the sideways branch in neither).
+    ///
+    /// The two cases are the same problem one axis over, and are kept apart only by what they
+    /// measure: a collapsed child of a **vertical** row spends height ([`collapsed_strip_height`],
+    /// as many rows as it has collapsed leaves), a strip child of a **horizontal** row spends
+    /// width ([`collapsed_strip_width`], as many columns as [`strip_columns`](Self::strip_columns)
+    /// says it fits in). Sideways is behind [`DockArea::collapse_sideways`]; collapsing into a row
+    /// is not, and the reason for the asymmetry is in `cut_row`.
+    fn row_extents(&self, path: NodePath) -> Option<RowExtents> {
+        let row = self.dock_state[path]
+            .get_row()
+            .expect("only a row has children to measure");
+        let horizontal = row.is_horizontal();
+        let style = self.style.as_ref().unwrap();
+        let children = self.child_paths(path);
+        let weight = |index: usize| Extent::Weighted(row.shares()[index].0);
+
+        if !horizontal {
+            if !children
+                .iter()
+                .any(|&child| self.dock_state[child].is_collapsed())
+            {
+                return None;
+            }
+            let extents = children
+                .iter()
+                .enumerate()
+                .map(|(index, &child)| {
+                    let node = &self.dock_state[child];
+                    if node.is_collapsed() {
+                        Extent::Fixed(collapsed_strip_height(node.collapsed_leaf_count(), style))
+                    } else {
+                        weight(index)
+                    }
+                })
+                .collect();
+            return Some(RowExtents {
+                extents,
+                sideways: false,
+            });
+        }
+
+        if !self.collapse_sideways {
+            return None;
+        }
+        let columns: Vec<Option<i32>> = children
+            .iter()
+            .map(|&child| self.strip_columns(child))
+            .collect();
+        if !columns.iter().any(Option::is_some) {
+            return None;
+        }
+        let extents = columns
+            .iter()
+            .enumerate()
+            .map(|(index, columns)| match columns {
+                Some(columns) => Extent::Fixed(collapsed_strip_width(*columns, style)),
+                None => weight(index),
+            })
+            .collect();
+        Some(RowExtents {
+            extents,
+            sideways: true,
+        })
+    }
+
+    /// The two children a drag on the divider in `gap` actually trades between: the nearest child
+    /// on either side that takes a *share* of the row.
+    ///
+    /// On a row with no strips in it those are the gap's own two neighbours, `(gap, gap + 1)`, and
+    /// the caller can tell that case by the pair being adjacent — it is the one that must keep
+    /// writing exactly the bits it always wrote.
+    ///
+    /// With a strip between them they are the open children on either side of it. Both of the
+    /// strip's edges answer the same pair, which is what makes the two lines
+    /// [`cut_runs`](cut_runs) draws there one gesture with two handles rather than two gestures:
+    /// the strip keeps its own width whatever the drag does, so the only thing a hand can move
+    /// here is how the two open columns divide what is left, and the strip slides along with the
+    /// line.
+    ///
+    /// [`None`] when one side is nothing but strips — a strip stacked against the row's end has
+    /// no second party to trade with, and no divider is drawn beside it either.
+    fn trading_pair(&self, gap: GapPath) -> Option<(usize, usize)> {
+        let row = self.dock_state[gap.row].get_row()?;
+        row.has_gap(gap.gap).then_some(())?;
+        let Some(RowExtents { extents, .. }) = self.row_extents(gap.row) else {
+            return Some((gap.gap.0, gap.gap.0 + 1));
+        };
+        let is_open = |index: usize| matches!(extents[index], Extent::Weighted(_));
+        let near = (0..=gap.gap.0).rev().find(|&index| is_open(index))?;
+        let far = (gap.gap.0 + 1..extents.len()).find(|&index| is_open(index))?;
+        Some((near, far))
+    }
+
     /// How the row at `path` is cut this frame: one rectangle per child, one divider per gap
     /// (where there is one to draw), and which children became sideways strips.
     ///
@@ -973,7 +1078,6 @@ impl<Tab> DockArea<'_, Tab> {
             divider
         };
         let cut_at = |at: f32| map_to_pixel(at, pixels_per_point, f32::round);
-        let weight = |index: usize| Extent::Weighted(row.shares()[index].0);
 
         // A vertical row with a collapsed child. The collapsed child is not cut at a ratio — it
         // is given exactly what its rows need, and the divider goes *beside* that, not through
@@ -991,23 +1095,7 @@ impl<Tab> DockArea<'_, Tab> {
         // the picture is the same either way, and the difference is who *owns* the empty space
         // below. Kept by parity. The horizontal branch answers "nobody" to the same question
         // (Стас, 30.08), and reconciling the two is a decision for stage 7, not a refactor.
-        if !horizontal
-            && children
-                .iter()
-                .any(|&child| self.dock_state[child].is_collapsed())
-        {
-            let extents: Vec<Extent> = children
-                .iter()
-                .enumerate()
-                .map(|(index, &child)| {
-                    let node = &self.dock_state[child];
-                    if node.is_collapsed() {
-                        Extent::Fixed(collapsed_strip_height(node.collapsed_leaf_count(), style))
-                    } else {
-                        weight(index)
-                    }
-                })
-                .collect();
+        if let Some(RowExtents { extents, sideways }) = self.row_extents(path) {
             // Each edge snapped from the *unsnapped* run — `far = near + width` in points, then
             // to the pixel — the way the pair's `right_separator_border` was. The horizontal
             // branch below snaps the run itself; `cut_runs` says why the two are kept apart.
@@ -1017,27 +1105,59 @@ impl<Tab> DockArea<'_, Tab> {
             // collapsed leaf draws its bar at the top of whatever it is given — answering
             // differently to a hit test and to a drop target, and letting the thing called a
             // strip quietly not be one. Reconciled on the horizontal answer (decision 7, Стас).
+            //
+            // The sideways case snaps the run itself instead (`right_start = cut_at(left_end +
+            // separator)` with `left_end` already snapped), as the pair did — `cut_runs` says why
+            // the two are kept apart rather than unified.
             let runs = cut_runs(
                 lo,
                 hi,
                 &extents,
                 style.separator.width,
                 cut_at,
-                |at| at,
+                |at| if sideways { cut_at(at) } else { at },
                 false,
             );
+            // Which children became strips that draw a bar of their own, and against which edge.
+            // Only the sideways case marks anything: a child collapsed into a *row* draws a tab
+            // bar, which is what a leaf draws anyway, so there is nothing for drawing to be told.
+            let side_strips = if sideways {
+                children
+                    .iter()
+                    .zip(&runs.runs)
+                    .zip(&extents)
+                    .map(|((&child, run), extent)| {
+                        // A child that is a row of strips is not marked as one itself: its
+                        // leaves are, when the pass reaches them. See `draws_one_bar`.
+                        if !matches!(extent, Extent::Fixed(_)) || !self.draws_one_bar(child) {
+                            return None;
+                        }
+                        // `Left` means "the width it gave up lies to its right", which is what
+                        // the pair wrote for *both* strips of a fully collapsed row — the second
+                        // hugs the first, not the edge. A strip among open columns reads the
+                        // same way; only a strip stacked from the far edge is a `Right`.
+                        Some(match run {
+                            Run::Leading | Run::Middle => SideStrip::Left,
+                            Run::Trailing => SideStrip::Right,
+                        })
+                    })
+                    .collect()
+            } else {
+                vec![None; children.len()]
+            };
             return RowCut {
                 children: runs.spans.into_iter().map(child_rect).collect(),
-                // Cut at the strips' edges, not at the ratios — so the line a ratio names is not
-                // a boundary between anything, and there is nothing to draw or to grab. A line
-                // arrives only between two open neighbours, which a pair with a collapsed child
-                // never has.
+                // Cut at the strips' edges, not at the ratios — so a line arrives only where two
+                // open children have nothing but strips between them, and it arrives at both
+                // edges of what is between them. See `cut_runs`, which decides it, and
+                // `trading_pair`, which reads the same extents back to say what such a line
+                // moves. A pair with a collapsed child has one open child and gets no line at all.
                 dividers: runs
                     .dividers
                     .into_iter()
                     .map(|divider| divider.map(divider_rect))
                     .collect(),
-                side_strips: vec![None; children.len()],
+                side_strips,
             };
         }
 
@@ -1070,70 +1190,8 @@ impl<Tab> DockArea<'_, Tab> {
         // the *far* edge instead would leave the hole in the middle of the row, the same amount
         // of empty space arranged so that it separates the strips rather than standing beside
         // them.
-        if self.collapse_sideways && horizontal {
-            let columns: Vec<Option<i32>> = children
-                .iter()
-                .map(|&child| self.strip_columns(child))
-                .collect();
-            if columns.iter().any(Option::is_some) {
-                // Same arithmetic as the collapsed rows above, one axis over, and for the same
-                // reason: a strip is given exactly what it needs, and the divider goes *beside*
-                // it rather than through it. Take half the divider out of a strip that is
-                // already exactly one arrow wide and the arrow no longer fits in what it was
-                // given. A child that is collapsed but does not fit in strips (a vertical stack
-                // of tab bars) is an open column here: it can hold the width perfectly well.
-                let extents: Vec<Extent> = columns
-                    .iter()
-                    .enumerate()
-                    .map(|(index, columns)| match columns {
-                        Some(columns) => Extent::Fixed(collapsed_strip_width(*columns, style)),
-                        None => weight(index),
-                    })
-                    .collect();
-                // The run itself snapped at every step (`right_start = cut_at(left_end +
-                // separator)` with `left_end` already snapped), as the pair did — see
-                // `cut_runs` for why the vertical branch above does not.
-                let runs = cut_runs(
-                    lo,
-                    hi,
-                    &extents,
-                    style.separator.width,
-                    cut_at,
-                    cut_at,
-                    false,
-                );
-                let side_strips = children
-                    .iter()
-                    .zip(&runs.runs)
-                    .zip(&columns)
-                    .map(|((&child, run), columns)| {
-                        // A child that is a row of strips is not marked as one itself: its
-                        // leaves are, when the pass reaches them. See `draws_one_bar`.
-                        if columns.is_none() || !self.draws_one_bar(child) {
-                            return None;
-                        }
-                        // `Left` means "the width it gave up lies to its right", which is what
-                        // the pair wrote for *both* strips of a fully collapsed row — the second
-                        // hugs the first, not the edge. A strip among open columns reads the
-                        // same way; only a strip stacked from the far edge is a `Right`.
-                        Some(match run {
-                            Run::Leading | Run::Middle => SideStrip::Left,
-                            Run::Trailing => SideStrip::Right,
-                        })
-                    })
-                    .collect();
-                return RowCut {
-                    children: runs.spans.into_iter().map(child_rect).collect(),
-                    // Same as the case above, one axis over.
-                    dividers: runs
-                        .dividers
-                        .into_iter()
-                        .map(|divider| divider.map(divider_rect))
-                        .collect(),
-                    side_strips,
-                };
-            }
-        }
+        // Both of those cases are `row_extents` above, which is the one place that decides them —
+        // the gesture reads the same answer through `trading_pair`.
 
         // Neither: every child is cut at where its boundaries *are*, which is the stored ratio
         // pushed into the band this frame's geometry can honour — see `SeparatorBand`.
@@ -1268,6 +1326,16 @@ impl<Tab> DockArea<'_, Tab> {
         let Some(drawn) = self.separator_rect(gap) else {
             return;
         };
+
+        // Whether this line has a strip between the two children it trades between — see
+        // `trading_pair`. Two things read it: the double-click below, which has no answer for
+        // such a line, and the junction handles at the end, which have none either. A junction
+        // is a corner where this line meets a divider *inside* one of its neighbours, and it
+        // moves both by writing the boundary of this gap — which beside a strip is the boundary
+        // of the strip itself, and moves nothing.
+        let spans_a_strip = self
+            .trading_pair(gap)
+            .is_some_and(|(near, far)| far > near + 1);
 
         // Cloned out of `style` up front, and not where they are used: `style` may be borrowed
         // from `self.style`, while everything below that *writes* — `nudge_boundary`, the
@@ -1434,7 +1502,14 @@ impl<Tab> DockArea<'_, Tab> {
                 // build a row of three — caught a double-click writing a boundary clean past its
                 // neighbour: the divider between the second and third panels was sent to the
                 // middle of the whole row, which is behind the first one.
-                if response.double_clicked() {
+                //
+                // A line drawn beside a strip is left out: the middle of *its* room is the
+                // middle between two boundaries that both lie on the same strip, and writing it
+                // moves nothing on screen while editing the width the hidden panel is keeping.
+                // What a double-click there should mean — the middle of the two open children's
+                // shared room, presumably — is a decision and not a derivation, so it waits for
+                // one instead of being guessed at here.
+                if response.double_clicked() && !spans_a_strip {
                     let centre = self.gap_centre(gap);
                     if self.boundary_at(gap) != centre {
                         self.mutations
@@ -1445,7 +1520,9 @@ impl<Tab> DockArea<'_, Tab> {
             }
         }
 
-        self.draw_junction_handles(ui, gap, &separator_style, &toggle_style, state);
+        if !spans_a_strip {
+            self.draw_junction_handles(ui, gap, &separator_style, &toggle_style, state);
+        }
     }
 
     /// Where the boundary in `gap` sits, as its row stores it.
@@ -1571,6 +1648,25 @@ impl<Tab> DockArea<'_, Tab> {
         delta: f32,
         behavior: &SepBehavior,
     ) -> bool {
+        // A divider drawn beside a strip trades between the two *open* children the strip lies
+        // between, and neither of the paths below can name that: one writes a boundary, the other
+        // walks the row's whole weight vector including the strip's — whose weight buys nothing,
+        // because a strip is given its own width whatever it is holding. Taken first so that both
+        // the Pair path and the modes go the same way over such a divider, and so that the two
+        // lines drawn either side of one strip are one gesture with two handles.
+        if let Some((near, far)) = self.trading_pair(gap)
+            && far > near + 1
+        {
+            return self.drag_across_strips(
+                gap,
+                near,
+                far,
+                pixels_per_point,
+                extra,
+                delta,
+                behavior,
+            );
+        }
         if let SepBehavior::Pair = behavior {
             return self.nudge_boundary(gap, pixels_per_point, extra, delta);
         }
@@ -1586,6 +1682,97 @@ impl<Tab> DockArea<'_, Tab> {
         let shares = row.shares_after_drag(gap.gap, delta, behavior, range, extra);
         // A drag that asked a row with nothing left to give changes no weight, and reporting it as
         // a write would put a commit event behind a layout that did not move.
+        if shares == row.shares() {
+            return false;
+        }
+        self.mutations.push(DockMutation::SetShares {
+            row: gap.row,
+            shares,
+        });
+        true
+    }
+
+    /// Moves the line drawn beside a strip by `delta` points: the two open children `near` and
+    /// `far` divide what the strips between them leave, and the strips ride along at their own
+    /// width. Answers whether any weight changed.
+    ///
+    /// **The strips take no part in the trade.** A strip's weight is stored and ignored — the
+    /// layout gives it exactly `collapsed_strip_width` — so the row's weight vector is not the
+    /// vector this drag divides. The one it divides is the open children's, which is why the
+    /// weights are compacted, dragged, and scattered back: whatever a strip's weight was, it is
+    /// what it will be when the leaf is expanded again, and a drag has no business editing the
+    /// width a hidden panel is keeping for itself. That was the whole point of the 28.08 fix
+    /// this file records, arrived at from the other side.
+    ///
+    /// Sizes come from the rectangles the layout actually gave the open children, rather than
+    /// from weights and a row extent: `min_size` is in points, and the room a child has to give
+    /// is what it *has* this frame — with fixed children in the row, the two are only the same
+    /// number after subtracting exactly the strips and the dividers, which is the layout's
+    /// arithmetic and not worth doing twice.
+    ///
+    /// Every mode is welcome here — the compacted vector is a row of open children, and `Chain`
+    /// walking off the end of it walks off the end of the open ones, which is the honest reading:
+    /// a strip has nothing to give.
+    #[allow(clippy::too_many_arguments)]
+    fn drag_across_strips(
+        &mut self,
+        gap: GapPath,
+        near: usize,
+        far: usize,
+        pixels_per_point: f32,
+        min_size: f32,
+        delta: f32,
+        behavior: &SepBehavior,
+    ) -> bool {
+        if delta == 0.0 {
+            return false;
+        }
+        let Some(RowExtents { extents, .. }) = self.row_extents(gap.row) else {
+            return false;
+        };
+        let horizontal = self.dock_state[gap.row].is_horizontal();
+        let children = self.child_paths(gap.row);
+        let open: Vec<usize> = (0..extents.len())
+            .filter(|&index| matches!(extents[index], Extent::Weighted(_)))
+            .collect();
+        // The pair came from `trading_pair`, which found them in this same vector.
+        let held = open
+            .iter()
+            .position(|&index| index == near)
+            .expect("the near child of a trading pair takes a share");
+        debug_assert_eq!(open.get(held + 1), Some(&far), "and the far one follows it");
+
+        let row = self.dock_state[gap.row]
+            .get_row()
+            .expect("`trading_pair` answered, so this node is a row");
+        let mut weights: Vec<f32> = open.iter().map(|&index| row.shares()[index].0).collect();
+        // A child that was never laid out has no length to give, which `shrink_shares` reads as
+        // "nothing to spare" — the same answer it gives a child already at its minimum.
+        let sizes: Vec<f32> = open
+            .iter()
+            .map(|&index| {
+                let rect = split_rect(
+                    self.layout.rect(children[index]).unwrap_or(Rect::ZERO),
+                    pixels_per_point,
+                );
+                if horizontal {
+                    rect.width()
+                } else {
+                    rect.height()
+                }
+            })
+            .collect();
+
+        apply_drag(behavior, &mut weights, held, delta, min_size, |child| {
+            sizes[child]
+        });
+
+        let mut shares = row.shares().to_vec();
+        for (&index, weight) in open.iter().zip(weights) {
+            shares[index] = Share(weight);
+        }
+        // A row with nothing left to give changes no weight, and reporting that as a write would
+        // put a commit event behind a layout that did not move.
         if shares == row.shares() {
             return false;
         }
@@ -1755,6 +1942,21 @@ struct RowCut {
     side_strips: Vec<Option<SideStrip>>,
 }
 
+/// What a row whose children do not all take a share asks of each of them — see
+/// [`DockArea::row_extents`], which is the only thing that builds one.
+#[derive(Clone, Debug)]
+struct RowExtents {
+    /// One per child, in [`DockArea::child_paths`] order.
+    extents: Vec<Extent>,
+
+    /// Set for a **horizontal** row with strip columns in it, clear for a **vertical** row with
+    /// collapsed children. Two things follow from it and nothing else does: which way the run is
+    /// snapped (see [`cut_runs`], where the difference is inherited rather than chosen), and
+    /// whether the children that became strips are marked as such — only a sideways strip draws
+    /// something other than what it would draw anyway.
+    sideways: bool,
+}
+
 /// How one child takes its length along the row's axis, as [`cut_runs`] sees it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Extent {
@@ -1828,9 +2030,21 @@ struct RunCut {
 /// `the_two_axes_snap_their_runs_differently_and_it_is_inherited`: unifying them is a decision
 /// about pixels, not a cleanup.
 ///
-/// **Dividers.** A divider is recorded only between two open neighbours, where a ratio is what
-/// separates them. A gap on either side of a fixed child is cut at that child's edge, and the
-/// line the ratio would name there is not a boundary between anything.
+/// **Dividers.** A divider is recorded wherever two open children have **only fixed children
+/// between them**, and it is recorded at *both* edges of what lies between: one line where the
+/// near open child ends, one where the far one begins. Two adjacent open children are the same
+/// rule with nothing in between, and the two lines are then one — which is what every row
+/// without a strip in it is, so nothing moves there.
+///
+/// Both lines mean the same trade: the two open children divide what the fixed ones leave, and
+/// the strip between them rides along at its own width. A drag reads that pairing back out of
+/// [`DockArea::trading_pair`], which walks the same extents.
+///
+/// This used to be "only between two open neighbours", and a strip in the *middle* of a row then
+/// killed both of its gaps at once: the two open columns either side of it had no line between
+/// them anywhere, and no way to be resized against each other at all. A strip at the row's *end*
+/// still has no line beside it, and wants none — there is only one open child there, and nothing
+/// for it to trade with.
 ///
 /// # Panics
 ///
@@ -1941,7 +2155,20 @@ fn cut_runs(
                     Some(cut(end))
                 },
             );
-            if !last_of_the_middle && is_open(index) && is_open(index + 1) {
+            // A line at this gap when it is an *outer* edge of what separates two open
+            // children: the near child is open and somebody open is still ahead (the near
+            // edge of the run of strips), or the far child is open and somebody open is
+            // behind (its far edge). With nothing in between both clauses name the same gap
+            // and it gets its one line, exactly as before.
+            //
+            // Guarded by `last_of_the_middle` first and not merely also: past the middle there
+            // is no gap `index` to record and no child `index + 1` in the middle to ask about.
+            let spans_a_trade = !last_of_the_middle && {
+                let open_behind = middle.clone().any(|k| k <= index && is_open(k));
+                let open_ahead = middle.clone().any(|k| k > index && is_open(k));
+                (is_open(index) && open_ahead) || (is_open(index + 1) && open_behind)
+            };
+            if spans_a_trade {
                 dividers[index] = Some((cut(end), cut(carry(carry(end) + separator))));
             }
             cursor = carry(carry(end) + separator);
@@ -2267,9 +2494,14 @@ mod tests {
     }
 
     /// A fixed child between two open ones keeps exactly its length, the open ones split the
-    /// rest, and neither gap beside it draws a divider: the gap is cut at the strip's edge.
+    /// rest, and **both** gaps beside it draw a line: the two open children have only a strip
+    /// between them, so each of the strip's edges is a handle on the one boundary they share.
+    ///
+    /// The lines are at the strip's edges and not at a ratio — which is why the file used to say
+    /// there were none at all. That left the two open children with no line between them
+    /// anywhere and no way to be resized against each other, which is the defect this pins.
     #[test]
-    fn a_fixed_child_among_open_ones_keeps_its_length_and_draws_no_divider() {
+    fn a_fixed_child_among_open_ones_is_grabbed_by_both_its_edges() {
         let extents = [
             Extent::Weighted(1.0),
             Extent::Fixed(10.0),
@@ -2284,8 +2516,42 @@ mod tests {
                 (Some(57.0), None)
             ]
         );
-        assert_eq!(cut.dividers, vec![None, None]);
+        assert_eq!(
+            cut.dividers,
+            vec![Some((43.0, 45.0)), Some((55.0, 57.0))],
+            "one line where the near column ends, one where the far one begins"
+        );
         assert_eq!(cut.runs, vec![Run::Middle; 3]);
+    }
+
+    /// A strip at the row's **end** still draws no line beside it — there is only one open child
+    /// there, and nothing for it to trade with. The positive control for the test above: without
+    /// it, "a strip has handles" would pass just as well if every gap beside a strip grew one.
+    #[test]
+    fn a_fixed_child_at_the_end_of_the_row_has_nothing_to_trade_with() {
+        let leading = [
+            Extent::Fixed(10.0),
+            Extent::Weighted(1.0),
+            Extent::Weighted(1.0),
+        ];
+        let cut = cut_runs(0.0, 100.0, &leading, 2.0, whole, whole, false);
+        assert_eq!(
+            cut.dividers[0], None,
+            "no line between the strip and the column beside it"
+        );
+        assert!(
+            cut.dividers[1].is_some(),
+            "control: the two open columns still have theirs"
+        );
+
+        let trailing = [
+            Extent::Weighted(1.0),
+            Extent::Weighted(1.0),
+            Extent::Fixed(10.0),
+        ];
+        let cut = cut_runs(0.0, 100.0, &trailing, 2.0, whole, whole, false);
+        assert!(cut.dividers[0].is_some(), "control: the same, mirrored");
+        assert_eq!(cut.dividers[1], None);
     }
 
     /// Open children whose weights add up to nothing are not a proportion of anything; they
@@ -2533,8 +2799,18 @@ mod tests {
             right.min.x,
             "and the right one after the strip",
         );
-        assert_eq!(divider_of(&layout, row, 0), None);
-        assert_eq!(divider_of(&layout, row, 1), None);
+        // The two columns share one boundary and it has a handle at each edge of the strip
+        // between them — a strip in the middle used to leave them with none anywhere.
+        close(
+            divider_of(&layout, row, 0).unwrap().max.x,
+            strip.min.x,
+            "the near handle sits where the strip begins",
+        );
+        close(
+            divider_of(&layout, row, 1).unwrap().min.x,
+            strip.max.x,
+            "and the far one where it ends",
+        );
     }
 
     /// Every column a strip: they sit against the left edge one after the other, each marked

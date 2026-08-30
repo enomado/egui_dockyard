@@ -215,6 +215,18 @@ in the Definition of done below.
   judges the mode; the sweep's number says the mode is *reachable at random*, and it should be
   raised when the two defects above are fixed and the sweep can be lengthened again.
 
+## Found on the way (30.08, acceptance)
+
+* 🚨 **A strip in the middle of a row had no divider at all, either side of it.** Found by Стас in
+  the application during this plan's acceptance, and it is not this plan's defect — the rule is
+  the sideways feature's, and the fix is written up in
+  [a collapsed leaf can hide sideways](PLAN_a_collapsed_leaf_can_hide_sideways.md). It touches this
+  plan in one place: a line drawn beside a strip trades between the two *open* children, which
+  neither `set_boundary` nor `shares_after_drag` can name, so it goes through a third path
+  (`DockArea::drag_across_strips`) that compacts the row to its open children and runs the same
+  `apply_drag`. Every mode arrives there — the modifier is read before the routing, so Shift and
+  Ctrl mean beside a strip what they mean anywhere else.
+
 ## Definition of done
 
 * The stage 0 oracle is green, and its `Pair` positive control never went red.

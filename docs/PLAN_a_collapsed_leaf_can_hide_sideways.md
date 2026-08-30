@@ -155,6 +155,57 @@ Two things learned, both by mutation:
   decoration, and the asymmetry with `side_strip` written down where it would otherwise read as
   an oversight.
 
+## Afterwards, again: a strip in the middle took the row's resizing with it (30.08)
+
+Стас, with a *Hydrodynamics* panel collapsed between two others:
+
+> есть панель свёрнутая посередине. это хорошо, но так получилось что у неё нет ручки чтобы
+> ресайзить сплиты
+
+There was none, and it was the same rule as the artefact above seen from the other end. "A divider
+lies between two open neighbours" is *right* about where a line goes — a strip is cut at its own
+edges, so the ratio names nothing there — and it was **wrong about how many** it therefore owes.
+A strip in the middle of a row answers no to *both* of its gaps at once, and the two open columns
+either side of it are then left with no line between them anywhere: they share a boundary, and it
+had no handle. At the row's **end** the same answer is right and stays — one open child has nobody
+to trade with, and Стас confirmed that is what he wants there.
+
+The rule is now "a line wherever two open children have only strips between them, at **both** edges
+of what is between them". Two adjacent open children are that rule with nothing in between, so
+every row without a strip in it draws exactly what it drew. Both lines mean the same trade, which
+is what makes them one gesture with two handles rather than two gestures.
+
+That trade is the other half. A strip is *given* its width, so the row's weight vector is not the
+vector such a drag divides: the open children's is. `drag_across_strips` compacts the weights to
+the open children, runs the same `apply_drag` every other divider runs, and scatters them back —
+so a strip's stored weight, which is the width the hidden panel gets back when it opens, is
+untouched. Writing the gap's own boundary instead would have edited exactly that, which is the
+28.08 defect above arrived at from the other side, and the reason
+`the_strip_keeps_the_width_it_is_holding` aims at the ratio rather than at the picture: the
+picture cannot tell.
+
+**One home for "which children are strips this frame."** The layout knew and the gesture would
+have had to guess, which is the shape of the 28.08 bug exactly. `DockArea::row_extents` answers it
+once; `cut_row` turns the answer into rectangles and `trading_pair` turns it into "which two
+children does this line actually trade between". The two branches of `cut_row` — a vertical row
+with collapsed children, a horizontal one with strips — are now one, differing in the two things
+that genuinely differ (how the run is snapped, whether the strips are marked).
+
+Oracle: [tests/a_strip_in_the_middle_still_has_a_handle.rs](../tests/a_strip_in_the_middle_still_has_a_handle.rs),
+five tests, three of them killed by both mutations tried (the old divider rule restored; the drag
+routed back through the ordinary path). The other two are controls that survive both on purpose —
+a strip at the edge grows no handle, and an open row is untouched.
+
+Two things a strip-spanning line deliberately does **not** do, both left for a decision rather
+than guessed at:
+
+* **A double-click does not centre it.** The middle of *its* room is the middle between two
+  boundaries that both lie on the same strip: nothing moves on screen and the hidden panel's width
+  is rewritten. What it should mean — the middle of the two open columns' shared room, presumably
+  — is a decision.
+* **It offers no junction handles.** A junction moves this line by writing *this gap's* boundary,
+  which beside a strip is the strip's own edge.
+
 ## What is left
 
 * **A `Collapse` step in `tests/dst.rs`.** The sweep cannot collapse a leaf at all — there is no

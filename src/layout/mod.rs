@@ -111,7 +111,7 @@ pub struct DockLayout {
     /// let drawing work it out again, together with a "is there one at all?" rule that then had
     /// to be repeated everywhere and drifted the moment a branch was added. Now the branch that
     /// cuts the row is the one that says what it cut, and the answer is not optional to give:
-    /// see `SplitCut` in `show/mod.rs` and [`Self::set_divider`].
+    /// see `RowCut` in `show/mod.rs` and [`Self::set_divider`].
     ///
     /// Note that a divider always occupies *space* — the layout leaves `separator.width`
     /// between a strip and its sibling either way. An absent entry means there is no line to

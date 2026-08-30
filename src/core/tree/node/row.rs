@@ -283,30 +283,6 @@ impl RowNode {
         (0..self.gap_count()).map(GapIndex)
     }
 
-    /// The one gap of a row of two.
-    ///
-    /// The pair spelling of [`gaps`](Self::gaps), named apart from it for the same reason
-    /// [`children_pair`](Self::children_pair) is: every place that still addresses "the divider
-    /// of this row" as though a row had one is then a grep for one identifier. Its callers are
-    /// owed a loop by stage 6 of `docs/PLAN_a_row_holds_many_panels.md`, which cuts a row rather
-    /// than a split.
-    ///
-    /// # Panics
-    ///
-    /// If this row does not have exactly one gap — loud, like `children_pair`, because a caller
-    /// here is one that has not been taught rows yet.
-    #[inline]
-    #[track_caller]
-    pub fn only_gap(&self) -> GapIndex {
-        assert_eq!(
-            self.gap_count(),
-            1,
-            "the only gap was asked of a row of {}; see `RowNode::gaps`",
-            self.children.len()
-        );
-        GapIndex(0)
-    }
-
     /// Whether `gap` names one of this row's gaps.
     #[inline]
     pub fn has_gap(&self, gap: GapIndex) -> bool {
@@ -548,13 +524,16 @@ mod tests {
         assert_eq!(row.shares()[0], Share(0.5));
     }
 
-    /// The gaps a row offers are one fewer than its children, and the pair spelling names the
-    /// only one a pair has — and refuses a row of three, loudly, like `children_pair`.
+    /// The gaps a row offers are one fewer than its children, in order, and `has_gap` draws the
+    /// line exactly there.
+    ///
+    /// `only_gap()` — the pair spelling — used to be asserted here too; it went with its last
+    /// caller when stage 6 taught the layout to cut a row, so there is no longer a way to ask a
+    /// row for "the" gap.
     #[test]
     fn a_row_has_one_gap_fewer_than_it_has_children() {
         let pair = row(vec![Share(1.0), Share(1.0)]);
         assert_eq!(pair.gaps().collect::<Vec<_>>(), vec![GapIndex(0)]);
-        assert_eq!(pair.only_gap(), GapIndex(0));
         assert!(pair.has_gap(GapIndex(0)) && !pair.has_gap(GapIndex(1)));
 
         let three = row(vec![Share(1.0), Share(1.0), Share(1.0)]);
@@ -562,9 +541,6 @@ mod tests {
             three.gaps().collect::<Vec<_>>(),
             vec![GapIndex(0), GapIndex(1)]
         );
-        assert!(
-            std::panic::catch_unwind(|| three.only_gap()).is_err(),
-            "a row of three has no *only* gap"
-        );
+        assert!(three.has_gap(GapIndex(1)) && !three.has_gap(GapIndex(2)));
     }
 }

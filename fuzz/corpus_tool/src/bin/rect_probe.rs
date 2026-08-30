@@ -29,6 +29,19 @@
 //! are meant to land where they already were — so a *clean* diff is what says decision 3 of the
 //! plan ("loading collapses chains, and the picture is unchanged") actually holds.
 //!
+//! # Three scenes per layout, not one
+//!
+//! Found at stage 6, by mutation: the corpus carries **no collapsed, stowed or sideways node at
+//! all** — 0 of 4141 — so a dump of the layouts as saved judges only the ordinary cut. The two
+//! strip-aware branches of the layout pass (collapsed rows under a vertical row, sideways strips
+//! under a horizontal one) were the ones stage 6 rewrote, and a mutant that gave the last strip
+//! the rest of the row diffed *nothing* here. So every layout is laid out three times: as saved,
+//! with every odd leaf collapsed, and with every leaf collapsed — the layout's own leaves, in
+//! `iter_leaves` order, so that the scene is a function of the file. That reaches strips at
+//! either end of a row and rows with nothing open, in both axes, on every shape the corpus has.
+//!
+//! The scene is part of the `===` header, so the three dumps of one file diff independently.
+//!
 //! # What is fixed here, and why it has to be
 //!
 //! One screen size, one style, one number of frames, and tabs titled by their `Debug`. None of
@@ -42,7 +55,49 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use egui_dockyard::egui::{CentralPanel, Context, Id, Pos2, RawInput, Rect, Ui, Vec2, WidgetText};
-use egui_dockyard::{DockArea, DockLayout, DockState, GapPath, Style};
+use egui_dockyard::{DockArea, DockLayout, DockState, GapPath, NodePath, Style};
+
+/// How a corpus layout is prepared before it is laid out — see the module docs.
+#[derive(Clone, Copy)]
+enum Scene {
+    /// Exactly as the file says.
+    AsSaved,
+    /// Every second leaf collapsed, in `iter_leaves` order: strips beside open panels, at
+    /// either end of a row.
+    OddLeavesCollapsed,
+    /// Every leaf collapsed: rows with nothing open, in both axes.
+    EveryLeafCollapsed,
+}
+
+impl Scene {
+    const ALL: [Scene; 3] = [
+        Scene::AsSaved,
+        Scene::OddLeavesCollapsed,
+        Scene::EveryLeafCollapsed,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Scene::AsSaved => "as-saved",
+            Scene::OddLeavesCollapsed => "odd-leaves-collapsed",
+            Scene::EveryLeafCollapsed => "every-leaf-collapsed",
+        }
+    }
+
+    fn prepare(self, state: &mut DockState<Tab>) {
+        let leaves: Vec<NodePath> = state.iter_leaves().map(|(path, _)| path).collect();
+        for (index, path) in leaves.into_iter().enumerate() {
+            let collapse = match self {
+                Scene::AsSaved => false,
+                Scene::OddLeavesCollapsed => index % 2 == 1,
+                Scene::EveryLeafCollapsed => true,
+            };
+            if collapse {
+                state[path.surface].set_leaf_collapsed(path.node, true);
+            }
+        }
+    }
+}
 
 type Tab = ron::Value;
 
@@ -195,11 +250,15 @@ fn main() {
             continue;
         };
         match ron::from_str::<DockState<Tab>>(&text) {
-            Ok(mut state) => {
+            Ok(state) => {
                 laid_out += 1;
-                let layout = run(&mut state);
-                println!("=== {name}");
-                print!("{}", dump(&state, &layout));
+                for scene in Scene::ALL {
+                    let mut state = state.clone();
+                    scene.prepare(&mut state);
+                    let layout = run(&mut state);
+                    println!("=== {name} {}", scene.label());
+                    print!("{}", dump(&state, &layout));
+                }
             }
             Err(error) => {
                 unreadable += 1;

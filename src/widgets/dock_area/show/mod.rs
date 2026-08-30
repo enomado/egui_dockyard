@@ -677,25 +677,27 @@ impl<Tab> DockArea<'_, Tab> {
         }
     }
 
-    /// The paths of a split's two children, first (left / top) then second (right / bottom).
+    /// The paths of a row's children, in the row's order: first (left / top) to last
+    /// (right / bottom).
+    ///
+    /// A list, because everything downstream of it walks one: [`Self::cut_row`] cuts as many
+    /// children as the row holds, [`Self::strip_columns`] folds over them, and
+    /// [`Self::compute_rect_sizes`] writes one rectangle per child and one divider per gap.
+    /// Nothing here needs the row to be a pair any more, which is what stage 6 of
+    /// `docs/PLAN_a_row_holds_many_panels.md` was for.
     ///
     /// # Panics
     ///
-    /// If `path` does not name a split.
+    /// If `path` does not name a row.
     #[track_caller]
-    fn child_paths(&self, path: NodePath) -> [NodePath; 2] {
-        // A pair because everything downstream of it is one: `show_separator`, `cut_split` and
-        // the junction detector all speak of two halves and one line between them. Stage 6 of
-        // the n-ary plan turns `cut_split` into `cut_row` and this into a list of paths; until
-        // then a `Vec` here would only be a pair wearing a wider type.
-        let [left, right] = self.dock_state[path]
+    fn child_paths(&self, path: NodePath) -> Vec<NodePath> {
+        self.dock_state[path]
             .get_row()
-            .expect("only a split has children")
-            .children_pair();
-        [
-            NodePath::new(path.surface, left),
-            NodePath::new(path.surface, right),
-        ]
+            .expect("only a row has children")
+            .children()
+            .iter()
+            .map(|&child| NodePath::new(path.surface, child))
+            .collect()
     }
 
     /// The paths of the two children `gap` lies between, first (left / top) then second.
@@ -754,9 +756,10 @@ impl<Tab> DockArea<'_, Tab> {
         rect
     }
 
-    /// Write the rectangles of `path`'s two children into [`Self::layout`], cutting them out
-    /// of the rectangle already recorded for `path` itself — along with *where the split was
-    /// cut*, which is what everything downstream reads instead of working it out again.
+    /// Write the rectangles of `path`'s children into [`Self::layout`], cutting them out of
+    /// the rectangle already recorded for `path` itself — along with *where the row was cut*,
+    /// one divider per gap, which is what everything downstream reads instead of working it
+    /// out again.
     ///
     /// Takes `pixels_per_point` rather than a [`Ui`] because it is also called from
     /// [`Self::transpose_cross_split`], which edits the tree in the middle of a pass and has
@@ -773,22 +776,35 @@ impl<Tab> DockArea<'_, Tab> {
             return;
         }
 
-        let [left_path, right_path] = self.child_paths(path);
-        let cut = self.cut_split(pixels_per_point, path, max_rect);
-
-        self.layout.set_rect(left_path, cut.children[0]);
-        self.layout.set_rect(right_path, cut.children[1]);
-        // Unconditional, both of them: a branch cannot leave a stale answer behind by saying
-        // nothing, because `SplitCut` made it say something. The pair's only gap, because
-        // `cut_split` cuts one line; stage 6's `cut_row` hands back one per gap and this
-        // becomes a loop.
-        let gap = self.dock_state[path]
+        let children = self.child_paths(path);
+        // Collected before the writes below, because the row is borrowed from the tree and the
+        // map is written through `&mut self`. The order is the row's own, first gap first.
+        let gaps: Vec<GapIndex> = self.dock_state[path]
             .get_row()
             .expect("a parent is a row")
-            .only_gap();
-        self.layout
-            .set_divider(GapPath::new(path, gap), cut.divider);
-        for (child, side) in [left_path, right_path].into_iter().zip(cut.side_strips) {
+            .gaps()
+            .collect();
+        let cut = self.cut_row(pixels_per_point, path, max_rect);
+        // A branch that answered for a different number of children than the row holds has
+        // not answered at all. Loud here, once, rather than a silent `zip` that would truncate
+        // to the shorter side and leave last frame's rectangle on whoever was left over.
+        assert_eq!(
+            cut.children.len(),
+            children.len(),
+            "the cut answered for a row of a different length"
+        );
+        assert_eq!(cut.dividers.len(), gaps.len(), "one divider per gap");
+        assert_eq!(cut.side_strips.len(), children.len(), "one mark per child");
+
+        for (&child, &rect) in children.iter().zip(&cut.children) {
+            self.layout.set_rect(child, rect);
+        }
+        // Unconditional, every gap: a branch cannot leave a stale answer behind by saying
+        // nothing, because `RowCut` made it say something for each of them.
+        for (gap, divider) in gaps.into_iter().zip(cut.dividers) {
+            self.layout.set_divider(GapPath::new(path, gap), divider);
+        }
+        for (child, side) in children.into_iter().zip(cut.side_strips) {
             if let Some(side) = side {
                 self.layout.set_side_strip(child, side);
             }
@@ -834,8 +850,13 @@ impl<Tab> DockArea<'_, Tab> {
         if !node.is_horizontal() {
             return None;
         }
-        let [left, right] = self.child_paths(path);
-        Some(self.strip_columns(left)? + self.strip_columns(right)?)
+        // A fold, not a pair: a row of strips is as many strips wide as its children add up to,
+        // and one child that does not fit is a row that does not fit — which is what summing
+        // `Option`s says, `None` absorbing the whole sum.
+        self.child_paths(path)
+            .into_iter()
+            .map(|child| self.strip_columns(child))
+            .sum()
     }
 
     /// Whether this child draws **one** bar of its own when it becomes a strip, which is what
@@ -849,24 +870,31 @@ impl<Tab> DockArea<'_, Tab> {
         self.dock_state[path].is_leaf() || self.dock_state[path].is_stowed()
     }
 
-    /// How this split is cut this frame: the two children, the divider if there is one to draw,
-    /// and which child (if any) became a sideways strip.
+    /// How the row at `path` is cut this frame: one rectangle per child, one divider per gap
+    /// (where there is one to draw), and which children became sideways strips.
     ///
     /// One value with three fields rather than three branches that each write what they
-    /// remember to: adding a fourth way to cut a split now means filling this in, and the
+    /// remember to: adding a fourth way to cut a row now means filling this in, and the
     /// compiler says so. The bug that motivated the shape was exactly the other arrangement —
     /// a branch was added here, and the "is there a divider?" rule, written out separately in
     /// the code that draws, kept answering for the branches that existed when it was written.
-    fn cut_split(&mut self, pixels_per_point: f32, path: NodePath, max_rect: Rect) -> SplitCut {
-        assert!(self.dock_state[path].is_parent());
-
+    ///
+    /// Three branches, each written over `n` children — stage 6 of
+    /// `docs/PLAN_a_row_holds_many_panels.md`, the last parity stage: on a pair every branch
+    /// below cuts the pixels it cut when it was written over `left` / `right`, and the corpus
+    /// probes (`rect_probe`, `shape_probe`) say so byte for byte. Two of the three share their
+    /// arithmetic, [`cut_runs`]: the collapsed children of a **vertical** row and the strip
+    /// children of a **horizontal** one are the same shape one axis over — fixed lengths pressed
+    /// against the row's edges, with the open children sharing what is left — and the
+    /// pair-shaped code had solved that twice, which is how the 30.08 bug lived in one axis and
+    /// not the other.
+    fn cut_row(&self, pixels_per_point: f32, path: NodePath, max_rect: Rect) -> RowCut {
+        let row = self.dock_state[path]
+            .get_row()
+            .expect("only a row is cut into children");
+        let horizontal = row.is_horizontal();
         let style = self.style.as_ref().unwrap();
-
-        let [left_path, right_path] = self.child_paths(path);
-        let left_collapsed_count = self.dock_state[left_path].collapsed_leaf_count();
-        let right_collapsed_count = self.dock_state[right_path].collapsed_leaf_count();
-        let left_collapsed = self.dock_state[left_path].is_collapsed();
-        let right_collapsed = self.dock_state[right_path].is_collapsed();
+        let children = self.child_paths(path);
 
         // The parent's rectangle was written either by `allocate_area_for_root_node` (for
         // the root) or by this same function when its own parent was visited — the
@@ -875,45 +903,117 @@ impl<Tab> DockArea<'_, Tab> {
             .layout
             .rect(path)
             .expect("a parent node must have been laid out before its children");
+        let rect = split_rect(parent_rect, pixels_per_point);
 
-        if (left_collapsed || right_collapsed)
-            && self.dock_state[path.surface][path.node].is_vertical()
-        {
-            let rect = split_rect(parent_rect, pixels_per_point);
-
-            // The collapsed side is not cut at a ratio — it is given exactly what its rows
-            // need, and the divider goes *beside* that, not through it. It used to straddle
-            // the boundary, taking half its width out of the collapsed rows: with the
-            // boundary at `rows * tab_bar.height` the last row was drawn a hairline taller
-            // than the space it had, and the whole strip was one divider short per row.
-            //
-            // Which end the strip is anchored to is the only difference between the two
-            // cases, so all that differs below is where the divider's two edges land.
-            let (near, far) = if left_collapsed {
-                // EITHER only left collapsed OR both: the strip is the top of the node, and
-                // the divider begins where it ends.
-                let strip_end = rect.min.y + collapsed_strip_height(left_collapsed_count, style);
-                (strip_end, strip_end + style.separator.width)
+        // The row's axis as *functions*, not as the tokens `duplicate!` needs in `show_divider`:
+        // nothing below names a method by its axis, so one body serves both.
+        let (lo, hi, size) = if horizontal {
+            (rect.min.x, rect.max.x, rect.width())
+        } else {
+            (rect.min.y, rect.max.y, rect.height())
+        };
+        let after = |at: f32| {
+            if horizontal {
+                Rect::everything_right_of(at)
             } else {
-                // Only right collapsed: the strip is the bottom of the node.
-                let strip_start = rect.max.y - collapsed_strip_height(right_collapsed_count, style);
-                (strip_start - style.separator.width, strip_start)
-            };
+                Rect::everything_below(at)
+            }
+        };
+        let before = |at: f32| {
+            if horizontal {
+                Rect::everything_left_of(at)
+            } else {
+                Rect::everything_above(at)
+            }
+        };
+        // A child's rectangle from where it was cut. `None` is the row's own edge: the first
+        // child starts where the row starts and the last one ends where it ends, without a cut
+        // being snapped onto an edge that is on the pixel grid already.
+        let child_rect = |(start, end): Span| {
+            let mut child = rect;
+            if let Some(start) = start {
+                child = child.intersect(after(start));
+            }
+            if let Some(end) = end {
+                child = child.intersect(before(end));
+            }
+            child.intersect(max_rect)
+        };
+        // The line between two edges just computed, across the whole of the row the other way.
+        // This is the *only* derivation of it in the crate: it used to be worked out here for
+        // the children's sake, thrown away, and then worked out a second time by
+        // `separator_rect` for drawing — two copies of one arithmetic, which had drifted once.
+        let divider_rect = |(near, far): (f32, f32)| {
+            let mut divider = rect;
+            if horizontal {
+                divider.min.x = near;
+                divider.max.x = far;
+            } else {
+                divider.min.y = near;
+                divider.max.y = far;
+            }
+            divider
+        };
+        let cut_at = |at: f32| map_to_pixel(at, pixels_per_point, f32::round);
+        let weight = |index: usize| Extent::Weighted(row.shares()[index].0);
 
-            let left_separator_border = map_to_pixel(near, pixels_per_point, f32::round);
-            let right_separator_border = map_to_pixel(far, pixels_per_point, f32::round);
-            let left = rect
-                .intersect(Rect::everything_above(left_separator_border))
-                .intersect(max_rect);
-            let right = rect
-                .intersect(Rect::everything_below(right_separator_border))
-                .intersect(max_rect);
-            return SplitCut {
-                children: [left, right],
-                // Cut at the strip's edge, not at the ratio — so the line the ratio names is
-                // not a boundary between anything, and there is nothing to draw or to grab.
-                divider: None,
-                side_strips: [None, None],
+        // A vertical row with a collapsed child. The collapsed child is not cut at a ratio — it
+        // is given exactly what its rows need, and the divider goes *beside* that, not through
+        // it. It used to straddle the boundary, taking half its width out of the collapsed
+        // rows: with the boundary at `rows * tab_bar.height` the last row was drawn a hairline
+        // taller than the space it had, and the whole strip was one divider short per row.
+        //
+        // Over `n` — see `cut_runs`: collapsed children at the top of the row are stacked down
+        // from its top edge, collapsed children at the bottom are stacked up from its bottom
+        // edge, and whatever is open in between shares the rest. With nothing open at all the
+        // stack hangs from the top and the **last child keeps the remainder** — the rule the
+        // pair had ("either only the first collapsed or both: the strip is the top of the
+        // node"). It matters only where the row is taller than its rows, i.e. at the root or
+        // inside a column: a collapsed leaf draws its bar at the top of whatever it is given, so
+        // the picture is the same either way, and the difference is who *owns* the empty space
+        // below. Kept by parity. The horizontal branch answers "nobody" to the same question
+        // (Стас, 30.08), and reconciling the two is a decision for stage 7, not a refactor.
+        if !horizontal
+            && children
+                .iter()
+                .any(|&child| self.dock_state[child].is_collapsed())
+        {
+            let extents: Vec<Extent> = children
+                .iter()
+                .enumerate()
+                .map(|(index, &child)| {
+                    let node = &self.dock_state[child];
+                    if node.is_collapsed() {
+                        Extent::Fixed(collapsed_strip_height(node.collapsed_leaf_count(), style))
+                    } else {
+                        weight(index)
+                    }
+                })
+                .collect();
+            // Each edge snapped from the *unsnapped* run — `far = near + width` in points, then
+            // to the pixel — the way the pair's `right_separator_border` was. The horizontal
+            // branch below snaps the run itself; `cut_runs` says why the two are kept apart.
+            let runs = cut_runs(
+                lo,
+                hi,
+                &extents,
+                style.separator.width,
+                cut_at,
+                |at| at,
+                true,
+            );
+            return RowCut {
+                children: runs.spans.into_iter().map(child_rect).collect(),
+                // Cut at the strips' edges, not at the ratios — so the line a ratio names is not
+                // a boundary between anything, and there is nothing to draw or to grab. A line
+                // arrives only between two open neighbours, which a pair with a collapsed child
+                // never has.
+                dividers: runs
+                    .dividers
+                    .into_iter()
+                    .map(|divider| divider.map(divider_rect))
+                    .collect(),
+                side_strips: vec![None; children.len()],
             };
         }
 
@@ -937,144 +1037,116 @@ impl<Tab> DockArea<'_, Tab> {
         // "Only when the sibling is open" used to be a third, and it was the bug: two collapsed
         // siblings each read the other as "nobody to take the width" and both stayed columns,
         // although in `H(a, H(b, c))` — how a binary tree writes a row of three — the open
-        // column was one level out, holding the width for both. Now each side is given exactly
-        // the strips it needs and whatever is left over is the other child's; when *both* sides
-        // are strips there is nothing left to give away, and the leftover belongs to nobody by
+        // column was one level out, holding the width for both. Now each strip is given exactly
+        // what it needs and whatever is left over is the open children's; when *every* child is
+        // a strip there is nothing left to give away, and the leftover belongs to nobody by
         // decision (Стас, 30.08.2026: strips for everyone, the rest empty), which is the one
-        // place in this feature where a hole is the answer rather than the thing to avoid.
-        if self.collapse_sideways
-            && self.dock_state[path.surface][path.node].is_horizontal()
-            && let columns @ (Some(_), _) | columns @ (_, Some(_)) = (
-                self.strip_columns(left_path),
-                self.strip_columns(right_path),
-            )
-        {
-            let rect = split_rect(parent_rect, pixels_per_point);
-            // Same arithmetic as the collapsed rows above, and for the same reason: a side is
-            // given exactly what it needs, and the divider goes *beside* it rather than through
-            // it. Take half the divider out of a strip that is already exactly one arrow wide
-            // and the arrow no longer fits in what it was given.
-            let cut_at = |x: f32| map_to_pixel(x, pixels_per_point, f32::round);
-            let width = |columns| collapsed_strip_width(columns, style);
-
-            let (left_rect, right_rect, sides) = match columns {
-                // Both sides are strips: they sit against the near edge one after the other,
-                // and the rest of the row is nobody's. Pressing the right-hand one against the
-                // *far* edge instead would leave the hole in the middle of the row, which is
-                // the same amount of empty space arranged so that it separates the strips from
-                // each other rather than standing beside them.
-                (Some(left_columns), Some(right_columns)) => {
-                    let left_end = cut_at(rect.min.x + width(left_columns));
-                    let right_start = cut_at(left_end + style.separator.width);
-                    let right_end = cut_at(right_start + width(right_columns));
-                    (
-                        rect.intersect(Rect::everything_left_of(left_end)),
-                        rect.intersect(Rect::everything_right_of(right_start))
-                            .intersect(Rect::everything_left_of(right_end)),
-                        [Some(SideStrip::Left), Some(SideStrip::Left)],
-                    )
-                }
-                // One side is strips and the other takes everything it gave up — including the
-                // case where the other is collapsed too but does not fit in strips (a vertical
-                // stack of tab bars), which can hold the width perfectly well.
-                (Some(left_columns), None) => {
-                    let strip_end = cut_at(rect.min.x + width(left_columns));
-                    let sibling_start = cut_at(strip_end + style.separator.width);
-                    (
-                        rect.intersect(Rect::everything_left_of(strip_end)),
-                        rect.intersect(Rect::everything_right_of(sibling_start)),
-                        [Some(SideStrip::Left), None],
-                    )
-                }
-                (None, Some(right_columns)) => {
-                    let strip_start = cut_at(rect.max.x - width(right_columns));
-                    let sibling_end = cut_at(strip_start - style.separator.width);
-                    (
-                        rect.intersect(Rect::everything_left_of(sibling_end)),
-                        rect.intersect(Rect::everything_right_of(strip_start)),
-                        [None, Some(SideStrip::Right)],
-                    )
-                }
-                // Excluded by the pattern this branch is entered with.
-                (None, None) => unreachable!("neither side is a strip, so this is an ordinary cut"),
-            };
-
-            // A child that is a row of strips is not marked as one itself: its leaves are, when
-            // the pass reaches them. See `draws_one_bar`.
-            let mark = |child, side| self.draws_one_bar(child).then_some(side).flatten();
-            return SplitCut {
-                children: [
-                    left_rect.intersect(max_rect),
-                    right_rect.intersect(max_rect),
-                ],
-                // Same as the case above, one axis over.
-                divider: None,
-                side_strips: [mark(left_path, sides[0]), mark(right_path, sides[1])],
-            };
-        }
-
-        // One arm per axis, as before — only the axis is now read off the node's *field*
-        // (`is_horizontal` / `is_vertical`) instead of being the variant matched. The `paste!`
-        // below still needs the axis as a *token* (`Rect::everything_left_of`,
-        // `CursorIcon::ResizeHorizontal`), which is why the name stays in the table beside the
-        // predicate rather than being replaced by it.
-        duplicate! {
-            [
-                orientation   is_orientation   dim_point  dim_size  left_of    right_of;
-                [Horizontal]  [is_horizontal]  [x]        [width]   [left_of]  [right_of];
-                [Vertical]    [is_vertical]    [y]        [height]  [above]    [below];
-            ]
-            // Copy the fraction out before touching `self.layout`: holding a borrow of
-            // the node while writing the geometry map would borrow `self` twice.
-            if let Node::Row(split) = &self.dock_state[path.surface][path.node]
-                && split.is_orientation()
-            {
-                let fraction = split.fraction();
-                let rect = split_rect(parent_rect, pixels_per_point);
-
-                // The children are cut at where the boundary *is*, which is the stored ratio
-                // pushed into the band this frame's geometry can honour — see `SeparatorBand`.
-                // Clamping here, rather than writing the clamped number back into the tree,
-                // is what lets a node with no room for the margin keep the ratio it will get
-                // back as soon as there is room again.
-                let dim_size = rect.dim_size();
-                let band = SeparatorBand::new(fraction, dim_size, style.separator.extra);
-                let midpoint = band.midpoint(rect.min.dim_point, dim_size);
-
-                let left_separator_border = map_to_pixel(
-                    midpoint - style.separator.width * 0.5,
-                    pixels_per_point,
-                    f32::round
+        // place in this feature where a hole is the answer rather than the thing to avoid. The
+        // strips then sit against the near edge one after the other: pressing the last against
+        // the *far* edge instead would leave the hole in the middle of the row, the same amount
+        // of empty space arranged so that it separates the strips rather than standing beside
+        // them.
+        if self.collapse_sideways && horizontal {
+            let columns: Vec<Option<i32>> = children
+                .iter()
+                .map(|&child| self.strip_columns(child))
+                .collect();
+            if columns.iter().any(Option::is_some) {
+                // Same arithmetic as the collapsed rows above, one axis over, and for the same
+                // reason: a strip is given exactly what it needs, and the divider goes *beside*
+                // it rather than through it. Take half the divider out of a strip that is
+                // already exactly one arrow wide and the arrow no longer fits in what it was
+                // given. A child that is collapsed but does not fit in strips (a vertical stack
+                // of tab bars) is an open column here: it can hold the width perfectly well.
+                let extents: Vec<Extent> = columns
+                    .iter()
+                    .enumerate()
+                    .map(|(index, columns)| match columns {
+                        Some(columns) => Extent::Fixed(collapsed_strip_width(*columns, style)),
+                        None => weight(index),
+                    })
+                    .collect();
+                // The run itself snapped at every step (`right_start = cut_at(left_end +
+                // separator)` with `left_end` already snapped), as the pair did — see
+                // `cut_runs` for why the vertical branch above does not.
+                let runs = cut_runs(
+                    lo,
+                    hi,
+                    &extents,
+                    style.separator.width,
+                    cut_at,
+                    cut_at,
+                    false,
                 );
-                let right_separator_border = map_to_pixel(
-                    midpoint + style.separator.width * 0.5,
-                    pixels_per_point,
-                    f32::round
-                );
-
-                paste! {
-                    let left = rect.intersect(Rect::[<everything_ left_of>](left_separator_border)).intersect(max_rect);
-                    let right = rect.intersect(Rect::[<everything_ right_of>](right_separator_border)).intersect(max_rect);
-                }
-
-                // The line between the two borders just computed, across the whole of the
-                // node the other way. This is the *only* derivation of it in the crate now:
-                // it used to be worked out here for the children's sake, thrown away, and
-                // then worked out a second time by `separator_rect` for drawing — two copies
-                // of one arithmetic, which the comment there already warned had drifted once.
-                let mut divider = rect;
-                divider.min.dim_point = left_separator_border;
-                divider.max.dim_point = right_separator_border;
-
-                return SplitCut {
-                    children: [left, right],
-                    divider: Some(divider),
-                    side_strips: [None, None],
+                let side_strips = children
+                    .iter()
+                    .zip(&runs.runs)
+                    .zip(&columns)
+                    .map(|((&child, run), columns)| {
+                        // A child that is a row of strips is not marked as one itself: its
+                        // leaves are, when the pass reaches them. See `draws_one_bar`.
+                        if columns.is_none() || !self.draws_one_bar(child) {
+                            return None;
+                        }
+                        // `Left` means "the width it gave up lies to its right", which is what
+                        // the pair wrote for *both* strips of a fully collapsed row — the second
+                        // hugs the first, not the edge. A strip among open columns reads the
+                        // same way; only a strip stacked from the far edge is a `Right`.
+                        Some(match run {
+                            Run::Leading | Run::Middle => SideStrip::Left,
+                            Run::Trailing => SideStrip::Right,
+                        })
+                    })
+                    .collect();
+                return RowCut {
+                    children: runs.spans.into_iter().map(child_rect).collect(),
+                    // Same as the case above, one axis over.
+                    dividers: runs
+                        .dividers
+                        .into_iter()
+                        .map(|divider| divider.map(divider_rect))
+                        .collect(),
+                    side_strips,
                 };
             }
         }
 
-        unreachable!("a parent node is either horizontal or vertical, and this one is a parent")
+        // Neither: every child is cut at where its boundaries *are*, which is the stored ratio
+        // pushed into the band this frame's geometry can honour — see `SeparatorBand`.
+        // Clamping here, rather than writing the clamped number back into the tree, is what
+        // lets a node with no room for the margin keep the ratio it will get back as soon as
+        // there is room again.
+        //
+        // Each boundary is clamped on its own, exactly as the pair's one boundary was. The
+        // boundaries of a row are monotone — running sums of weights `validate` keeps
+        // non-negative — and the clamp is monotone, so their order survives. What the band does
+        // *not* promise on a row of three is that two boundaries stay a divider apart: a child
+        // can be squeezed to nothing between them. Not reachable while rows are pairs, and
+        // stage 7's to state when they stop being.
+        let edges: Vec<(f32, f32)> = row
+            .gaps()
+            .map(|gap| {
+                let band = SeparatorBand::new(row.boundary(gap), size, style.separator.extra);
+                let midpoint = band.midpoint(lo, size);
+                (
+                    cut_at(midpoint - style.separator.width * 0.5),
+                    cut_at(midpoint + style.separator.width * 0.5),
+                )
+            })
+            .collect();
+        // Child `k` runs from the far edge of divider `k − 1` to the near edge of divider `k`;
+        // the first and the last reach the row's own edges.
+        let spans = (0..children.len()).map(|index| {
+            (
+                index.checked_sub(1).map(|gap| edges[gap].1),
+                (index < edges.len()).then(|| edges[index].0),
+            )
+        });
+        RowCut {
+            children: spans.map(child_rect).collect(),
+            dividers: edges.iter().map(|&edge| Some(divider_rect(edge))).collect(),
+            side_strips: vec![None; children.len()],
+        }
     }
 
     /// The rectangle the divider in `gap` is drawn in — and, expanded by
@@ -1391,18 +1463,6 @@ impl<Tab> DockArea<'_, Tab> {
     }
 }
 
-/// The rectangle a split's children are cut out of, snapped out to whole pixels.
-///
-/// A function, and called by both halves, because they have to name the *same* rectangle:
-/// [`DockArea::compute_rect_sizes`] cuts the two children out of it, and
-/// [`DockArea::show_divider`] draws the divider between them against it, hit-tests it there
-/// and moves it from there. They used to derive it separately — the layout pass snapped, the
-/// separator did not — so the divider was measured against a slightly different node than the
-/// children were: a boundary up to `2 / pixels_per_point` px off the gap it is supposed to sit
-/// in, and a [`SeparatorBand`] computed from a different `range` on top of that. Sub-pixel in
-/// every scene we could reach (measured: 0.08 px at `ppp = 1.3`, against 0.17 px of the
-/// pixel-rounding both sides share anyway), which is exactly why it would have been found by
-/// someone looking at the code rather than at the screen.
 /// How tall a strip of `rows` collapsed leaves is: a tab bar each, and a divider between
 /// every two of them.
 ///
@@ -1477,12 +1537,258 @@ fn border_clearance(style: &Style) -> MarginF32 {
     }
 }
 
+/// The rectangle a row's children are cut out of, snapped out to whole pixels.
+///
+/// A function, and called by both halves, because they have to name the *same* rectangle:
+/// [`DockArea::compute_rect_sizes`] cuts the children out of it, and
+/// [`DockArea::show_divider`] draws the divider between two of them against it, hit-tests it
+/// there and moves it from there. They used to derive it separately — the layout pass snapped,
+/// the separator did not — so the divider was measured against a slightly different node than
+/// the children were: a boundary up to `2 / pixels_per_point` px off the gap it is supposed to
+/// sit in, and a [`SeparatorBand`] computed from a different `range` on top of that. Sub-pixel
+/// in every scene we could reach (measured: 0.08 px at `ppp = 1.3`, against 0.17 px of the
+/// pixel-rounding both sides share anyway), which is exactly why it would have been found by
+/// someone looking at the code rather than at the screen.
 fn split_rect(node_rect: Rect, pixels_per_point: f32) -> Rect {
     debug_assert!(!node_rect.any_nan() && node_rect.is_finite());
     expand_to_pixel(node_rect, pixels_per_point)
 }
 
-/// The band a split's boundary may occupy this frame, and where the stored ratio sits inside it.
+/// Everything the layout pass decided about one row, in one value.
+///
+/// The type exists to make a branch unable to stay silent. Cutting a row answers three
+/// questions at once — where each child goes, whether there is a divider in each gap and where,
+/// and which children became sideways strips — and they are *one* decision: the branch that
+/// gives a collapsed child exactly the strip it needs is the same branch that thereby leaves no
+/// line at the ratio beside it. When each answer was written separately, wherever that branch
+/// happened to end, adding a branch meant remembering all three, and the sideways one remembered
+/// two. As fields, the compiler remembers for you.
+///
+/// Lists, one entry per child or per gap, and [`DockArea::compute_rect_sizes`] checks their
+/// lengths against the row before writing a single one: a `zip` that truncated quietly would put
+/// the branch that forgets a child back on the map.
+///
+/// Deliberately not `Option<Rect>` per child or a builder: there is no half-cut row, and
+/// nothing here is allowed to be "left as it was".
+#[derive(Clone, Debug)]
+struct RowCut {
+    /// Rectangles of the children, in [`DockArea::child_paths`] order.
+    children: Vec<Rect>,
+
+    /// Per gap, in order: the line between its two neighbours, or [`None`] if this cut left none
+    /// there — see [`DockLayout::divider`].
+    dividers: Vec<Option<Rect>>,
+
+    /// Per child, in the same order as [`Self::children`]: which edge it was pressed against,
+    /// for a child this cut squeezed into a sideways strip that draws its own bar.
+    ///
+    /// [`None`] for a child that is a row of strips rather than one, so that the mark lands on
+    /// the leaves that draw the bars (see `DockArea::draws_one_bar`) — and for everything that
+    /// is not a strip at all.
+    side_strips: Vec<Option<SideStrip>>,
+}
+
+/// How one child takes its length along the row's axis, as [`cut_runs`] sees it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Extent {
+    /// Exactly this many points, whatever the row has to give: a collapsed child of a vertical
+    /// row (its rows of tab bars — [`collapsed_strip_height`]), or a child of a horizontal row
+    /// that fits in sideways strips ([`collapsed_strip_width`]).
+    Fixed(f32),
+
+    /// A share of what the fixed children leave, by this weight: an open child.
+    Weighted(f32),
+}
+
+/// Where a child landed in a strip-aware cut — see [`cut_runs`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Run {
+    /// Among the fixed children pressed against the row's near edge (top / left), one after
+    /// the other.
+    Leading,
+
+    /// Between the two runs: the open children sharing what is left, and any fixed child that
+    /// sits among them.
+    Middle,
+
+    /// Among the fixed children pressed against the row's far edge (bottom / right).
+    Trailing,
+}
+
+/// One child's place along the axis: the position it is cut at on each side, or `None` for the
+/// row's own edge, left uncut.
+type Span = (Option<f32>, Option<f32>);
+
+/// What [`cut_runs`] decided, in one dimension.
+struct RunCut {
+    /// Per child, in order.
+    spans: Vec<Span>,
+
+    /// Per gap: the two edges of a divider to draw there, or `None` where the gap was cut at a
+    /// fixed child's edge and there is no line at a ratio to draw or to grab.
+    dividers: Vec<Option<(f32, f32)>>,
+
+    /// Per child: which run it landed in.
+    runs: Vec<Run>,
+}
+
+/// Cuts a row whose children do not all take a share: the fixed ones are given exactly their
+/// length, and what is left goes to the open ones.
+///
+/// The one arithmetic behind two branches of [`DockArea::cut_row`]. A vertical row with a
+/// collapsed child and a horizontal row with a sideways strip are the same problem one axis
+/// over, and the pair-shaped code had solved it twice — which is how the 30.08 bug lived in one
+/// axis and not the other (`a_row_collapses_panel_by_panel`).
+///
+/// **Runs.** Fixed children at the start of the row are stacked from its near edge (`lo`), one
+/// after the other; fixed children at its end are stacked from its far edge (`hi`). Whatever
+/// lies between — the open children, and any fixed child among them — shares the span the two
+/// runs leave: a fixed child keeps its length, the open ones split the rest by weight (or
+/// equally, if their weights add up to nothing: a proportion of nothing is not a proportion,
+/// and an equal share is the least-bad answer, as [`SeparatorBand`] answers the centre when it
+/// has no room to give). With no open child at all everything is one leading run, and
+/// `last_fixed_takes_the_rest` says what happens to the row's far side: `false` cuts the last
+/// child at its own length and the rest of the row is nobody's (the horizontal decision of
+/// 30.08); `true` leaves it at the row's edge (the vertical rule the pair had).
+///
+/// **Snapping.** Every position handed back has been through `cut`, which puts it on the pixel
+/// grid. `carry` is what a position goes through before the *next* one is computed from it, and
+/// it is the one place the two axes differ — inherited, not chosen. The horizontal branch
+/// snapped its run (`right_start = cut_at(left_end + separator)` with `left_end` already
+/// snapped); the vertical one snapped each edge from the unsnapped run (`far = near + separator`
+/// in points, then snapped). At an integer `pixels_per_point` the two agree; at a fractional
+/// one they can land a pixel apart, so a parity stage hands each branch its own. Pinned by
+/// `the_two_axes_snap_their_runs_differently_and_it_is_inherited`: unifying them is a decision
+/// about pixels, not a cleanup.
+///
+/// **Dividers.** A divider is recorded only between two open neighbours, where a ratio is what
+/// separates them. A gap on either side of a fixed child is cut at that child's edge, and the
+/// line the ratio would name there is not a boundary between anything.
+///
+/// # Panics
+///
+/// If the row holds fewer than two children — a bug in the caller, which built `extents` from a
+/// row.
+fn cut_runs(
+    lo: f32,
+    hi: f32,
+    extents: &[Extent],
+    separator: f32,
+    cut: impl Fn(f32) -> f32,
+    carry: impl Fn(f32) -> f32,
+    last_fixed_takes_the_rest: bool,
+) -> RunCut {
+    let n = extents.len();
+    assert!(n >= 2, "a row of {n} has nothing to cut between");
+    let is_open = |index: usize| matches!(extents[index], Extent::Weighted(_));
+    let fixed = |index: usize| match extents[index] {
+        Extent::Fixed(length) => length,
+        Extent::Weighted(_) => unreachable!("child {index} is in a run of fixed children"),
+    };
+
+    // The leading run is everything before the first open child, the trailing run everything
+    // after the last one. With no open child there is no trailing run: the whole row is the
+    // leading one.
+    let first_open = (0..n).find(|&index| is_open(index));
+    let leading_end = first_open.unwrap_or(n);
+    let trailing_start = match first_open {
+        Some(_) => {
+            (0..n)
+                .rev()
+                .find(|&index| is_open(index))
+                .expect("an open child was found going forward")
+                + 1
+        }
+        None => n,
+    };
+
+    let mut spans: Vec<Span> = vec![(None, None); n];
+    let mut dividers = vec![None; n - 1];
+    let mut runs = vec![Run::Middle; n];
+
+    // Down from the near edge. `cursor` is where the next child begins, carried the way the
+    // caller asked; each child's edges are snapped from it.
+    let mut cursor = lo;
+    for index in 0..leading_end {
+        runs[index] = Run::Leading;
+        let end = cursor + fixed(index);
+        let last = index == n - 1;
+        spans[index] = (
+            (index > 0).then(|| cut(cursor)),
+            (!(last && last_fixed_takes_the_rest)).then(|| cut(end)),
+        );
+        cursor = carry(carry(end) + separator);
+    }
+    let top = cursor;
+
+    // Up from the far edge, the same thing mirrored.
+    let mut cursor = hi;
+    for index in (trailing_start..n).rev() {
+        runs[index] = Run::Trailing;
+        let start = cursor - fixed(index);
+        spans[index] = (Some(cut(start)), (index < n - 1).then(|| cut(cursor)));
+        cursor = carry(carry(start) - separator);
+    }
+    let bottom = cursor;
+
+    // Between the runs.
+    let middle = leading_end..trailing_start;
+    if !middle.is_empty() {
+        let fixed_total: f32 = middle
+            .clone()
+            .filter(|&index| !is_open(index))
+            .map(fixed)
+            .sum();
+        let (open_count, weight_total) = middle
+            .clone()
+            .filter_map(|index| match extents[index] {
+                Extent::Weighted(weight) => Some(weight),
+                Extent::Fixed(_) => None,
+            })
+            .fold((0usize, 0.0f32), |(count, sum), weight| {
+                (count + 1, sum + weight)
+            });
+        let separators = (middle.len() - 1) as f32 * separator;
+        let free = (bottom - top - fixed_total - separators).max(0.0);
+
+        let mut cursor = top;
+        for index in middle.clone() {
+            let length = match extents[index] {
+                Extent::Fixed(length) => length,
+                Extent::Weighted(weight) if weight_total > 0.0 => free * weight / weight_total,
+                Extent::Weighted(_) => free / open_count as f32,
+            };
+            let end = cursor + length;
+            let last = index == n - 1;
+            let last_of_the_middle = index + 1 == trailing_start;
+            spans[index] = (
+                (index > 0).then(|| cut(cursor)),
+                if last {
+                    None
+                } else if last_of_the_middle {
+                    // Where the trailing run begins: `bottom` itself, and not `cursor + length`,
+                    // which is the same number only up to rounding. On a pair this child is
+                    // the whole middle, and that difference is the whole of parity here.
+                    Some(cut(bottom))
+                } else {
+                    Some(cut(end))
+                },
+            );
+            if !last_of_the_middle && is_open(index) && is_open(index + 1) {
+                dividers[index] = Some((cut(end), cut(carry(carry(end) + separator))));
+            }
+            cursor = carry(carry(end) + separator);
+        }
+    }
+
+    RunCut {
+        spans,
+        dividers,
+        runs,
+    }
+}
+
+/// The band a row's boundary may occupy this frame, and where the stored ratio sits inside it.
 ///
 /// [`SeparatorStyle::extra`](crate::SeparatorStyle::extra) is a margin in *pixels* that each
 /// child must keep, so on a node `range` px long it is the fraction `extra / range`. Two things
@@ -1493,13 +1799,13 @@ fn split_rect(node_rect: Rect, pixels_per_point: f32) -> Rect {
 ///   stored ratio pushed into those limits *without being written back*.
 ///
 /// The separation matters because the band depends on geometry and the ratio does not. Applying
-/// the band to `SplitNode::fraction` on every frame — which is what this code used to do, drag or
+/// the band to the stored ratio on every frame — which is what this code used to do, drag or
 /// no drag — turns a window resize into a silent edit of the layout: on a node shorter than
 /// `2 * extra` the band is the single point `0.5`, so the ratio the user set is replaced by dead
 /// centre and growing the window back does not bring it home. A ratio is state; only a gesture
 /// gets to change it. Geometry gets to decide where it is honoured.
 ///
-/// # Everything that writes a fraction, and whether it asks
+/// # Everything that writes a boundary, and whether it asks
 ///
 /// The clamp is applied when the boundary is *drawn* and is never written back, so a ratio the
 /// band cannot hold is not an error anywhere — it is simply drawn somewhere else than it says.
@@ -1521,35 +1827,6 @@ fn split_rect(node_rect: Rect, pixels_per_point: f32) -> Rect {
 /// lists go stale — but [`TreeViolation::RowShareNegative`](crate::TreeViolation), which catches
 /// the arithmetic that answers outside the row it was measuring, wherever it is written from: a
 /// boundary written past either end of a row leaves a negative weight on the child that lost.
-/// Everything the layout pass decided about one split, in one value.
-///
-/// The type exists to make a branch unable to stay silent. Cutting a split answers three
-/// questions at once — where the two children go, whether there is a divider between them and
-/// where, and whether one of them became a sideways strip — and they are *one* decision: the
-/// branch that gives a collapsed half exactly the strip it needs is the same branch that thereby
-/// leaves no line at the ratio. When each answer was written separately, wherever that branch
-/// happened to end, adding a branch meant remembering all three, and the sideways one remembered
-/// two. As fields, the compiler remembers for you.
-///
-/// Deliberately not `Option<Rect>` per child or a builder: there is no half-cut split, and
-/// nothing here is allowed to be "left as it was".
-#[derive(Clone, Copy, Debug)]
-struct SplitCut {
-    /// Rectangles of the two children, in [`DockArea::child_paths`] order.
-    children: [Rect; 2],
-
-    /// The line between them, or [`None`] if this cut left none — see
-    /// [`DockLayout::divider`].
-    divider: Option<Rect>,
-
-    /// Which edge each child was pressed against, for a child this cut squeezed into a sideways
-    /// strip that draws its own bar — in the same order as [`Self::children`].
-    ///
-    /// Two entries and not one, because a row of collapsed panels puts a strip on *both* sides
-    /// of the same split; and [`None`] for a child that is a row of strips rather than one, so
-    /// that the mark lands on the leaves that draw the bars. See `DockArea::draws_one_bar`.
-    side_strips: [Option<SideStrip>; 2],
-}
 
 #[derive(Clone, Copy, Debug)]
 struct SeparatorBand {
@@ -1617,7 +1894,615 @@ impl SeparatorBand {
 
 #[cfg(test)]
 mod tests {
-    use super::SeparatorBand;
+    use egui::{CentralPanel, Context, Id, Pos2, RawInput, Rect, Ui, Vec2, WidgetText};
+
+    use super::{
+        Extent, Run, SeparatorBand, collapsed_strip_height, collapsed_strip_width, cut_runs,
+    };
+    use crate::layout::{DockLayout, SideStrip};
+    use crate::{
+        DockArea, DockState, GapIndex, GapPath, Node, NodeId, NodePath, Share, Split, Style,
+        SurfaceIndex, TabViewer, Tree,
+    };
+
+    /// Half a device pixel at the default scale: every boundary is snapped to whole pixels, so
+    /// an exact comparison would be reporting the snapping rather than the property.
+    const TOLERANCE: f32 = 0.5;
+
+    const SCREEN: Vec2 = Vec2::new(1200.0, 900.0);
+    const DOCK_ID: &str = "cut_row_test_dock";
+
+    struct Viewer;
+
+    impl TabViewer for Viewer {
+        type Tab = u32;
+
+        fn title(&mut self, tab: &Self::Tab) -> WidgetText {
+            tab.to_string().into()
+        }
+
+        fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {
+            ui.label(tab.to_string());
+        }
+    }
+
+    fn style() -> Style {
+        Style::from_egui(&egui::Style::default())
+    }
+
+    /// A dock whose main surface is one row of three leaves, built by hand — see
+    /// `Tree::row_by_hand` for why by hand. Returns the dock, the row and its leaves in order.
+    fn row_of_three(horizontal: bool, shares: [f32; 3]) -> (DockState<u32>, NodeId, [NodeId; 3]) {
+        let (tree, row, leaves) = Tree::row_by_hand(
+            horizontal,
+            vec![vec![0u32], vec![1], vec![2]],
+            shares.into_iter().map(Share).collect(),
+        );
+        let mut state = DockState::new(vec![9u32]);
+        *state.main_surface_mut() = tree;
+        assert_eq!(
+            state.validate(),
+            Ok(()),
+            "the hand-built row is a legal dock"
+        );
+        (state, row, [leaves[0], leaves[1], leaves[2]])
+    }
+
+    /// A few headless frames, and the geometry they settled on.
+    fn lay_out(state: &mut DockState<u32>, style: &Style, sideways: bool) -> DockLayout {
+        let ctx = Context::default();
+        let id = Id::new(DOCK_ID);
+        for _ in 0..4 {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SCREEN)),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                CentralPanel::default().show(ui, |ui| {
+                    DockArea::new(state)
+                        .id(id)
+                        .style(style.clone())
+                        .show_leaf_collapse_buttons(true)
+                        .collapse_sideways(sideways)
+                        .show_inside(ui, &mut Viewer);
+                });
+            });
+            output.textures_delta.clear();
+        }
+        DockLayout::load(&ctx, id)
+    }
+
+    fn main(node: NodeId) -> NodePath {
+        NodePath::new(SurfaceIndex::main(), node)
+    }
+
+    fn rect_of(layout: &DockLayout, node: NodeId) -> Rect {
+        layout.rect(main(node)).expect("the node was laid out")
+    }
+
+    fn divider_of(layout: &DockLayout, row: NodeId, gap: usize) -> Option<Rect> {
+        layout.divider(GapPath::new(main(row), GapIndex(gap)))
+    }
+
+    fn close(actual: f32, expected: f32, what: &str) {
+        assert!(
+            (actual - expected).abs() <= TOLERANCE,
+            "{what}: expected {expected}, got {actual}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // `cut_runs`, in one dimension. Stated on the arithmetic, where the property lives: a pair
+    // never has a middle of two, a fixed child among open ones, or a trailing run beside a
+    // leading one, so nothing on screen can reach these until stage 7 — and the corpus probes,
+    // which judge parity on pairs, cannot tell a right n-ary cut from a wrong one.
+    // ---------------------------------------------------------------------------------------
+
+    fn whole(at: f32) -> f32 {
+        at.round()
+    }
+
+    /// Fixed children at both ends stack from their own edges; the open ones between them share
+    /// what the runs leave, and the one divider is between the two open neighbours.
+    #[test]
+    fn a_leading_run_a_middle_and_a_trailing_run() {
+        let extents = [
+            Extent::Fixed(10.0),
+            Extent::Weighted(1.0),
+            Extent::Weighted(1.0),
+            Extent::Fixed(10.0),
+        ];
+        let cut = cut_runs(0.0, 100.0, &extents, 2.0, whole, whole, false);
+        assert_eq!(
+            cut.spans,
+            vec![
+                (None, Some(10.0)),
+                (Some(12.0), Some(49.0)),
+                (Some(51.0), Some(88.0)),
+                (Some(90.0), None),
+            ]
+        );
+        assert_eq!(cut.dividers, vec![None, Some((49.0, 51.0)), None]);
+        assert_eq!(
+            cut.runs,
+            vec![Run::Leading, Run::Middle, Run::Middle, Run::Trailing]
+        );
+    }
+
+    /// With nothing open the whole row is a leading run, and whether the last child reaches the
+    /// far edge is the caller's decision — the vertical rule says yes, the horizontal one (Стас,
+    /// 30.08: strips for everyone, the rest empty) says no.
+    #[test]
+    fn with_nothing_open_the_last_fixed_child_keeps_the_rest_only_if_asked() {
+        let extents = [Extent::Fixed(10.0); 3];
+        let keeps = cut_runs(0.0, 100.0, &extents, 2.0, whole, whole, true);
+        assert_eq!(
+            keeps.spans,
+            vec![
+                (None, Some(10.0)),
+                (Some(12.0), Some(22.0)),
+                (Some(24.0), None)
+            ]
+        );
+        let leaves = cut_runs(0.0, 100.0, &extents, 2.0, whole, whole, false);
+        assert_eq!(
+            leaves.spans,
+            vec![
+                (None, Some(10.0)),
+                (Some(12.0), Some(22.0)),
+                (Some(24.0), Some(34.0)),
+            ]
+        );
+        for cut in [&keeps, &leaves] {
+            assert_eq!(cut.runs, vec![Run::Leading; 3]);
+            assert_eq!(cut.dividers, vec![None, None]);
+        }
+    }
+
+    /// A fixed child between two open ones keeps exactly its length, the open ones split the
+    /// rest, and neither gap beside it draws a divider: the gap is cut at the strip's edge.
+    #[test]
+    fn a_fixed_child_among_open_ones_keeps_its_length_and_draws_no_divider() {
+        let extents = [
+            Extent::Weighted(1.0),
+            Extent::Fixed(10.0),
+            Extent::Weighted(1.0),
+        ];
+        let cut = cut_runs(0.0, 100.0, &extents, 2.0, whole, whole, false);
+        assert_eq!(
+            cut.spans,
+            vec![
+                (None, Some(43.0)),
+                (Some(45.0), Some(55.0)),
+                (Some(57.0), None)
+            ]
+        );
+        assert_eq!(cut.dividers, vec![None, None]);
+        assert_eq!(cut.runs, vec![Run::Middle; 3]);
+    }
+
+    /// Open children whose weights add up to nothing are not a proportion of anything; they
+    /// share equally rather than divide by zero.
+    #[test]
+    fn open_children_with_no_weight_between_them_share_equally() {
+        let extents = [
+            Extent::Fixed(10.0),
+            Extent::Weighted(0.0),
+            Extent::Weighted(0.0),
+        ];
+        let cut = cut_runs(0.0, 100.0, &extents, 2.0, whole, whole, false);
+        assert_eq!(
+            cut.spans,
+            vec![
+                (None, Some(10.0)),
+                (Some(12.0), Some(55.0)),
+                (Some(57.0), None)
+            ]
+        );
+        assert_eq!(cut.dividers, vec![None, Some((55.0, 57.0))]);
+    }
+
+    /// **The two axes snap their runs differently, and it is inherited, not chosen.** The
+    /// horizontal branch snaps the run itself (`right_start = cut_at(left_end + separator)`
+    /// with `left_end` already snapped); the vertical one snaps each edge from the unsnapped
+    /// run. At `pixels_per_point = 1` the two agree, which is why the corpus probes and the
+    /// sweep cannot tell them apart; at a fractional scale they land a pixel apart. A parity
+    /// stage keeps each branch its own scheme, and this pins that it did: change one to the
+    /// other and a strip's divider moves a pixel on every HiDPI screen. Unifying them is a
+    /// decision about pixels, not a cleanup — see `cut_runs`.
+    #[test]
+    fn the_two_axes_snap_their_runs_differently_and_it_is_inherited() {
+        const PIXELS_PER_POINT: f32 = 1.5;
+        let snap = |at: f32| (at * PIXELS_PER_POINT).round() / PIXELS_PER_POINT;
+        let pixels = |at: f32| (at * PIXELS_PER_POINT).round();
+        // Two fixed children, not one: the *second* strip's far edge is what tells "the run is
+        // snapped" from "only the cut is" — with one strip the two are the same number.
+        let extents = [
+            Extent::Fixed(24.4),
+            Extent::Fixed(24.4),
+            Extent::Weighted(1.0),
+        ];
+
+        let vertical = cut_runs(0.0, 100.0, &extents, 1.2, snap, |at| at, true);
+        let horizontal = cut_runs(0.0, 100.0, &extents, 1.2, snap, snap, false);
+
+        // The first edge is the same number either way: it is snapped from the row's edge.
+        assert_eq!(pixels(vertical.spans[0].1.unwrap()), 37.0);
+        assert_eq!(pixels(horizontal.spans[0].1.unwrap()), 37.0);
+        // The next one is not: 24.4 + 1.2 = 25.6 → pixel 38 from the unsnapped run, but
+        // 24.667 (pixel 37) + 1.2 = 25.867 → pixel 39 from the snapped one.
+        assert_eq!(
+            pixels(vertical.spans[1].0.unwrap()),
+            38.0,
+            "the vertical branch snaps each edge from the run in points"
+        );
+        assert_eq!(
+            pixels(horizontal.spans[1].0.unwrap()),
+            39.0,
+            "the horizontal branch snaps the run itself at every step"
+        );
+        // And the second strip's far edge carries the difference on: 25.6 + 24.4 = 50 → pixel
+        // 75 in points, against 26 (pixel 39) + 24.4 = 50.4 → pixel 76 along the snapped run.
+        assert_eq!(pixels(vertical.spans[1].1.unwrap()), 75.0);
+        assert_eq!(
+            pixels(horizontal.spans[1].1.unwrap()),
+            76.0,
+            "the horizontal run is carried snapped, so the next strip starts from a pixel"
+        );
+    }
+
+    /// Open children between the runs split what the fixed ones leave **by weight**, not
+    /// equally: with weights 1 and 3 the second takes three times the first.
+    #[test]
+    fn open_children_split_what_the_fixed_ones_leave_by_weight() {
+        let extents = [
+            Extent::Fixed(10.0),
+            Extent::Weighted(1.0),
+            Extent::Weighted(3.0),
+        ];
+        // 102 − 12 − 2 = 88 to share: 22 and 66.
+        let cut = cut_runs(0.0, 102.0, &extents, 2.0, whole, whole, false);
+        assert_eq!(
+            cut.spans,
+            vec![
+                (None, Some(10.0)),
+                (Some(12.0), Some(34.0)),
+                (Some(36.0), None)
+            ]
+        );
+        assert_eq!(cut.dividers, vec![None, Some((34.0, 36.0))]);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The same three branches on screen, on rows of three built by hand.
+    // ---------------------------------------------------------------------------------------
+
+    /// An open row of three is cut at both of its boundaries, where the weights put them, with
+    /// a divider in each gap — and the three children plus the two dividers tile the row.
+    #[test]
+    fn a_row_of_three_is_cut_at_each_of_its_boundaries() {
+        for horizontal in [true, false] {
+            let style = style();
+            let (mut state, row, leaves) = row_of_three(horizontal, [1.0, 1.0, 2.0]);
+            let layout = lay_out(&mut state, &style, false);
+
+            let whole = rect_of(&layout, row);
+            let (lo, size) = if horizontal {
+                (whole.min.x, whole.width())
+            } else {
+                (whole.min.y, whole.height())
+            };
+            let along = |rect: Rect| {
+                if horizontal {
+                    (rect.min.x, rect.max.x)
+                } else {
+                    (rect.min.y, rect.max.y)
+                }
+            };
+
+            let first = divider_of(&layout, row, 0).expect("a divider in the first gap");
+            let second = divider_of(&layout, row, 1).expect("a divider in the second gap");
+            let centre = |rect: Rect| {
+                let (near, far) = along(rect);
+                (near + far) * 0.5
+            };
+            close(
+                centre(first),
+                lo + size * 0.25,
+                "the first boundary, at 1/(1+1+2)",
+            );
+            close(
+                centre(second),
+                lo + size * 0.5,
+                "the second boundary, at 2/(1+1+2)",
+            );
+
+            let [a, b, c] = leaves.map(|leaf| along(rect_of(&layout, leaf)));
+            assert_eq!(
+                a.0,
+                along(whole).0,
+                "the first child starts where the row starts"
+            );
+            assert_eq!(a.1, along(first).0, "the first child ends at its divider");
+            assert_eq!(b.0, along(first).1);
+            assert_eq!(b.1, along(second).0);
+            assert_eq!(c.0, along(second).1);
+            assert_eq!(
+                c.1,
+                along(whole).1,
+                "the last child ends where the row ends"
+            );
+        }
+    }
+
+    /// A strip at each end of a horizontal row hugs its own edge — the first the left, the last
+    /// the right — and the open column between them takes everything they gave up; no gap
+    /// beside a strip draws a divider.
+    #[test]
+    fn strips_at_both_ends_of_a_row_hug_their_own_edges() {
+        let style = style();
+        let (mut state, row, [a, b, c]) = row_of_three(true, [1.0, 1.0, 1.0]);
+        state.main_surface_mut().set_leaf_collapsed(a, true);
+        state.main_surface_mut().set_leaf_collapsed(c, true);
+        let layout = lay_out(&mut state, &style, true);
+
+        let whole = rect_of(&layout, row);
+        let strip = collapsed_strip_width(1, &style);
+        let separator = style.separator.width;
+
+        let left = rect_of(&layout, a);
+        close(
+            left.min.x,
+            whole.min.x,
+            "the first strip starts at the row's edge",
+        );
+        close(left.width(), strip, "and is one strip wide");
+        assert_eq!(layout.side_strip(main(a)), Some(SideStrip::Left));
+
+        let right = rect_of(&layout, c);
+        close(
+            right.max.x,
+            whole.max.x,
+            "the last strip ends at the row's edge",
+        );
+        close(right.width(), strip, "and is one strip wide");
+        assert_eq!(layout.side_strip(main(c)), Some(SideStrip::Right));
+
+        let open = rect_of(&layout, b);
+        close(
+            open.min.x,
+            left.max.x + separator,
+            "the column starts a separator after the strip",
+        );
+        close(
+            open.max.x,
+            right.min.x - separator,
+            "and ends a separator before the other",
+        );
+        assert_eq!(layout.side_strip(main(b)), None);
+
+        assert_eq!(
+            divider_of(&layout, row, 0),
+            None,
+            "cut at the strip's edge, not at a ratio"
+        );
+        assert_eq!(divider_of(&layout, row, 1), None);
+    }
+
+    /// A strip between two open columns is exactly one strip wide where it stands, and the two
+    /// columns share what it gave up **by weight** — three to one here, so that a cut that
+    /// shared it equally is told apart from one that read the weights.
+    #[test]
+    fn a_strip_among_open_columns_hands_its_width_to_both_sides() {
+        let style = style();
+        let (mut state, row, [a, b, c]) = row_of_three(true, [1.0, 1.0, 3.0]);
+        state.main_surface_mut().set_leaf_collapsed(b, true);
+        let layout = lay_out(&mut state, &style, true);
+
+        let strip = rect_of(&layout, b);
+        close(
+            strip.width(),
+            collapsed_strip_width(1, &style),
+            "one strip wide",
+        );
+        assert_eq!(layout.side_strip(main(b)), Some(SideStrip::Left));
+
+        let left = rect_of(&layout, a);
+        let right = rect_of(&layout, c);
+        // Each edge is snapped on its own, so the ratio holds to a couple of pixels.
+        assert!(
+            (right.width() - 3.0 * left.width()).abs() <= 2.0,
+            "weights 1 and 3: the right column is three times the left, got {} and {}",
+            left.width(),
+            right.width()
+        );
+        close(
+            left.max.x + style.separator.width,
+            strip.min.x,
+            "the strip starts after the left column",
+        );
+        close(
+            strip.max.x + style.separator.width,
+            right.min.x,
+            "and the right one after the strip",
+        );
+        assert_eq!(divider_of(&layout, row, 0), None);
+        assert_eq!(divider_of(&layout, row, 1), None);
+    }
+
+    /// Every column a strip: they sit against the left edge one after the other, each marked
+    /// `Left`, and the rest of the row is nobody's — the last strip does *not* stretch to the far
+    /// edge (Стас, 30.08).
+    #[test]
+    fn with_every_column_a_strip_the_rest_of_the_row_is_nobodys() {
+        let style = style();
+        let (mut state, row, leaves) = row_of_three(true, [1.0, 1.0, 1.0]);
+        for leaf in leaves {
+            state.main_surface_mut().set_leaf_collapsed(leaf, true);
+        }
+        let layout = lay_out(&mut state, &style, true);
+
+        let whole = rect_of(&layout, row);
+        let strip = collapsed_strip_width(1, &style);
+        let step = strip + style.separator.width;
+        for (index, leaf) in leaves.into_iter().enumerate() {
+            let rect = rect_of(&layout, leaf);
+            close(
+                rect.min.x,
+                whole.min.x + step * index as f32,
+                "strips one after the other",
+            );
+            close(rect.width(), strip, "each one strip wide");
+            assert_eq!(layout.side_strip(main(leaf)), Some(SideStrip::Left));
+        }
+        let last = rect_of(&layout, leaves[2]);
+        assert!(
+            whole.max.x - last.max.x > 100.0,
+            "the rest of the row belongs to nobody: the last strip ends at {} of {}",
+            last.max.x,
+            whole.max.x
+        );
+        assert_eq!(divider_of(&layout, row, 0), None);
+        assert_eq!(divider_of(&layout, row, 1), None);
+    }
+
+    /// Collapsed rows at both ends of a stack hang from their own edges — the first from the top,
+    /// the last from the bottom — and the open one between them takes the rest.
+    #[test]
+    fn collapsed_rows_at_both_ends_of_a_stack_leave_the_open_one_between() {
+        let style = style();
+        let (mut state, row, [a, b, c]) = row_of_three(false, [1.0, 1.0, 1.0]);
+        state.main_surface_mut().set_leaf_collapsed(a, true);
+        state.main_surface_mut().set_leaf_collapsed(c, true);
+        let layout = lay_out(&mut state, &style, false);
+
+        let whole = rect_of(&layout, row);
+        let bar = collapsed_strip_height(1, &style);
+        let separator = style.separator.width;
+
+        let top = rect_of(&layout, a);
+        close(
+            top.min.y,
+            whole.min.y,
+            "the first collapsed row starts at the top",
+        );
+        close(top.height(), bar, "and is one tab bar tall");
+        let bottom = rect_of(&layout, c);
+        close(
+            bottom.max.y,
+            whole.max.y,
+            "the last collapsed row ends at the bottom",
+        );
+        close(bottom.height(), bar, "and is one tab bar tall");
+        let open = rect_of(&layout, b);
+        close(
+            open.min.y,
+            top.max.y + separator,
+            "the open one starts a separator below the first",
+        );
+        close(
+            open.max.y,
+            bottom.min.y - separator,
+            "and ends a separator above the last",
+        );
+        assert_eq!(
+            divider_of(&layout, row, 0),
+            None,
+            "cut at the bar's edge, not at a ratio"
+        );
+        assert_eq!(divider_of(&layout, row, 1), None);
+    }
+
+    /// A vertical row whose *first* child is itself a stack of collapsed rows is given a bar for
+    /// **each** of them — `collapsed_leaf_count`, not one — with the separator between.
+    ///
+    /// Found missing by mutation at stage 6, and it predates the stage: the arithmetic was
+    /// there, and no scene in the suite or in the corpus (three scenes × 544 layouts) had a
+    /// fully collapsed vertical row as the first child of a vertical row. As the *last* child it
+    /// takes the rest of the column and its height is never asked, which is where every such
+    /// scene had it. A mutant handing every collapsed child one bar passed everything.
+    #[test]
+    fn a_stack_of_collapsed_rows_is_given_a_bar_for_each_of_them() {
+        let style = style();
+        let mut state = DockState::new(vec![0u32]);
+        let a = state.main_surface().root().unwrap();
+        // V(V(b, c), a): `b` above `a`, then `c` below `b`.
+        let [_, b] = state.split(main(a), Split::Above, 0.5, Node::leaf(1u32));
+        let [_, c] = state.split(main(b), Split::Below, 0.5, Node::leaf(2u32));
+        let outer = state.main_surface().root().unwrap();
+        let inner = state.main_surface().parent(b).unwrap();
+        assert_ne!(inner, outer, "the stack is nested, not the root");
+        state.main_surface_mut().set_leaf_collapsed(b, true);
+        state.main_surface_mut().set_leaf_collapsed(c, true);
+        let layout = lay_out(&mut state, &style, false);
+
+        let bar = collapsed_strip_height(1, &style);
+        let stack = rect_of(&layout, inner);
+        close(
+            stack.height(),
+            collapsed_strip_height(2, &style),
+            "two bars and the separator between them",
+        );
+        close(rect_of(&layout, b).height(), bar, "the first bar");
+        close(
+            rect_of(&layout, c).height(),
+            bar,
+            "the second bar — not the rest of the column, and not nothing",
+        );
+        close(
+            rect_of(&layout, a).min.y,
+            stack.max.y + style.separator.width,
+            "the open panel starts a separator below the stack",
+        );
+        assert_eq!(
+            divider_of(&layout, outer, 0),
+            None,
+            "cut at the stack's edge"
+        );
+    }
+
+    /// Every row collapsed: the stack hangs from the top, one tab bar each with a separator
+    /// between, and the last one keeps the rest of the column — the vertical rule the pair had,
+    /// kept by parity and *different* from the horizontal answer above. Recorded here so that
+    /// reconciling the two is a decision someone takes, not a drift.
+    #[test]
+    fn with_every_row_collapsed_the_stack_hangs_from_the_top_and_the_last_keeps_the_rest() {
+        let style = style();
+        let (mut state, row, leaves) = row_of_three(false, [1.0, 1.0, 1.0]);
+        for leaf in leaves {
+            state.main_surface_mut().set_leaf_collapsed(leaf, true);
+        }
+        let layout = lay_out(&mut state, &style, false);
+
+        let whole = rect_of(&layout, row);
+        let bar = collapsed_strip_height(1, &style);
+        let step = bar + style.separator.width;
+        for (index, leaf) in leaves.into_iter().enumerate() {
+            let rect = rect_of(&layout, leaf);
+            close(
+                rect.min.y,
+                whole.min.y + step * index as f32,
+                "bars one after the other",
+            );
+        }
+        close(
+            rect_of(&layout, leaves[0]).height(),
+            bar,
+            "the first is one bar tall",
+        );
+        close(
+            rect_of(&layout, leaves[1]).height(),
+            bar,
+            "so is the second",
+        );
+        close(
+            rect_of(&layout, leaves[2]).max.y,
+            whole.max.y,
+            "the last reaches the bottom of the column",
+        );
+        assert_eq!(divider_of(&layout, row, 0), None);
+        assert_eq!(divider_of(&layout, row, 1), None);
+    }
 
     /// A degenerate node hands the band a `range` that is not a positive number, and the two
     /// ways it can fail to be one are **not** the same test: zero is ordinary arithmetic, NaN

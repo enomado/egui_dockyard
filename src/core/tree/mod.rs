@@ -1109,6 +1109,47 @@ impl<Tab> Tree<Tab> {
         self.sync_collapsed_from_root();
     }
 
+    /// A tree that is one row of `leaves`, weighted by `shares` — built by hand, for scenes.
+    ///
+    /// Nothing in the crate builds a row of more than two yet: [`split`](Self::split) wraps a
+    /// new pair around its target, and stage 7 of `docs/PLAN_a_row_holds_many_panels.md` is
+    /// where it starts inserting into an existing row instead. The layout of such a row has to
+    /// be judged *before* then, on a scene that exists — the lesson of stages 4 and 5, where the
+    /// property each stage was for turned out reachable only on a row built by hand — so tests
+    /// build one here. Test-only, and to go when `split` can build the same row.
+    ///
+    /// Returns the tree, the row's id, and the leaves in order. The first leaf is focused.
+    #[cfg(test)]
+    pub(crate) fn row_by_hand(
+        horizontal: bool,
+        leaves: Vec<Vec<Tab>>,
+        shares: Vec<Share>,
+    ) -> (Self, NodeId, Vec<NodeId>) {
+        assert!(leaves.len() >= 2, "a row holds at least two children");
+        assert_eq!(leaves.len(), shares.len(), "one weight per leaf");
+        let mut tree = Self::default();
+        let children: Vec<NodeId> = leaves
+            .into_iter()
+            .map(|tabs| {
+                tree.nodes.insert(NodeEntry {
+                    parent: None,
+                    node: Node::leaf_with(tabs),
+                })
+            })
+            .collect();
+        let row = tree.nodes.insert(NodeEntry {
+            parent: None,
+            node: Node::Row(RowNode::new(horizontal, children.clone(), shares)),
+        });
+        for &child in &children {
+            tree.nodes.get_mut(child).unwrap().parent = Some(row);
+        }
+        tree.root = Some(row);
+        tree.focused_node = Some(children[0]);
+        tree.recompute_collapsed();
+        (tree, row, children)
+    }
+
     // ------------------------------------------------------------------------
     // Lookups
     // ------------------------------------------------------------------------

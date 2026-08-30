@@ -107,6 +107,12 @@ existing watches must not change on `Pair` steps — that is the parity half.
 **6. Push, pin, acceptance.** Fork pushed, `cargo update -p egui_dockyard`, application built
 `--all-targets`, and then the part no test can do: does the hand agree with the eye.
 
+### Where it stands (30.08)
+
+Stages 0–5 are closed and pushed (`fba0deb`), the pin is moved, and every consumer of the dock in
+the application builds `--all-targets`. What is left of stage 6 is the acceptance by hand, listed
+in the Definition of done below.
+
 ## Decisions
 
 1. **`min_size` is a parameter, not a constant.** Two callers with genuinely different minima,
@@ -118,17 +124,22 @@ existing watches must not change on `Pair` steps — that is the parity half.
 3. **The default becomes `Chain`.** Stated above; recorded here because a default nobody argued
    for is exactly what gets silently restored later.
 
-## Open — to settle with Стас before the stage that needs it
+## Settled with Стас (30.08)
 
-* **Junction handles under a modifier** (stage 4). A handle moves two or three boundaries at
-  once; "chain" across an intersection is not one obvious thing. Proposal: handles stay `Pair`,
-  modifiers do nothing there. ⚠ Note the collision this avoids and the one it does not:
-  **Ctrl+click on a handle already transposes** ([one drag to resize them
-  all](PLAN_one_drag_to_resize_them_all.md)), so Ctrl over a handle would mean two things
-  depending on whether the hand moved.
-* **Arrow-key nudges** (stage 4). `should_respond_to_arrow_keys` already reads
-  `command || shift` to take focus, so a focused separator nudged with Ctrl+arrow would be
-  asking for both. Proposal: arrows stay `Pair`.
+* **Junction handles ignore modifiers for dragging**, and the collision is *named* rather than
+  avoided: Ctrl over a handle is a transposing click and a pair drag, one movement threshold
+  apart. Стас asked for the whole thing to be written down and made unambiguous —
+  [`docs/MODIFIERS.md`](MODIFIERS.md) is that table, and the rule that makes it finite is that a
+  modifier is read against a (target, gesture) pair rather than against a target.
+* **Arrow-key nudges stay `Pair`**: taking keyboard focus on a divider already costs a modifier
+  (`should_respond_to_arrow_keys` reads `command || shift`), so Ctrl+arrow has nothing left to
+  spend on a mode.
+* **The n-ary plan's acceptance file keeps its plain drag** — Стас: *«пока не принципиально,
+  давай сделаем как-то, а потом будем менять поведение если понадобится»*. Its `PULL` of 150 px
+  stays inside the near neighbour's room, so a chain that never ran out behaves exactly like a
+  pair and the file stays green and honest.
+
+## Open — to settle with Стас before the stage that needs it
 * **`Frame` in a dock** (stage 1). Ported because it is an arm of the same function; no dock
   gesture selects it. Left unreachable rather than deleted — deleting it would fork the file
   from welllog's policy on day one.
@@ -160,6 +171,49 @@ existing watches must not change on `Pair` steps — that is the parity half.
 * 🔧 **egui 0.36 has no `RawInput::modifiers`.** A synthetic gesture declares what is held with
   `Event::ModifiersChanged`, and the state is sticky between frames. Worth knowing before the
   stage 5 sweep, which will hold modifiers across steps.
+
+## Found on the way (30.08, stages 3–5)
+
+* 🚨 **A double-click centred every divider on `0.5` — the middle of the *row*.** Right for a
+  pair, whose divider owns the whole row, and on a row of three it sends the second boundary
+  *behind the first*. The sweep found it the day it could build a row of three, and the shape of
+  the fault is this track's oldest one: a question ("where is the middle of this divider's room?")
+  answered inline in one place and not asked at all in the other. Both now read
+  `RowNode::neighbour_boundaries`. The mutant that puts `0.5` back survived the whole suite, so
+  the fix has an oracle of its own rather than the sweep's luck.
+* 🐞 **The crate panicked: `SeparatorBand::between` returned `min > max` by 3e-8**
+  (`0.26666668` against `0.26666665`), and `f32::clamp` panics on that. `lo + room/2` and
+  `hi - room/2` are one number in arithmetic and two in `f32`; the capped case is now written as a
+  single point. Reached on a squeezed window inside a junction drag — a crash, not a boundary
+  going astray, and nothing in the suite had ever asked for the inverted pair.
+* 📐 **A coverage number cannot be bought with an extra random draw.** Drawing the hold in the
+  generator shifted every value after it and emptied an *unrelated* counter (junction presses that
+  fall short of egui's drag threshold went from some to none, across every seed). Deriving it from
+  a value already drawn keeps the stream. Which value matters too: derived from the divider index
+  the modes landed anywhere, derived from the *travel* each mode gets the distance at which it is
+  distinguishable — a `-2000` px proportional drag gives nothing at all when every child is
+  already at its minimum, and duly reported no coverage.
+* 📐 **More steps, not more seeds.** Every seed draws the same first 30 steps it always did, so
+  lengthening scenarios is coverage gained rather than a different sweep; adding seeds is a fresh
+  stream whose failures are a new set. Measured: at 30 steps, 6 drags on a long row and neither
+  mode outcome once; at 40, 11 drags, one chain that pushed on and two that spread.
+* 🕳️ **Two dividers can sit on one line**, when the child between them has been squeezed to no
+  width, and their interaction bands then overlap: a press aimed at one is answered by the other.
+  The sweep refuses such a point now (`another_divider_over`), the same way it already refused one
+  under a floating window or a junction handle. Worth knowing for the acceptance: it is reachable
+  by hand too.
+* 🔭 **Two older defects the longer sweep surfaced and this stage did not chase.** Both are
+  reproducible and neither is this plan's: (1) at `STEPS = 56`, `ResizeWindow` while a tab is held
+  makes the dock let go of a live drag egui is still carrying (seed 38, step 49); (2) at
+  `SEEDS = 192`, a `Grab` after three `Collapse`s leaves egui dragging a tab widget while the
+  dock's `dragged_tab` answers `None` (seed 167, step 15; also seed 56 under a shifted stream).
+  The second smells like the folding line — a bar drawn for a collapsed leaf offering a drag the
+  dock does not open a drop for.
+* ⚠️ **`pushed_on = 1` is a thin gate.** One chain drag in the whole sweep reached its second
+  neighbour, which is the number this file elsewhere calls "one reshuffled seed away from meaning
+  nothing". The directed oracle in `tests/a_drag_chooses_who_pays_for_it.rs` is what actually
+  judges the mode; the sweep's number says the mode is *reachable at random*, and it should be
+  raised when the two defects above are fixed and the sweep can be lengthened again.
 
 ## Definition of done
 

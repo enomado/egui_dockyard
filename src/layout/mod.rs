@@ -42,7 +42,7 @@ use std::collections::HashMap;
 
 use egui::{Context, Id, Rect};
 
-use crate::{DockState, NodePath};
+use crate::{DockState, GapPath, NodePath};
 
 /// Which edge of its own split a collapsed leaf was pressed against, when the layout pass
 /// shrank it sideways instead of into a row.
@@ -79,10 +79,26 @@ pub struct NodeGeometry {
     /// the width would turn that into a strip behind their back. The layout pass knows the
     /// answer — it is the one that made the decision — so it says so here.
     pub side_strip: Option<SideStrip>,
+}
 
-    /// Where this split's divider ended up: the line drawn between the two children and,
-    /// expanded a little, the one the user grabs to move the boundary. [`None`] for anything
-    /// that is not a split, and for a split the pass did **not** cut at its ratio.
+/// Geometry of every node of a [`DockState`], as computed by the last layout pass — and of
+/// every divider, keyed by the gap it was drawn in.
+///
+/// Stored in [`egui::Context`] memory under the [`DockArea`](crate::DockArea)'s id, not
+/// in the dock state — it is derived data and is deliberately never serialized.
+///
+/// Dividers are a map of their own rather than a field of [`NodeGeometry`], because a divider
+/// is not a property of a node: it is a property of a *gap* between two children of a row, and a
+/// row has one fewer of those than it has children. While rows are pairs that is one per row,
+/// and the field it used to be worked; a row of three has two, and a field can name only one.
+/// See [`GapPath`].
+#[derive(Clone, Debug, Default)]
+pub struct DockLayout {
+    nodes: HashMap<NodePath, NodeGeometry>,
+
+    /// Where each divider ended up: the line drawn between two neighbouring children and,
+    /// expanded a little, the one the user grabs to move the boundary. Absent for a gap the pass
+    /// did **not** cut at its ratio.
     ///
     /// That second case is the whole reason this lives here rather than being re-derived by
     /// drawing. A collapsed half is given exactly the strip it needs and the divider is put
@@ -94,22 +110,13 @@ pub struct NodeGeometry {
     /// The pass already computes this rectangle in every branch; it used to throw it away and
     /// let drawing work it out again, together with a "is there one at all?" rule that then had
     /// to be repeated everywhere and drifted the moment a branch was added. Now the branch that
-    /// cuts the split is the one that says what it cut, and the field is not optional to fill:
-    /// see `SplitCut` in `show/mod.rs`.
+    /// cuts the row is the one that says what it cut, and the answer is not optional to give:
+    /// see `SplitCut` in `show/mod.rs` and [`Self::set_divider`].
     ///
     /// Note that a divider always occupies *space* — the layout leaves `separator.width`
-    /// between a strip and its sibling either way. [`None`] means there is no line to paint or
-    /// to hit-test, not that the two children are flush.
-    pub divider: Option<Rect>,
-}
-
-/// Geometry of every node of a [`DockState`], as computed by the last layout pass.
-///
-/// Stored in [`egui::Context`] memory under the [`DockArea`](crate::DockArea)'s id, not
-/// in the dock state — it is derived data and is deliberately never serialized.
-#[derive(Clone, Debug, Default)]
-pub struct DockLayout {
-    nodes: HashMap<NodePath, NodeGeometry>,
+    /// between a strip and its sibling either way. An absent entry means there is no line to
+    /// paint or to hit-test, not that the two children are flush.
+    dividers: HashMap<GapPath, Rect>,
 }
 
 impl DockLayout {
@@ -162,12 +169,13 @@ impl DockLayout {
             .and_then(|geometry| geometry.side_strip)
     }
 
-    /// Where this split's divider was drawn this frame, or [`None`] if it has none — see
-    /// [`NodeGeometry::divider`] for what "none" means and why the answer is stored rather
-    /// than worked out by whoever asks.
+    /// Where the divider in `gap` was drawn this frame, or [`None`] if there is none — see
+    /// [`Self::dividers`] for what "none" means and why the answer is stored rather than worked
+    /// out by whoever asks. A gap that names no row (a leaf, a node never laid out, a gap past
+    /// the row's last) simply has none.
     #[inline]
-    pub fn divider(&self, path: NodePath) -> Option<Rect> {
-        self.nodes.get(&path).and_then(|geometry| geometry.divider)
+    pub fn divider(&self, gap: GapPath) -> Option<Rect> {
+        self.dividers.get(&gap).copied()
     }
 
     /// Number of nodes with known geometry.
@@ -191,15 +199,16 @@ impl DockLayout {
     /// the flag can only ever describe this frame: the sideways path re-asserts it immediately
     /// after, and nothing else has to remember to take it back.
     ///
-    /// [`NodeGeometry::divider`] is deliberately **not** cleared here, and the asymmetry is the
-    /// point rather than an oversight. `set_side_strip` is called only when there *is* a strip,
-    /// so its absence has to be spelled somewhere; [`Self::set_divider`] takes an [`Option`] and
-    /// is called for every split on every pass, so the absence of a divider is itself an answer
-    /// that arrives. The only other way an entry could go stale is the node ceasing to be a
-    /// split — and a split does not become a leaf, it is *removed* and the surviving child takes
-    /// its place, after which [`Self::retain_live`] drops the entry. Clearing here as well would
-    /// be a guard against nothing, which is worse than none: it cannot be made to fail, so it
-    /// would read as load-bearing forever.
+    /// The row's dividers are deliberately **not** cleared here, and the asymmetry is the point
+    /// rather than an oversight. `set_side_strip` is called only when there *is* a strip, so its
+    /// absence has to be spelled somewhere; [`Self::set_divider`] takes an [`Option`] and is
+    /// called for every gap of every laid-out row on every pass (and [`Self::forget_dividers`]
+    /// for a row that is stowed), so the absence of a divider is itself an answer that arrives.
+    /// The only other way an entry could go stale is the node ceasing to be a row — and a row
+    /// does not become a leaf, it is *removed* and the surviving child takes its place, after
+    /// which [`Self::retain_live`] drops the entry. Clearing here as well would be a guard
+    /// against nothing, which is worse than none: it cannot be made to fail, so it would read as
+    /// load-bearing forever.
     #[inline]
     pub(crate) fn set_rect(&mut self, path: NodePath, rect: Rect) {
         self.nodes
@@ -212,21 +221,36 @@ impl DockLayout {
                 rect,
                 viewport: None,
                 side_strip: None,
-                divider: None,
             });
     }
 
-    /// Record where this split's divider was cut, or that it has none.
+    /// Record where the divider in `gap` was cut, or that there is none.
     ///
     /// Takes an [`Option`] rather than being a "set it if there is one" call, and that is the
-    /// point: every branch of the layout pass answers this question, so the answer arrives here
-    /// whichever way it came out. A setter that could simply not be called would put the branch
-    /// that forgets back on the map.
+    /// point: every branch of the layout pass answers this question for every gap it cuts, so
+    /// the answer arrives here whichever way it came out. A setter that could simply not be
+    /// called would put the branch that forgets back on the map.
     #[inline]
-    pub(crate) fn set_divider(&mut self, path: NodePath, divider: Option<Rect>) {
-        if let Some(geometry) = self.nodes.get_mut(&path) {
-            geometry.divider = divider;
+    pub(crate) fn set_divider(&mut self, gap: GapPath, divider: Option<Rect>) {
+        match divider {
+            Some(rect) => {
+                self.dividers.insert(gap, rect);
+            }
+            None => {
+                self.dividers.remove(&gap);
+            }
         }
+    }
+
+    /// Drop every divider of the row at `row`: it draws none this frame, whatever it holds.
+    ///
+    /// The answer for a row the pass does not cut at all — one stowed away as a unit, which is
+    /// a single bar for its whole subtree. Said as one call over the row rather than as
+    /// [`Self::set_divider`] per gap, because the branch that stows has no gaps in hand: it never
+    /// looked at the children, and a row of five behind one arrow has four gaps to forget.
+    #[inline]
+    pub(crate) fn forget_dividers(&mut self, row: NodePath) {
+        self.dividers.retain(|gap, _| gap.row != row);
     }
 
     /// Mark a leaf as a sideways collapsed strip against `side`.
@@ -252,10 +276,13 @@ impl DockLayout {
     /// — would place handles inside it from where the subtree used to be.
     ///
     /// So "not laid out" is spelled as no entry at all, which is exactly what a node that has
-    /// never been shown looks like, and every reader already handles that.
+    /// never been shown looks like, and every reader already handles that. A row's dividers go
+    /// with it, for the same reason: a line left behind by the last frame *is* the answer to
+    /// "is there a divider here", and inside a stowed side there is not.
     #[inline]
     pub(crate) fn forget(&mut self, path: NodePath) {
         self.nodes.remove(&path);
+        self.forget_dividers(path);
     }
 
     /// Record the body rectangle of a leaf.
@@ -272,21 +299,130 @@ impl DockLayout {
                 rect: viewport,
                 viewport: Some(viewport),
                 side_strip: None,
-                divider: None,
             });
     }
 
-    /// Forget the geometry of nodes that no longer exist in `dock_state`.
+    /// Forget the geometry of nodes that no longer exist in `dock_state`, and the dividers of
+    /// rows that no longer exist.
     ///
     /// Keys are identities, so a dead entry can no longer be mistaken for a live node —
     /// this is now only about not growing forever, which is why it can be a plain
     /// "is it still there?" question.
     pub(crate) fn retain_live<Tab>(&mut self, dock_state: &DockState<Tab>) {
-        self.nodes.retain(|path, _| {
+        let alive = |path: NodePath| {
             dock_state
                 .get_surface(path.surface)
                 .and_then(|surface| surface.node_tree())
                 .is_some_and(|tree| tree.contains(path.node))
-        });
+        };
+        self.nodes.retain(|path, _| alive(*path));
+        self.dividers.retain(|gap, _| alive(gap.row));
+    }
+}
+
+/// The divider map's own bookkeeping, asked directly.
+///
+/// The screen tests say what a divider *means* (`a_hidden_half_has_no_boundary_to_drag`,
+/// `a_side_can_be_stowed`); what is here is the part no scene reaches today — a map that keeps a
+/// line for a row that is gone is read by nobody while every row is a pair drawn on screen, so
+/// nothing would go red for it, and it would be the entry a later reader finds first.
+#[cfg(test)]
+mod tests {
+    use egui::{Pos2, Rect};
+
+    use super::DockLayout;
+    use crate::{DockState, GapIndex, GapPath, NodeId, NodePath, SurfaceIndex};
+
+    fn a_rect() -> Rect {
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(10.0, 10.0))
+    }
+
+    fn gap(path: NodePath, index: usize) -> GapPath {
+        GapPath::new(path, GapIndex(index))
+    }
+
+    /// The absence of a divider is an answer that arrives: writing `None` into a gap takes the
+    /// line out, it does not leave last frame's in place.
+    #[test]
+    fn a_divider_set_to_none_is_gone() {
+        let path = NodePath::new(SurfaceIndex::main(), NodeId::new(3, 0));
+        let mut layout = DockLayout::default();
+        layout.set_rect(path, a_rect());
+        layout.set_divider(gap(path, 0), Some(a_rect()));
+        assert!(
+            layout.divider(gap(path, 0)).is_some(),
+            "control: the line was recorded"
+        );
+
+        layout.set_divider(gap(path, 0), None);
+        assert_eq!(layout.divider(gap(path, 0)), None);
+        assert!(
+            layout.rect(path).is_some(),
+            "and the row's own rectangle is not touched"
+        );
+    }
+
+    /// A divider does not outlive its row. What `retain_live` drops for a node that has left the
+    /// tree, it drops for that node's gaps too — otherwise a line survives the row it was drawn
+    /// in, and a reader that asks the map rather than the tree finds a divider where there is no
+    /// row.
+    #[test]
+    fn a_divider_does_not_outlive_its_row() {
+        let state = DockState::new(vec![0u32]);
+        let live = NodePath::new(SurfaceIndex::main(), state.main_surface().root().unwrap());
+        let dead = NodePath::new(SurfaceIndex::main(), NodeId::new(9, 0));
+        let mut layout = DockLayout::default();
+        for path in [live, dead] {
+            layout.set_rect(path, a_rect());
+            layout.set_divider(gap(path, 0), Some(a_rect()));
+        }
+
+        layout.retain_live(&state);
+
+        assert_eq!(
+            layout.rect(dead),
+            None,
+            "control: the dead node's rectangle is dropped"
+        );
+        assert_eq!(layout.divider(gap(dead, 0)), None, "and so is its divider");
+        assert!(
+            layout.rect(live).is_some() && layout.divider(gap(live, 0)).is_some(),
+            "while a live node keeps both"
+        );
+    }
+
+    /// Forgetting a node — the inside of a stowed side — forgets every gap it had, and only its
+    /// own: a row of three inside a stowed side leaves two lines behind otherwise, and the
+    /// neighbour's line is not the stowed side's to take.
+    #[test]
+    fn forgetting_a_row_forgets_every_gap_it_had() {
+        let row = NodePath::new(SurfaceIndex::main(), NodeId::new(3, 0));
+        let neighbour = NodePath::new(SurfaceIndex::main(), NodeId::new(4, 0));
+        let mut layout = DockLayout::default();
+        for path in [row, neighbour] {
+            layout.set_rect(path, a_rect());
+        }
+        for index in 0..2 {
+            layout.set_divider(gap(row, index), Some(a_rect()));
+        }
+        layout.set_divider(gap(neighbour, 0), Some(a_rect()));
+
+        layout.forget(row);
+
+        assert_eq!(
+            layout.rect(row),
+            None,
+            "control: the node itself is forgotten"
+        );
+        assert_eq!(layout.divider(gap(row, 0)), None);
+        assert_eq!(
+            layout.divider(gap(row, 1)),
+            None,
+            "both gaps, not only the first"
+        );
+        assert!(
+            layout.divider(gap(neighbour, 0)).is_some(),
+            "a neighbour's divider is not touched"
+        );
     }
 }

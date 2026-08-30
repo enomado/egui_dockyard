@@ -1,7 +1,7 @@
 use egui::{Context, Id, Pos2, Rect};
 
 use super::drag_and_drop::{DragDropState, DragSource, HoverData};
-use crate::{NodePath, Style, SurfaceIndex};
+use crate::{GapPath, Style, SurfaceIndex};
 
 /// What the hand is holding: the subject of the gesture in flight, named once and kept.
 ///
@@ -53,15 +53,15 @@ pub enum DragSubject {
         edge: Option<WindowEdge>,
     },
 
-    /// One separator: the split whose ratio the drag is writing.
+    /// One separator: the gap whose boundary the drag is writing.
     ///
-    /// The path and not the widget id, even though the id is what the gesture is *named* by
-    /// ([`DragInFlight::widget`]) and is derived from this path: the derivation only runs one
-    /// way — the id mixes in the enclosing `Ui`'s — so an id cannot say which split it moves.
-    /// What the drag writes to is a node, so a node is what the field remembers.
+    /// The gap and not the widget id, even though the id is what the gesture is *named* by
+    /// ([`DragInFlight::widget`]) and is derived from this gap: the derivation only runs one
+    /// way — the id mixes in the enclosing `Ui`'s — so an id cannot say which boundary it moves.
+    /// What the drag writes to is a gap of a row, so a gap is what the field remembers.
     Separator {
-        /// The split whose fraction this drag writes.
-        path: NodePath,
+        /// The gap whose boundary this drag writes.
+        gap: GapPath,
     },
 
     /// A junction corner: the line the drag moves along, and the divider that ends on it.
@@ -75,12 +75,12 @@ pub enum DragSubject {
     /// decided once, at `drag_started`, and every frame after that moves *those* nodes —
     /// whatever the detector now says is at that spot.
     Junction {
-        /// The split on whose line between its two children the junction sits. One boundary the
-        /// drag moves, along that split's own axis.
-        outer: NodePath,
+        /// The gap on whose line the junction sits — the line between two neighbouring children
+        /// of a row. One boundary the drag moves, along that row's own axis.
+        outer: GapPath,
 
-        /// Orientation of `outer` itself: `true` if [`crate::Node::Horizontal`]. Which component
-        /// of the drag goes to `outer` and which to `divider` is read off it.
+        /// Orientation of `outer`'s row: `true` if it lays its children out side by side. Which
+        /// component of the drag goes to `outer` and which to `divider` is read off it.
         outer_horizontal: bool,
 
         /// The divider — or the two of them — that end on that line. The other boundary the drag
@@ -91,7 +91,7 @@ pub enum DragSubject {
 
 /// The dividers a junction is made of: one at a tee, two at a crossing.
 ///
-/// A sum and not a `Vec` or a `[NodePath; 2]` with one slot unused, because *which shape was
+/// A sum and not a `Vec` or a `[GapPath; 2]` with one slot unused, because *which shape was
 /// grabbed* is the thing a gesture must not change its mind about: "начали тягать T — продолжаем
 /// тянуть T" (Стас, 2026-08-10) is a statement about the subject, so the subject has to be able to
 /// say it. A crossing dragged as a crossing moves both of its dividers; a tee that later happens to
@@ -100,17 +100,17 @@ pub enum DragSubject {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JunctionArms {
     /// Three panels: the line runs through, and one divider ends on it.
-    Tee(NodePath),
+    Tee(GapPath),
 
     /// Four panels: a divider on each side of the line, which are one line on screen — to within
     /// [`crate::CrossSplitToggleStyle::align_tolerance`], the slack that makes them one junction at
     /// all. Dragging moves both, so they stay one line.
-    Cross([NodePath; 2]),
+    Cross([GapPath; 2]),
 }
 
 impl JunctionArms {
     /// Every divider the gesture moves across `outer`'s axis: one, or two.
-    pub fn dividers(&self) -> &[NodePath] {
+    pub fn dividers(&self) -> &[GapPath] {
         match self {
             Self::Tee(divider) => std::slice::from_ref(divider),
             Self::Cross(pair) => pair,
@@ -119,7 +119,7 @@ impl JunctionArms {
 
     /// The one whose position on the line the junction *is* — the first of them, and at a crossing
     /// the two are the same line to within the tolerance that paired them.
-    pub fn first(&self) -> NodePath {
+    pub fn first(&self) -> GapPath {
         self.dividers()[0]
     }
 }
@@ -211,7 +211,7 @@ pub struct DragInFlight {
     /// A flag and not the starting ratio, which is what the separator kept before it folded in
     /// here: a junction moves two fractions at once, so the starting *value* would be a pair
     /// whose shape depends on the subject, while each frame of any drag already answers "did I
-    /// change anything" for itself — the dock's own `nudge_split` returns exactly that.
+    /// change anything" for itself — the dock's own `nudge_boundary` returns exactly that.
     ///
     /// For a [tab](DragSubject::Tab) the same question is asked of the *pointer* rather than of
     /// the tree: a carried tab writes nothing until it is dropped, so what this records is that
@@ -411,7 +411,7 @@ impl State {
 mod tests {
     use super::super::drag_and_drop::DragSource;
     use super::{DragSubject, JunctionArms, State};
-    use crate::{DockState, NodeId, NodePath, SurfaceIndex, TabIndex};
+    use crate::{DockState, GapIndex, GapPath, NodeId, NodePath, SurfaceIndex, TabIndex};
     use egui::{Id, Pos2, pos2};
 
     /// A tab identity has no public constructor — it is handed out by the leaf that owns it —
@@ -434,11 +434,16 @@ mod tests {
     }
 
     fn a_junction() -> DragSubject {
-        let path = |slot| NodePath::new(SurfaceIndex::main(), NodeId::new(slot, 0));
+        let gap = |slot| {
+            GapPath::new(
+                NodePath::new(SurfaceIndex::main(), NodeId::new(slot, 0)),
+                GapIndex(0),
+            )
+        };
         DragSubject::Junction {
-            outer: path(0),
+            outer: gap(0),
             outer_horizontal: true,
-            arms: JunctionArms::Tee(path(1)),
+            arms: JunctionArms::Tee(gap(1)),
         }
     }
 

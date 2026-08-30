@@ -1,4 +1,4 @@
-use crate::core::tree::{ChildIndex, NodeId};
+use crate::core::tree::{ChildIndex, GapIndex, NodeId};
 
 /// How much of a row's length one of its children asks for, **relative to its siblings**.
 ///
@@ -81,8 +81,8 @@ pub struct RowNode {
     /// One weight per child, in [`children`](Self::children) order.
     ///
     /// Kept the same length as `children` by construction — the only writer of either is
-    /// [`new`](Self::new), which checks it, and [`set_fraction`](Self::set_fraction), which
-    /// replaces both weights of a pair at once. Nothing in the crate can grow one and not the
+    /// [`new`](Self::new), which checks it, and [`set_boundary`](Self::set_boundary), which
+    /// rewrites two neighbouring weights in place. Nothing in the crate can grow one and not the
     /// other yet; the operations that could are stage 7's, and they will take the two together.
     shares: Vec<Share>,
 
@@ -268,36 +268,147 @@ impl RowNode {
         self.shares.iter().map(|share| share.0).sum()
     }
 
-    /// The proportion of this row taken by its first child.
+    /// How many gaps this row has: one fewer than it has children.
+    #[inline]
+    pub fn gap_count(&self) -> usize {
+        self.children.len() - 1
+    }
+
+    /// This row's gaps in order: gap `k` lies between children `k` and `k + 1`.
     ///
-    /// The pair spelling of "where the boundary sits", and the one every reader of the layout
-    /// still asks: while a row holds two children it has exactly one boundary, and this is it.
-    /// A row of three has two, which is why they get names of their own in stage 5 of
-    /// `docs/PLAN_a_row_holds_many_panels.md` (`GapIndex` there); until then a caller of this
-    /// is a caller that reads a row as a pair.
+    /// What a reader of the layout walks when it wants "every boundary of this row" — the
+    /// dividers to draw, the handles to offer, the ratios to snapshot. A pair yields exactly one.
+    #[inline]
+    pub fn gaps(&self) -> impl ExactSizeIterator<Item = GapIndex> + Clone {
+        (0..self.gap_count()).map(GapIndex)
+    }
+
+    /// The one gap of a row of two.
+    ///
+    /// The pair spelling of [`gaps`](Self::gaps), named apart from it for the same reason
+    /// [`children_pair`](Self::children_pair) is: every place that still addresses "the divider
+    /// of this row" as though a row had one is then a grep for one identifier. Its callers are
+    /// owed a loop by stage 6 of `docs/PLAN_a_row_holds_many_panels.md`, which cuts a row rather
+    /// than a split.
+    ///
+    /// # Panics
+    ///
+    /// If this row does not have exactly one gap — loud, like `children_pair`, because a caller
+    /// here is one that has not been taught rows yet.
+    #[inline]
+    #[track_caller]
+    pub fn only_gap(&self) -> GapIndex {
+        assert_eq!(
+            self.gap_count(),
+            1,
+            "the only gap was asked of a row of {}; see `RowNode::gaps`",
+            self.children.len()
+        );
+        GapIndex(0)
+    }
+
+    /// Whether `gap` names one of this row's gaps.
+    #[inline]
+    pub fn has_gap(&self, gap: GapIndex) -> bool {
+        gap.0 < self.gap_count()
+    }
+
+    /// Where boundary `gap` sits, as a proportion of this row's length: the share of the row
+    /// taken by the children before it, `0..=1`.
+    ///
+    /// The row stores weights, so a boundary is a *derived* number — the running sum of the
+    /// weights up to and including child `gap`, divided by [`total_share`](Self::total_share).
+    /// It is what every reader of the layout asks about a divider: where to cut, where to draw,
+    /// what the drag is moving. Writers go through [`set_boundary`](Self::set_boundary).
     ///
     /// # Parity
     ///
-    /// Exactly the number [`pair`](Self::pair) was built from, for every `fraction` in `0..=1`,
-    /// and not approximately: `f + fl(1 − f)` rounds to exactly `1.0` in `f32` there — the error
-    /// of `fl(1 − f)` is at most half an ulp of a value below one, which is at most half the ulp
-    /// just below `1.0` — so the division below is by exactly one. That is what lets this stage
-    /// claim the pixels did not move, rather than claim they moved by less than anyone can see.
+    /// For a row built by [`pair`](Self::pair), gap `0` answers *exactly* the number the pair was
+    /// built from, for every `fraction` in `0..=1`, and not approximately: `f + fl(1 − f)`
+    /// rounds to exactly `1.0` in `f32` there — the error of `fl(1 − f)` is at most half an ulp
+    /// of a value below one, which is at most half the ulp just below `1.0` — so the division is
+    /// by exactly one. That is what lets a parity stage claim the pixels did not move, rather
+    /// than claim they moved by less than anyone can see.
     ///
     /// Pinned by `the_boundary_a_pair_was_built_from_comes_back_exactly`, because an argument
     /// about floating point in a comment is a claim and not a check.
+    ///
+    /// # Panics
+    ///
+    /// If `gap` is not one of this row's gaps. A caller holds a [`GapIndex`] it took from *this*
+    /// row, so an out-of-range one is the caller's bug rather than a case to answer.
+    #[inline]
+    #[track_caller]
+    pub fn boundary(&self, gap: GapIndex) -> f32 {
+        assert!(
+            self.has_gap(gap),
+            "boundary {} was asked of a row with {} gaps",
+            gap.0,
+            self.gap_count()
+        );
+        let before: f32 = self.shares[..=gap.0].iter().map(|share| share.0).sum();
+        before / self.total_share()
+    }
+
+    /// Moves boundary `gap` to `at` of this row's length, leaving every other boundary where it
+    /// is.
+    ///
+    /// Only the two children the gap lies between change weight: child `gap` grows or shrinks so
+    /// that the boundary lands at `at`, and child `gap + 1` takes up exactly the difference. The
+    /// weights before the gap and after its neighbour are not touched, and the row's total is
+    /// what it was — so the boundaries on either side stay where they were, which is the whole
+    /// promise of stage 0's oracle and the reason a row stores weights rather than boundaries.
+    ///
+    /// A caller passing an `at` outside the two neighbouring boundaries leaves one of the two
+    /// children with a negative weight, which [`validate`](crate::Tree::validate) rejects
+    /// (`RowShareNegative`): the old global rule "the fraction is within the interval it
+    /// measures" is exactly that local rule, seen from the other side.
+    ///
+    /// # Panics
+    ///
+    /// If `gap` is not one of this row's gaps — see [`boundary`](Self::boundary).
+    #[inline]
+    #[track_caller]
+    pub fn set_boundary(&mut self, gap: GapIndex, at: f32) {
+        assert!(
+            self.has_gap(gap),
+            "boundary {} was written to a row with {} gaps",
+            gap.0,
+            self.gap_count()
+        );
+        let total = self.total_share();
+        // The two sums are read before either weight is written, and `after` includes both
+        // neighbours: for a pair that is the whole row, so the second weight below comes out as
+        // `total − at·total` — exactly `1 − at` when the total is one, which is what `pair`
+        // wrote and what parity with the old `[f, 1 − f]` rests on.
+        let before: f32 = self.shares[..gap.0].iter().map(|share| share.0).sum();
+        let after: f32 = self.shares[..=gap.0 + 1].iter().map(|share| share.0).sum();
+        let cut = at * total;
+        self.shares[gap.0] = Share(cut - before);
+        self.shares[gap.0 + 1] = Share(after - cut);
+    }
+
+    /// The proportion of this row taken by its first child — the boundary of gap `0`.
+    ///
+    /// The pair spelling of [`boundary`](Self::boundary), kept by name for the readers that
+    /// genuinely speak of *one* number per row: the wire (`NodeOut` carries one `fraction`), the
+    /// shape dump, and the application's own binary wire. Each of those is owed a row by stage 7
+    /// of `docs/PLAN_a_row_holds_many_panels.md`; until then a caller of this is a caller that
+    /// reads a row as a pair, and greppable as such.
+    ///
+    /// Answers for a row of any length — "the first child's share" is a question a row of three
+    /// can answer — so, unlike [`set_fraction`](Self::set_fraction), it does not panic.
     #[inline]
     pub fn fraction(&self) -> f32 {
-        self.shares[0].0 / self.total_share()
+        self.boundary(GapIndex(0))
     }
 
     /// Moves the boundary of a two-child row to `fraction` of its length.
     ///
-    /// Writes *both* weights, because that is what "the boundary is here" means when the row is
-    /// a pair: `[fraction, 1 − fraction]`. A caller passing a `fraction` outside `0..=1` gets a
-    /// negative weight, which [`validate`](crate::Tree::validate) rejects — the old global rule
-    /// "the fraction is within the interval it measures" is exactly the local rule "no weight is
-    /// negative", seen from the other side.
+    /// The pair spelling of [`set_boundary`](Self::set_boundary), and exactly
+    /// `set_boundary(GapIndex(0), fraction)` on a row of two: the first weight becomes
+    /// `fraction · total` and the second takes the rest, which for a row built by
+    /// [`pair`](Self::pair) is `[fraction, 1 − fraction]` to the bit.
     ///
     /// # Panics
     ///
@@ -313,14 +424,14 @@ impl RowNode {
             "a fraction was written to a row of {}; a row of three has no single boundary",
             self.shares.len()
         );
-        self.shares = vec![Share(fraction), Share(1.0 - fraction)];
+        self.set_boundary(GapIndex(0), fraction);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{RowNode, Share};
-    use crate::core::tree::NodeId;
+    use crate::core::tree::{GapIndex, NodeId};
 
     /// Two ids, which is all a row needs to be built directly: nothing here walks the tree.
     fn row(shares: Vec<Share>) -> RowNode {
@@ -380,5 +491,80 @@ mod tests {
             checked += 1;
         }
         assert_eq!(checked, 10_001, "the sweep ran");
+    }
+
+    /// The parity claim of stage 5: writing a boundary through its gap leaves a pair with the
+    /// same two weights `set_fraction` used to write, to the bit.
+    ///
+    /// `set_boundary` derives the two weights from sums rather than writing `[f, 1 − f]`
+    /// literally, so the claim that nothing moved rests on that arithmetic collapsing to the
+    /// literal for a total of exactly one — checked here over the same sweep as the reader's
+    /// claim, and by bits for the same reason.
+    #[test]
+    fn a_boundary_written_through_its_gap_is_the_pair_it_would_have_been() {
+        for step in 0..=10_000u32 {
+            let fraction = step as f32 / 10_000.0;
+            let mut row = RowNode::pair(true, [NodeId::new(0, 0); 2], 0.5);
+            row.set_boundary(GapIndex(0), fraction);
+            let expected = [Share(fraction), Share(1.0 - fraction)];
+            assert_eq!(
+                row.shares()
+                    .iter()
+                    .map(|s| s.0.to_bits())
+                    .collect::<Vec<_>>(),
+                expected.iter().map(|s| s.0.to_bits()).collect::<Vec<_>>(),
+                "writing {fraction} gave {:?}, not {expected:?}",
+                row.shares()
+            );
+        }
+    }
+
+    /// **A gap is local: moving one boundary of a row of three leaves the other where it was.**
+    ///
+    /// The property stage 0's oracle states on the screen, stated here on the model, where it is
+    /// reachable today — no writer builds a row of three yet, so on the screen it stays red until
+    /// stage 7. What a mutant that rewrote the row as `[f, 1 − f]`-style pairs, or that
+    /// normalised every weight, would break first.
+    #[test]
+    fn moving_one_boundary_of_a_row_of_three_leaves_the_other_alone() {
+        let mut row = row(vec![Share(1.0), Share(1.0), Share(2.0)]);
+        assert_eq!(row.gap_count(), 2);
+        assert_eq!(row.boundary(GapIndex(0)), 0.25);
+        assert_eq!(row.boundary(GapIndex(1)), 0.5);
+
+        row.set_boundary(GapIndex(0), 0.125);
+        assert_eq!(row.boundary(GapIndex(0)), 0.125, "the boundary asked for");
+        assert_eq!(row.boundary(GapIndex(1)), 0.5, "the other one did not move");
+        assert_eq!(row.total_share(), 4.0, "and the row's total is untouched");
+        assert_eq!(row.shares()[2], Share(2.0), "the bystander kept its weight");
+
+        row.set_boundary(GapIndex(1), 0.75);
+        assert_eq!(row.boundary(GapIndex(1)), 0.75);
+        assert_eq!(
+            row.boundary(GapIndex(0)),
+            0.125,
+            "nor the first, the other way round"
+        );
+        assert_eq!(row.shares()[0], Share(0.5));
+    }
+
+    /// The gaps a row offers are one fewer than its children, and the pair spelling names the
+    /// only one a pair has — and refuses a row of three, loudly, like `children_pair`.
+    #[test]
+    fn a_row_has_one_gap_fewer_than_it_has_children() {
+        let pair = row(vec![Share(1.0), Share(1.0)]);
+        assert_eq!(pair.gaps().collect::<Vec<_>>(), vec![GapIndex(0)]);
+        assert_eq!(pair.only_gap(), GapIndex(0));
+        assert!(pair.has_gap(GapIndex(0)) && !pair.has_gap(GapIndex(1)));
+
+        let three = row(vec![Share(1.0), Share(1.0), Share(1.0)]);
+        assert_eq!(
+            three.gaps().collect::<Vec<_>>(),
+            vec![GapIndex(0), GapIndex(1)]
+        );
+        assert!(
+            std::panic::catch_unwind(|| three.only_gap()).is_err(),
+            "a row of three has no *only* gap"
+        );
     }
 }

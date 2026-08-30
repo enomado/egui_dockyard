@@ -22,8 +22,8 @@ use egui::{
     CentralPanel, Context, Event, Id, PointerButton, Pos2, RawInput, Rect, Ui, Vec2, WidgetText,
 };
 use egui_dockyard::{
-    DockArea, DockLayout, DockState, Node, NodeId, NodePath, SideStrip, Split, Style, SurfaceIndex,
-    TabViewer,
+    DockArea, DockLayout, DockState, GapIndex, GapPath, Node, NodeId, NodePath, SideStrip, Split,
+    Style, SurfaceIndex, TabViewer,
 };
 
 const SCREEN: Vec2 = Vec2::new(1200.0, 900.0);
@@ -316,7 +316,10 @@ fn a_junction_on_a_hidden_boundary_is_not_offered() {
     let junction = Pos2::new(sim.seam().x, sim.seam_between(top, bottom).y);
     assert!(
         sim.layout()
-            .divider(NodePath::new(SurfaceIndex::main(), rows))
+            .divider(GapPath::new(
+                NodePath::new(SurfaceIndex::main(), rows),
+                GapIndex(0)
+            ))
             .is_none(),
         "precondition: the stack's own boundary is gone, because one of its panels folded away"
     );
@@ -387,26 +390,35 @@ fn the_same_press_moves_both_boundaries_while_both_panels_are_open() {
     );
 }
 
-/// A split that is drawn has a divider recorded for it, and a leaf never does.
+/// A split that is drawn has a divider recorded in its gap, and a leaf never does — a gap
+/// addressed at a leaf names no line.
 ///
 /// Cheap, and it is what makes the `None` in the test above mean something: without it, a
-/// `divider` field that was simply never filled would satisfy every "there is no line here"
+/// divider map that was simply never filled would satisfy every "there is no line here"
 /// assertion in this file.
 #[test]
 fn only_a_split_has_a_divider() {
     let sim = Sim::two_columns();
-    let path = |node| NodePath::new(SurfaceIndex::main(), node);
+    let gap = |node| GapPath::new(NodePath::new(SurfaceIndex::main(), node), GapIndex(0));
 
     assert!(
-        sim.layout().divider(path(sim.parent)).is_some(),
+        sim.layout().divider(gap(sim.parent)).is_some(),
         "the split was cut at its ratio, so there is a line between its children"
     );
     assert_eq!(
-        sim.layout().divider(path(sim.left)),
+        sim.layout().divider(gap(sim.left)),
         None,
         "a leaf divides nothing"
     );
-    assert_eq!(sim.layout().divider(path(sim.right)), None);
+    assert_eq!(sim.layout().divider(gap(sim.right)), None);
+    assert_eq!(
+        sim.layout().divider(GapPath::new(
+            NodePath::new(SurfaceIndex::main(), sim.parent),
+            GapIndex(1)
+        )),
+        None,
+        "and a pair has no second gap to draw a line in"
+    );
 }
 
 /// The positive control. Without it every assertion above would also pass if the drag simply

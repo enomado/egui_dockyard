@@ -59,7 +59,7 @@ use egui::{
 use crate::dock_area::DockMutation;
 use crate::dock_area::events::DockEvent;
 use crate::dock_area::state::{DragSubject, JunctionArms, State};
-use crate::{CrossSplitToggleStyle, DockArea, NodeId, NodePath, SeparatorStyle};
+use crate::{CrossSplitToggleStyle, DockArea, GapPath, NodePath, SeparatorStyle};
 
 /// One side of a split, with the chain of same-orientation splits at its root flattened: `n`
 /// parts side by side, with `n - 1` dividers between them.
@@ -71,9 +71,9 @@ use crate::{CrossSplitToggleStyle, DockArea, NodeId, NodePath, SeparatorStyle};
 /// nodes make it up is the tree's half — [`Tree::chain`](crate::core::tree::Tree::chain), which
 /// `band` calls and a transposition calls again when it is applied.
 struct Band {
-    /// The chain's splits, in screen order: `dividers[k]` is the split whose boundary falls
+    /// The chain's gaps, in screen order: `dividers[k]` is the gap whose boundary falls
     /// between part `k` and part `k + 1`.
-    dividers: Vec<NodeId>,
+    dividers: Vec<GapPath>,
 
     /// The `dividers.len() + 2` boundaries along the band's own axis, ascending: the band's two
     /// outer edges, and each divider's midpoint in between.
@@ -156,13 +156,13 @@ struct Junction {
     center: Pos2,
 }
 
-/// Every junction on the line between one split's two children, together with the two bands they
-/// were found in — which the drag and the transposition both need, so they are kept rather than
-/// re-derived.
+/// Every junction on the line in one gap of a row, together with the two bands they were found
+/// in — which the drag and the transposition both need, so they are kept rather than re-derived.
 struct Junctions {
-    outer: NodePath,
+    /// The gap whose line the junctions sit on: between two neighbouring children of a row.
+    outer: GapPath,
 
-    /// Orientation of `outer` itself: `true` if [`crate::Node::Horizontal`].
+    /// Orientation of `outer`'s row: `true` if it lays its children out side by side.
     outer_horizontal: bool,
 
     /// The two bands, in `outer`'s child order. Both run *across* `outer`'s own axis: a divider
@@ -388,33 +388,38 @@ impl<Tab> DockArea<'_, Tab> {
         bounds.push(edge(rects[rects.len() - 1], horizontal, true));
 
         Some(Band {
-            dividers: chain.dividers,
+            dividers: chain
+                .dividers
+                .into_iter()
+                .map(|gap| GapPath::in_surface(root.surface, gap))
+                .collect(),
             bounds,
         })
     }
 
-    /// Every junction on the line between `outer`'s two children, in screen order.
+    /// Every junction on the line in `outer` — between the two children of its row that the gap
+    /// lies between — in screen order.
     ///
-    /// `outer` must already be known to be a split (parent) node; callers of `show_separator`
-    /// establish that before this runs.
+    /// `outer` must already be known to name a gap of a row; callers of `show_divider` establish
+    /// that before this runs.
     ///
     /// How far out of line two dividers may be and still be one crossing rather than two tees
     /// comes from `toggle`; `pixels_per_point` is what puts the floor under it in the points
     /// this geometry is measured in — see [`Junctions::tolerance`].
     fn detect_junctions(
         &self,
-        outer: NodePath,
+        outer: GapPath,
         extra: f32,
         toggle: &CrossSplitToggleStyle,
         pixels_per_point: f32,
     ) -> Option<Junctions> {
-        let outer_horizontal = self.dock_state[outer].is_horizontal();
-        // The line these junctions would sit *on* has to be a line. A split whose child was
+        let outer_horizontal = self.dock_state[outer.row].is_horizontal();
+        // The line these junctions would sit *on* has to be a line. A row whose child was
         // folded away is cut at the strip's edge instead of at its ratio, and the layout then
-        // draws no divider for it at all (see `NodeGeometry::divider`) — there is nothing here
-        // for a junction to meet, and nothing for a hand to take hold of.
+        // draws no divider in that gap at all (see `DockLayout::divider`) — there is nothing
+        // here for a junction to meet, and nothing for a hand to take hold of.
         self.separator_rect(outer)?;
-        let [c0, c1] = self.child_paths(outer);
+        let [c0, c1] = self.gap_neighbours(outer);
 
         // A divider that can reach the line between the two children runs *across* `outer`'s
         // own axis, so it comes from a split of the opposite orientation — which is the
@@ -464,10 +469,7 @@ impl<Tab> DockArea<'_, Tab> {
                 .iter()
                 .copied()
                 .enumerate()
-                .filter(|(index, _)| {
-                    self.separator_rect(NodePath::new(outer.surface, band.dividers[*index]))
-                        .is_some()
-                })
+                .filter(|(index, _)| self.separator_rect(band.dividers[*index]).is_some())
                 .collect()
         };
         let (first, second) = (drawn(&band0), drawn(&band1));
@@ -544,8 +546,8 @@ impl<Tab> DockArea<'_, Tab> {
     /// every part 175 px long, against a 38 px handle at its widest.
     fn handle_room(&self, junctions: &Junctions, index: usize) -> f32 {
         let Junction { kind, center } = junctions.at[index];
-        let surface = junctions.outer.surface;
-        let own: Vec<NodeId> = std::iter::once(junctions.outer.node)
+        let surface = junctions.outer.row.surface;
+        let own: Vec<GapPath> = std::iter::once(junctions.outer)
             .chain(
                 kind.dividers()
                     .map(|(band, k)| junctions.bands[band].dividers[k]),
@@ -553,15 +555,23 @@ impl<Tab> DockArea<'_, Tab> {
             .collect();
 
         let mut room = junctions.room_at(index);
+        // Every gap of every row of the surface: a divider is a gap's, and a row has as many as
+        // it has neighbouring pairs of children.
         for node in self.dock_state[surface].breadth_first() {
-            if own.contains(&node) {
-                continue;
-            }
             let path = NodePath::new(surface, node);
-            let Some(divider) = self.separator_rect(path) else {
+            let Some(row) = self.dock_state[path].get_row() else {
                 continue;
             };
-            room = room.min(square_gap(divider, center));
+            for gap in row.gaps() {
+                let gap = GapPath::new(path, gap);
+                if own.contains(&gap) {
+                    continue;
+                }
+                let Some(divider) = self.separator_rect(gap) else {
+                    continue;
+                };
+                room = room.min(square_gap(divider, center));
+            }
         }
         room
     }
@@ -578,7 +588,7 @@ impl<Tab> DockArea<'_, Tab> {
     pub(super) fn draw_junction_handles(
         &mut self,
         ui: &mut Ui,
-        outer: NodePath,
+        outer: GapPath,
         style: &SeparatorStyle,
         toggle: &CrossSplitToggleStyle,
         state: &mut State,
@@ -716,7 +726,7 @@ impl<Tab> DockArea<'_, Tab> {
         &mut self,
         ui: &mut Ui,
         widget: Id,
-        outer: NodePath,
+        outer: GapPath,
         outer_horizontal: bool,
         arms: JunctionArms,
         style: &SeparatorStyle,
@@ -736,11 +746,11 @@ impl<Tab> DockArea<'_, Tab> {
         // nothing is reported; the field's own liveness filter drops the gesture a pass later,
         // which is the one divergence the harness checks rather than exempts.
         let divider = arms.first();
-        if self.dock_state.node(outer).is_err()
+        if self.dock_state.node(outer.row).is_err()
             || arms
                 .dividers()
                 .iter()
-                .any(|path| self.dock_state.node(*path).is_err())
+                .any(|gap| self.dock_state.node(gap.row).is_err())
         {
             return Grip::Idle;
         }
@@ -924,11 +934,11 @@ impl<Tab> DockArea<'_, Tab> {
             .in_flight_at(pass)
             .is_some_and(|drag| matches!(drag.subject, DragSubject::Junction { .. }));
 
-        // Keyed by the dividers that meet here rather than by their position in the band: an id
+        // Keyed by the gaps that meet here rather than by their position in the band: an id
         // has to survive a neighbouring divider being dragged past, and an index does not. The
         // side a tee's divider is on is already in the id it contributes; `outer` is in there
         // because a junction is a fact about *that* line, and two of them are told apart by it.
-        let key: Vec<NodeId> = std::iter::once(junctions.outer.node)
+        let key: Vec<GapPath> = std::iter::once(junctions.outer)
             .chain(
                 kind.dividers()
                     .map(|(band, k)| junctions.bands[band].dividers[k]),
@@ -1060,13 +1070,13 @@ impl<Tab> DockArea<'_, Tab> {
                     }
                 }
 
-                // What the gesture has hold of, named once and kept: the nodes, not an index
+                // What the gesture has hold of, named once and kept: the gaps, not an index
                 // into a list that is rebuilt from the geometry this drag is about to move. See
                 // [`DragSubject::Junction`].
                 if response.drag_started() {
-                    let mut dividers = kind.dividers().map(|(band, k)| {
-                        NodePath::new(junctions.outer.surface, junctions.bands[band].dividers[k])
-                    });
+                    let mut dividers = kind
+                        .dividers()
+                        .map(|(band, k)| junctions.bands[band].dividers[k]);
                     let first = dividers
                         .next()
                         .expect("every junction is made of at least one divider");
@@ -1127,7 +1137,7 @@ impl<Tab> DockArea<'_, Tab> {
     fn drag_junction(
         &mut self,
         pixels_per_point: f32,
-        outer: NodePath,
+        outer: GapPath,
         outer_horizontal: bool,
         arms: JunctionArms,
         extra: f32,
@@ -1139,13 +1149,13 @@ impl<Tab> DockArea<'_, Tab> {
             (delta.y, delta.x)
         };
 
-        // Each is clamped on its own by `nudge_split`: they are cut from intervals at right
+        // Each is clamped on its own by `nudge_boundary`: they are cut from intervals at right
         // angles to each other and have nothing to stay in line with. A crossing has two of them,
         // one on each side of the line, and both take the same component — which is what keeps
         // them one line on screen while the gesture runs.
-        let mut moved = self.nudge_split(outer, pixels_per_point, extra, along_outer);
+        let mut moved = self.nudge_boundary(outer, pixels_per_point, extra, along_outer);
         for divider in arms.dividers() {
-            moved |= self.nudge_split(*divider, pixels_per_point, extra, along_bands);
+            moved |= self.nudge_boundary(*divider, pixels_per_point, extra, along_bands);
         }
         moved
     }
@@ -1199,8 +1209,11 @@ impl<Tab> DockArea<'_, Tab> {
             unreachable!("only a crossing is offered a transposition")
         };
 
+        // The *row*, not the gap: a transposition regroups the two chains on either side of the
+        // line, and the line of a pair is its only gap. A crossing on a row of three is a
+        // different gesture, not a wider version of this one — see `Tree::transpose_cross`.
         self.mutations.push(DockMutation::TransposeCross {
-            outer: *outer,
+            outer: outer.row,
             at: [i, j],
             bounds: [band0.bounds.clone(), band1.bounds.clone()],
             // The one number from the other axis: where `outer`'s own boundary sits between its
@@ -1220,7 +1233,16 @@ mod tests {
     use crate::dock_area::state::DragInFlight;
     use crate::geom::{Point, Size};
     use crate::layout::DockLayout;
-    use crate::{DockState, Node, NodeId, Split, Style, SurfaceIndex, TabViewer, drag_in_flight};
+    use crate::{
+        DockState, GapIndex, GapPath, Node, NodeId, Split, Style, SurfaceIndex, TabViewer,
+        drag_in_flight,
+    };
+
+    /// The one gap of a pair, addressed by the split's path — every scene here is built out of
+    /// pairs, so "the divider of `outer`" is its gap `0`.
+    fn gap_of(outer: NodePath) -> GapPath {
+        GapPath::new(outer, GapIndex(0))
+    }
 
     const SCREEN: Vec2 = Vec2::new(1200.0, 900.0);
     const DOCK_ID: &str = "cross_split_test_dock";
@@ -1975,7 +1997,7 @@ mod tests {
             let mut put = |node: NodeId, rect: Rect, divider: Option<Rect>| {
                 let path = NodePath::new(SurfaceIndex::main(), node);
                 layout.set_rect(path, rect);
-                layout.set_divider(path, divider);
+                layout.set_divider(gap_of(path), divider);
             };
             let (left, right) = (0.0..=600.0, 601.0..=1200.0);
             let half = 0.5; // half a separator: the gap the midpoint of a boundary is read from
@@ -2031,7 +2053,7 @@ mod tests {
             let mut area = DockArea::new(&mut state).id(Id::new(DOCK_ID));
             area.layout = scene(gap);
             area.detect_junctions(
-                outer,
+                gap_of(outer),
                 band_style().separator.extra,
                 &toggle,
                 pixels_per_point,
@@ -2421,7 +2443,7 @@ mod tests {
         let mut area = DockArea::new(state).id(id);
         area.layout = DockLayout::load(ctx, id);
         area.detect_junctions(
-            outer,
+            gap_of(outer),
             style.separator.extra,
             &style.cross_split_toggle,
             ctx.pixels_per_point(),
@@ -2452,7 +2474,7 @@ mod tests {
         let mut area = DockArea::new(state).id(id);
         area.layout = DockLayout::load(ctx, id);
         area.detect_junctions(
-            outer,
+            gap_of(outer),
             style.separator.extra,
             &style.cross_split_toggle,
             ctx.pixels_per_point(),

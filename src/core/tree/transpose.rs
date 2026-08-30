@@ -35,22 +35,24 @@
 //! on small tiles.
 
 use crate::core::tree::regroup::Regroup;
-use crate::core::tree::{NodeId, Tree};
+use crate::core::tree::{NodeId, RowGap, Tree};
 
-/// A chain of same-oriented splits, flattened in screen order.
+/// A chain of same-oriented rows, flattened in screen order.
 ///
-/// `dividers[k]` is the split whose boundary falls between `parts[k]` and `parts[k + 1]`, so
-/// there is always exactly one fewer divider than there are parts. The dividers double as the
-/// pool of ids a transposition rebuilds the chain out of: a chain taken apart and re-nested
-/// needs exactly as many splits as it had, and reusing its own keeps every id, tab and focus
-/// flag below it untouched.
+/// `dividers[k]` is the gap whose boundary falls between `parts[k]` and `parts[k + 1]`, so
+/// there is always exactly one fewer divider than there are parts. A divider is a *gap of a
+/// row* and not the row itself: while rows are pairs the two coincide, and the moment a row
+/// holds three parts it contributes two dividers and is one node. The rows the dividers belong
+/// to double as the pool of ids a transposition rebuilds the chain out of — a chain taken apart
+/// and re-nested needs exactly as many splits as it had, and reusing its own keeps every id, tab
+/// and focus flag below it untouched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Chain {
     /// The subtrees hanging off the chain, in screen order (left to right, or top to bottom).
     pub(crate) parts: Vec<NodeId>,
 
-    /// The `parts.len() - 1` splits between them, in the same order.
-    pub(crate) dividers: Vec<NodeId>,
+    /// The `parts.len() - 1` gaps between them, in the same order.
+    pub(crate) dividers: Vec<RowGap>,
 }
 
 impl<Tab> Tree<Tab> {
@@ -82,18 +84,20 @@ impl<Tab> Tree<Tab> {
             chain.parts.push(node);
             return;
         }
-        // A pair on purpose, not a loop over the children: `dividers` names a divider by the
-        // *node* of the split that draws it, which works only while a split draws exactly one.
-        // A row of three written as a loop here would push the same id twice and call it two
-        // dividers. Stage 5 of the n-ary plan gives a divider its own address (a gap in a row),
-        // and that is what turns this into a loop.
-        let [first, second] = self[node]
-            .get_row()
-            .expect("a node in a chain is a split")
-            .children_pair();
-        self.collect_chain(first, horizontal, chain);
-        chain.dividers.push(node);
-        self.collect_chain(second, horizontal, chain);
+        // A loop, now that a divider has an address of its own: between every two children of
+        // the row lies one of its gaps, and that gap — not the row — is what the divider list
+        // names. This used to be a pair, because "the divider of this row" named the row, and a
+        // loop would have pushed one id twice and called it two dividers.
+        let row = self[node].get_row().expect("a node in a chain is a row");
+        for (index, child) in row.children().iter().copied().enumerate() {
+            if index > 0 {
+                chain.dividers.push(RowGap {
+                    row: node,
+                    gap: crate::core::tree::GapIndex(index - 1),
+                });
+            }
+            self.collect_chain(child, horizontal, chain);
+        }
     }
 
     /// Regroup around the crossing at `at`, keeping every leaf exactly where it is on screen.
@@ -170,11 +174,16 @@ impl<Tab> Tree<Tab> {
         // taken apart. `outer` is not in it — it stays where it is, because its own parent
         // points at it — and the arithmetic leaves none over: `(n - 1) + (m - 1)` ids in, two
         // halves plus `(k - 1) + (n - k - 1) + (l - 1) + (m - l - 1)` chain splits out.
+        //
+        // The rows *behind* the dividers, one id per divider: that is one id per row only while
+        // every row is a pair, which is what keeps the count above true. A row of three would
+        // put its id in here twice, and the rebuild would hand one node to two splits — stage 7
+        // rebuilds one row per chain and does its pool arithmetic over rows, not gaps.
         let mut pool = chains[0]
             .dividers
             .iter()
             .chain(&chains[1].dividers)
-            .copied();
+            .map(|divider| divider.row);
 
         let near = rebuild_half(
             &chains,
@@ -327,7 +336,14 @@ mod test {
 
         let columns = tree.chain(outer, true);
         assert_eq!(columns.parts.len(), 2, "two columns side by side");
-        assert_eq!(columns.dividers, vec![outer], "with `outer` between them");
+        assert_eq!(
+            columns.dividers,
+            vec![RowGap {
+                row: outer,
+                gap: crate::core::tree::GapIndex(0)
+            }],
+            "with `outer`'s one gap between them"
+        );
 
         // Each column is a chain of its own, along the other axis.
         let left = tree.chain(columns.parts[0], false);

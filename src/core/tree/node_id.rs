@@ -96,3 +96,63 @@ impl std::fmt::Display for NodeId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct ChildIndex(pub usize);
+
+/// Which gap of a row is meant: gap `k` lies between the row's children `k` and `k + 1`.
+///
+/// # Why a divider has an address of its own
+///
+/// A divider used to be named by the *node* of the split that draws it, and that worked for
+/// exactly as long as a split drew exactly one. A row of three has two, and "the divider of
+/// this row" then names nothing — which is why every reader of the layout that speaks of a
+/// boundary (the rectangle it is drawn in, the gesture that moves it, the ratio it writes) now
+/// speaks of a [`GapPath`] instead. While rows are pairs the index is always `0`, so this is a
+/// change of language and not of behaviour; that is stage 5 of
+/// `docs/PLAN_a_row_holds_many_panels.md`, and stage 7 is where the index starts to vary.
+///
+/// A position among the row's gaps, like [`ChildIndex`] is a position among its children: only
+/// meaningful against the row it was taken from, and only until that row's children change.
+/// Not persisted — a saved layout stores the shape, and gaps are implied by it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct GapIndex(pub usize);
+
+/// One gap of one row of a single [`Tree`](crate::Tree): the row and which of its gaps.
+///
+/// The tree-local half of [`GapPath`], for the places that walk one tree and carry no surface —
+/// a chain of same-oriented rows flattened in screen order names its dividers this way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RowGap {
+    /// The row whose gap this is.
+    pub row: NodeId,
+    /// Which of its gaps.
+    pub gap: GapIndex,
+}
+
+/// A full address of one boundary in an entire dock state: which row, on which surface, and
+/// which of that row's gaps.
+///
+/// The gap-shaped sibling of [`NodePath`], and carried for the same reason: a boundary is what
+/// a separator drag writes, a junction handle moves and the geometry map records a rectangle
+/// for, and each of those reaches across surfaces. `row` is a [`NodePath`] rather than a bare
+/// [`NodeId`] so that a holder can index the dock state with it directly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct GapPath {
+    /// The row whose gap this is, on its surface.
+    pub row: NodePath,
+    /// Which of its gaps.
+    pub gap: GapIndex,
+}
+
+impl GapPath {
+    /// A fully qualified address of the gap `gap` of the row at `row`.
+    pub const fn new(row: NodePath, gap: GapIndex) -> Self {
+        Self { row, gap }
+    }
+
+    /// The same gap, seen from inside its surface's tree.
+    pub const fn in_surface(surface: crate::core::SurfaceIndex, gap: RowGap) -> Self {
+        Self {
+            row: NodePath::new(surface, gap.row),
+            gap: gap.gap,
+        }
+    }
+}

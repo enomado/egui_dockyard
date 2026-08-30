@@ -37,8 +37,8 @@ use egui::{
     WidgetText,
 };
 use egui_dockyard::{
-    DockArea, DockLayout, DockState, Node, NodeId, NodePath, SideStrip, Split, Style, SurfaceIndex,
-    TabViewer,
+    DockArea, DockLayout, DockState, GapIndex, GapPath, Node, NodeId, NodePath, SideStrip, Split,
+    Style, SurfaceIndex, TabViewer,
 };
 
 const SCREEN: Vec2 = Vec2::new(1200.0, 900.0);
@@ -342,7 +342,9 @@ fn stowing_a_side_takes_its_insides_off_the_map() {
         );
     }
     assert!(
-        layout.divider(path(scene.side)).is_some(),
+        layout
+            .divider(GapPath::new(path(scene.side), GapIndex(0)))
+            .is_some(),
         "and the side has to have had a divider to lose"
     );
 
@@ -362,7 +364,7 @@ fn stowing_a_side_takes_its_insides_off_the_map() {
         );
     }
     assert_eq!(
-        layout.divider(path(scene.side)),
+        layout.divider(GapPath::new(path(scene.side), GapIndex(0))),
         None,
         "the stowed side kept the divider between two children that are no longer on screen — a \
          line lying across the strip, which moves nothing and writes the fraction when dragged"
@@ -484,7 +486,9 @@ fn bringing_a_stowed_side_back_lays_its_insides_out_again() {
         "an unstowed side is still marked as a strip: the flag went stale"
     );
     assert!(
-        layout.divider(path(scene.side)).is_some(),
+        layout
+            .divider(GapPath::new(path(scene.side), GapIndex(0)))
+            .is_some(),
         "and its two children have a boundary between them again"
     );
 }

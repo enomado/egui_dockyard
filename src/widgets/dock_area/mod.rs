@@ -22,7 +22,7 @@ pub use state::{DragInFlight, DragSubject, JunctionArms, WindowEdge};
 use tab_removal::TabRemoval;
 
 use crate::layout::DockLayout;
-use crate::{NodePath, Style, SurfaceIndex, TabIndex, TabPath, core::DockState};
+use crate::{GapPath, NodePath, Style, SurfaceIndex, TabIndex, TabPath, core::DockState};
 
 /// Displays a [`DockState`] in `egui`.
 pub struct DockArea<'tree, Tab> {
@@ -95,7 +95,7 @@ pub struct DockArea<'tree, Tab> {
 /// the new one appears on the next repaint (~16 ms at 60 fps). This is an accepted behavioural
 /// change, not an oversight (decision of 2026-08-26); the click acceptance in the plan covers it.
 ///
-/// `SetLeafScroll`, `SetSplitFraction` and `WindowShown` cost nothing at all, because each is
+/// `SetLeafScroll`, `SetBoundary` and `WindowShown` cost nothing at all, because each is
 /// *already* read earlier in the pass than it was written — see the note on each. Deferring them
 /// changed no behaviour, and the wheel, separator-drag and window gates say so unchanged.
 ///
@@ -155,16 +155,17 @@ pub(in crate::widgets::dock_area) enum DockMutation {
         path: NodePath,
         scroll: f32,
     },
-    /// Where a split cuts its two children, as a fraction of the parent.
+    /// Where one boundary of a row sits, as a proportion of the row's length — see
+    /// [`RowNode::set_boundary`](crate::RowNode::set_boundary).
     ///
     /// Also free of the one-frame shift, for the same kind of reason: `render_nodes` computes
-    /// every rectangle from the stored fractions in its *first* pass and draws separators in
-    /// its *third*, so a fraction written by a drag was never read again before the next
+    /// every rectangle from the stored weights in its *first* pass and draws separators in
+    /// its *third*, so a boundary written by a drag was never read again before the next
     /// frame's layout. Carries the target value, not a delta, so the clamp stays where it is
-    /// computed (`nudge_split`) and two requests for one split cannot compound.
-    SetSplitFraction {
-        path: NodePath,
-        fraction: f32,
+    /// computed (`nudge_boundary`) and two requests for one gap cannot compound.
+    SetBoundary {
+        gap: GapPath,
+        at: f32,
     },
     /// Minimize or restore a floating window. Carries the target value, like
     /// [`SetLeafCollapsed`](Self::SetLeafCollapsed) and for the same reason.

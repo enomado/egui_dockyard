@@ -55,8 +55,8 @@ use egui::{
 use egui_dockyard::dock_area::DockEvent;
 use egui_dockyard::shape::subtree_shape;
 use egui_dockyard::{
-    DockArea, DockLayout, DockState, DragInFlight, DragSubject, JunctionArms, Node, NodeId,
-    NodePath, Split, Style, SurfaceIndex, TabId, TabIndex, TabPath, TabViewer, Tree,
+    DockArea, DockLayout, DockState, DragInFlight, DragSubject, GapIndex, GapPath, JunctionArms,
+    Node, NodeId, NodePath, Split, Style, SurfaceIndex, TabId, TabIndex, TabPath, TabViewer, Tree,
     drag_hover_node, drag_in_flight, dragged_tab, tab_widget_id,
 };
 
@@ -325,20 +325,21 @@ enum Meeting {
 /// coverage counter that cannot name the shape it counted is a number that always looks healthy.
 #[derive(Clone, Debug)]
 struct JunctionPoint {
-    /// The split on whose line between its two children the junction was found.
-    outer: NodePath,
+    /// The gap on whose line the junction was found — between two neighbouring children of a
+    /// row.
+    outer: GapPath,
     /// Which kind it is, which decides both what a drag has to move and whether a ctrl+click has
     /// anything to do at all.
     kind: Meeting,
     /// Where to press.
     at: Pos2,
-    /// Every split a drag here moves, `outer` first: the line that runs through, and the one
+    /// Every boundary a drag here moves, `outer` first: the line that runs through, and the one
     /// divider (a tee) or two aligned dividers (a cross) that end on it.
     ///
     /// The list the drag's [`BoundaryRule`] is stated on, and the reason it is kept rather than
     /// re-derived at judging time: by then the gesture has moved the very boundaries the walk
     /// reads, and a junction found afterwards is not necessarily the one that was pressed.
-    moves: Vec<NodePath>,
+    moves: Vec<GapPath>,
     /// How many parts each of the two bands has. A `[2, 2]` is a plain 2x2; anything longer
     /// means a chain has to be taken apart and re-nested, and `[3, 3]` means both of them do.
     parts: [usize; 2],
@@ -365,9 +366,9 @@ struct JunctionPoint {
 /// One side of a split, flattened the way the crate flattens it — see [`Sim::band`].
 #[derive(Clone, Debug)]
 struct BandView {
-    /// The chain's splits, in screen order: `dividers[k]` is the split whose boundary falls
+    /// The chain's gaps, in screen order: `dividers[k]` is the gap whose boundary falls
     /// between part `k` and part `k + 1`.
-    dividers: Vec<NodePath>,
+    dividers: Vec<GapPath>,
     /// Whether the layout drew each of them. A split with a folded part is cut at the strip's
     /// edge instead of at its ratio and has no divider rectangle at all, so its boundary is not
     /// on screen and cannot be half of a junction.
@@ -388,12 +389,12 @@ impl BandView {
         self.bounds.len() - 1
     }
 
-    /// Where this band's dividers are along its axis, each with the split that draws it.
+    /// Where this band's dividers are along its axis, each with the gap it is drawn in.
     /// Ascending, so two bands' lists merge in one walk.
     ///
     /// The ones the layout did not draw are left out: a boundary that is not on screen is not a
     /// boundary a junction can be made of — see [`BandView::drawn`].
-    fn dividers(&self) -> Vec<(f32, NodePath)> {
+    fn dividers(&self) -> Vec<(f32, GapPath)> {
         self.bounds[1..self.bounds.len() - 1]
             .iter()
             .copied()
@@ -733,7 +734,7 @@ struct JunctionHold {
     /// Where the hand is. The handle follows the separators it sits on, so after a drag that
     /// moved them this is the handle's new home as much as the pointer's.
     at: Pos2,
-    /// Every split the handle was made of, `outer` first — see [`JunctionPoint::moves`].
+    /// Every boundary the handle was made of, `outer` first — see [`JunctionPoint::moves`].
     ///
     /// Its length is the kind: two for a tee, three for a cross. Nothing here needs to know
     /// which, and a second field saying so would be a second place for it to be wrong.
@@ -741,7 +742,7 @@ struct JunctionHold {
     /// Identities, and read *once* at the grab: the gesture moves the very boundaries a fresh
     /// walk would read, and a step under the hold can take them out of the tree entirely, which
     /// is the interleaving this exists to reach ([`JunctionWatch::died`]).
-    moves: Vec<NodePath>,
+    moves: Vec<GapPath>,
     /// Whether any frame of this drag has moved one of them yet.
     ///
     /// The harness's own copy of the flag the crate keeps in `State::junction_drag`, and what
@@ -1101,29 +1102,29 @@ struct Effect {
     forbidden: Option<String>,
 }
 
-/// Which splits a step was allowed to move the boundary of.
+/// Which boundaries a step was allowed to move.
 ///
-/// `fraction` is persisted state, and only three gestures in the vocabulary name a boundary at
-/// all. The vocabulary already said so in prose — see [`Step::DragSeparator`], *"Nothing else in
+/// A boundary is persisted state, and only three gestures in the vocabulary name one at all.
+/// The vocabulary already said so in prose — see [`Step::DragSeparator`], *"Nothing else in
 /// this harness ever moves it"* — and a claim in prose is a claim nothing checks.
 ///
-/// Naming the split rather than flagging the step is the sharp half. A drag on one divider is
+/// Naming the gap rather than flagging the step is the sharp half. A drag on one divider is
 /// not a licence to move the rest of them: the divider the pointer holds changes the *range* of
-/// every split beneath it, and it was the frame pass reacting to that range — clamping the
+/// every row beneath it, and it was the frame pass reacting to that range — clamping the
 /// stored ratio into a band derived from this frame's geometry — that rewrote layouts nobody
 /// touched.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum BoundaryRule {
-    /// The step named no separator: every split must come through exactly as it was.
+    /// The step named no separator: every boundary must come through exactly as it was.
     None,
-    /// Exactly the splits the gesture aimed at, and nothing else.
+    /// Exactly the gaps the gesture aimed at, and nothing else.
     ///
-    /// A list rather than the single path it started as, because a junction handle is one
+    /// A list rather than the single gap it started as, because a junction handle is one
     /// gesture on two or three separators at once — the line that runs through the junction and
     /// the divider (or aligned pair) that ends on it. Naming them individually is what keeps the
-    /// rule sharp there: a drag on a junction is a licence to move *those*, and the splits below
+    /// rule sharp there: a drag on a junction is a licence to move *those*, and the rows below
     /// them, whose range it changes, are still bystanders.
-    Only(Vec<NodePath>),
+    Only(Vec<GapPath>),
     /// Every split of a cross: a transposition recomputes all three by construction.
     Any,
 }
@@ -1169,8 +1170,8 @@ enum Stillness {
 /// Every live leaf's identities, in tree order. See [`Sim::identities`].
 type Identities = Vec<(NodePath, LeafIdentity)>;
 
-/// Every split's stored ratio, in tree order. See [`Sim::boundaries`].
-type Boundaries = Vec<(NodePath, f32)>;
+/// Every row's stored boundaries, one per gap, in tree order. See [`Sim::boundaries`].
+type Boundaries = Vec<(GapPath, f32)>;
 
 /// A leaf's identities, which no gesture that was not about it may disturb.
 ///
@@ -1651,54 +1652,59 @@ impl Sim {
     /// second way to cut a split without a divider was added — the same drift, in a fourth place,
     /// that the crate's own copies suffered. A sweep that reproduces the rule cannot catch the
     /// rule being wrong.
-    fn separators(&self) -> Vec<(NodePath, Pos2, f32)> {
+    fn separators(&self) -> Vec<(GapPath, Pos2, f32)> {
         let layout = self.layout();
+        let layout = &layout;
         self.state
             .iter_all_nodes()
-            .filter_map(|(path, node)| {
-                let split = node.get_row()?;
-                let vertical = node.is_vertical();
+            .filter_map(|(path, node)| node.get_row().map(|row| (path, row)))
+            .flat_map(|(path, row)| {
+                let vertical = row.is_vertical();
+                let children = row.children();
+                // One separator per gap of the row: this reads the gap *between* two
+                // neighbouring children, and a row has one such gap between every two.
+                row.gaps()
+                    .filter_map(move |index| {
+                        let gap = GapPath::new(path, index);
+                        layout.divider(gap)?;
+                        let child_path = |child: NodeId| NodePath::new(path.surface, child);
 
-                // A pair, like the divider it is measuring: this reads the gap *between* two
-                // children, which is what a split has exactly one of today. Stage 5 of the
-                // n-ary plan gives that gap an address, and this becomes a loop over gaps.
-                let [first, second] = self.state[path.surface].children_pair(path.node)?;
-                let child_path = |child: NodeId| NodePath::new(path.surface, child);
-                layout.divider(path)?;
-
-                let before = layout.get(child_path(first))?.rect;
-                let after = layout.get(child_path(second))?.rect;
-                let (lo, hi) = if vertical {
-                    (before.max.y, after.min.y)
-                } else {
-                    (before.max.x, after.min.x)
-                };
-                if hi <= lo {
-                    return None;
-                }
-                // Where along the divider to grab it. The middle is the natural place, but on a
-                // symmetric cross the middle of the *outer* divider is exactly where the
-                // cross-split toggle sits, and that button takes the pointer (it draws in a
-                // foreground layer). Refusing the separator there would have been the cheap
-                // answer and a bad one: it would make the outer divider of every cross
-                // permanently undraggable by this harness — and "drag that divider, then press
-                // the toggle" is precisely the sequence the toggle was reported broken on. So
-                // the grab moves along the divider instead, the way a hand would.
-                let node_rect = layout.get(path)?.rect;
-                let along = |t: f32| {
-                    if vertical {
-                        Pos2::new(egui::lerp(node_rect.x_range(), t), (lo + hi) * 0.5)
-                    } else {
-                        Pos2::new((lo + hi) * 0.5, egui::lerp(node_rect.y_range(), t))
-                    }
-                };
-                let at = [0.5, 0.25, 0.75]
-                    .into_iter()
-                    .map(along)
-                    .find(|point| !self.handle_over(*point))
-                    // All three covered: leave the middle, and let the steps refuse it.
-                    .unwrap_or_else(|| along(0.5));
-                Some((path, at, split.fraction()))
+                        let before = layout.get(child_path(children[index.0]))?.rect;
+                        let after = layout.get(child_path(children[index.0 + 1]))?.rect;
+                        let (lo, hi) = if vertical {
+                            (before.max.y, after.min.y)
+                        } else {
+                            (before.max.x, after.min.x)
+                        };
+                        if hi <= lo {
+                            return None;
+                        }
+                        // Where along the divider to grab it. The middle is the natural place,
+                        // but on a symmetric cross the middle of the *outer* divider is exactly
+                        // where the cross-split toggle sits, and that button takes the pointer
+                        // (it draws in a foreground layer). Refusing the separator there would
+                        // have been the cheap answer and a bad one: it would make the outer
+                        // divider of every cross permanently undraggable by this harness — and
+                        // "drag that divider, then press the toggle" is precisely the sequence
+                        // the toggle was reported broken on. So the grab moves along the
+                        // divider instead, the way a hand would.
+                        let node_rect = layout.get(path)?.rect;
+                        let along = |t: f32| {
+                            if vertical {
+                                Pos2::new(egui::lerp(node_rect.x_range(), t), (lo + hi) * 0.5)
+                            } else {
+                                Pos2::new((lo + hi) * 0.5, egui::lerp(node_rect.y_range(), t))
+                            }
+                        };
+                        let at = [0.5, 0.25, 0.75]
+                            .into_iter()
+                            .map(along)
+                            .find(|point| !self.handle_over(*point))
+                            // All three covered: leave the middle, and let the steps refuse it.
+                            .unwrap_or_else(|| along(0.5));
+                        Some((gap, at, row.boundary(index)))
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect()
     }
@@ -1782,21 +1788,33 @@ impl Sim {
         let tolerance = self.style.cross_split_toggle.align_tolerance.max(1.0);
 
         let layout = self.layout();
-        self.state
+        // Every gap of every row, with its row's orientation: a junction sits on the line in a
+        // gap, and a row has one line per gap.
+        let gaps: Vec<(GapPath, bool)> = self
+            .state
             .iter_all_nodes()
-            .filter_map(|(path, node)| {
-                node.get_row()?;
-                // The line the junctions would sit *on*, same rule as for the arms: a split with
-                // a folded child is cut at the strip's edge and draws no divider, so there is no
-                // line here for anything to meet.
-                layout.divider(path)?;
-                let outer_horizontal = node.is_horizontal();
+            .filter_map(|(path, node)| node.get_row().map(|row| (path, row)))
+            .flat_map(|(path, row)| {
+                row.gaps()
+                    .map(move |gap| (GapPath::new(path, gap), row.is_horizontal()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        gaps.into_iter()
+            .filter_map(|(gap, outer_horizontal)| {
+                let path = gap.row;
+                // The line the junctions would sit *on*, same rule as for the arms: a row with a
+                // folded child is cut at the strip's edge and draws no divider in that gap, so
+                // there is no line here for anything to meet.
+                layout.divider(gap)?;
                 let inner_horizontal = !outer_horizontal;
                 let at = |id: NodeId| NodePath::new(path.surface, id);
 
-                // A pair because a transposable crossing is one: two chains, one line each.
-                // Mirrors `Tree::transpose_cross`, which takes its `at` and `bounds` as pairs.
-                let [c0, c1] = self.state[path.surface].children_pair(path.node)?;
+                // The two neighbours the gap lies between — always two, whatever the row holds,
+                // and a transposable crossing is made of exactly those two chains. Mirrors
+                // `Tree::transpose_cross`, which takes its `at` and `bounds` as pairs.
+                let row = self.state[path].get_row()?;
+                let [c0, c1] = [row.children()[gap.gap.0], row.children()[gap.gap.0 + 1]];
                 let bands = [
                     self.band(path.surface, c0, inner_horizontal, &layout)?,
                     self.band(path.surface, c1, inner_horizontal, &layout)?,
@@ -1819,19 +1837,19 @@ impl Sim {
                 };
                 // Every junction moves `outer` — that is the line it sits on — plus the one or
                 // two dividers that meet it there.
-                let point = |kind: Meeting, line: f32, gap: f32, dividers: &[NodePath]| {
+                let point = |kind: Meeting, line: f32, misaligned: f32, dividers: &[GapPath]| {
                     JunctionPoint {
-                        outer: path,
+                        outer: gap,
                         kind,
                         at: at_line(line),
-                        moves: std::iter::once(path)
+                        moves: std::iter::once(gap)
                             .chain(dividers.iter().copied())
                             .collect(),
                         parts: [bands[0].parts(), bands[1].parts()],
                         // Both filled in once the walk knows what it found.
                         on_line: 0,
                         crosses_on_line: 0,
-                        gap,
+                        gap: misaligned,
                         can_transpose,
                     }
                 };
@@ -1902,7 +1920,7 @@ impl Sim {
     fn subject_is_gone(&self, subject: DragSubject) -> bool {
         match subject {
             DragSubject::Tab(source) => source.resolve(&self.state).is_none(),
-            DragSubject::Separator { path } => self.state.node(path).is_err(),
+            DragSubject::Separator { gap } => self.state.node(gap.row).is_err(),
             DragSubject::Junction { outer, arms, .. } => {
                 let shape = match arms {
                     JunctionArms::Tee(_) => Meeting::Tee,
@@ -1957,33 +1975,35 @@ impl Sim {
         // lies after it, at every level of the chain.
         fn walk<T>(
             tree: &Tree<T>,
+            surface: SurfaceIndex,
             node: NodeId,
             horizontal: bool,
             parts: &mut Vec<NodeId>,
-            dividers: &mut Vec<NodeId>,
+            dividers: &mut Vec<GapPath>,
         ) {
-            let in_chain = match &tree[node] {
-                Node::Row(row) => row.is_horizontal() == horizontal,
-                Node::Leaf(_) => false,
+            let row = match &tree[node] {
+                Node::Row(row) if row.is_horizontal() == horizontal => row,
+                _ => {
+                    parts.push(node);
+                    return;
+                }
             };
-            // A pair for the same reason `Tree::collect_chain` uses one: a divider is named by
-            // the node of the split that draws it, so a loop here would push one id twice.
-            let Some([first, second]) = (if in_chain {
-                tree.children_pair(node)
-            } else {
-                None
-            }) else {
-                parts.push(node);
-                return;
-            };
-            walk(tree, first, horizontal, parts, dividers);
-            dividers.push(node);
-            walk(tree, second, horizontal, parts, dividers);
+            // A loop over the children with a gap between every two — the same walk
+            // `Tree::collect_chain` makes, now that a divider is named by the gap it is drawn
+            // in rather than by the node of the split that draws it.
+            let path = NodePath::new(surface, node);
+            for (index, child) in row.children().iter().copied().enumerate() {
+                if index > 0 {
+                    dividers.push(GapPath::new(path, GapIndex(index - 1)));
+                }
+                walk(tree, surface, child, horizontal, parts, dividers);
+            }
         }
 
         let (mut parts, mut dividers) = (Vec::new(), Vec::new());
         walk(
             &self.state[surface],
+            surface,
             root,
             horizontal,
             &mut parts,
@@ -2014,19 +2034,16 @@ impl Sim {
             .windows(2)
             .all(|pair| pair[1] - pair[0] >= self.style.separator.extra);
 
-        let dividers: Vec<NodePath> = dividers
-            .into_iter()
-            .map(|id| NodePath::new(surface, id))
-            .collect();
-        // Which of them the layout actually drew. A split whose part was folded away is cut at
-        // the strip's edge rather than at its ratio, so it has no divider rectangle — nothing to
-        // paint and nothing to hit-test (`NodeGeometry::divider`) — and a junction cannot be made
-        // of a boundary that is not there. Restated here rather than inferred, exactly as the
-        // tolerance above is read off the style: a harness that offered handles the crate does
-        // not draw would press pixels answering to nobody and call the silence a pass.
+        // Which of them the layout actually drew. A row whose part was folded away is cut at
+        // the strip's edge rather than at its ratio, so that gap has no divider rectangle —
+        // nothing to paint and nothing to hit-test (`DockLayout::divider`) — and a junction
+        // cannot be made of a boundary that is not there. Restated here rather than inferred,
+        // exactly as the tolerance above is read off the style: a harness that offered handles
+        // the crate does not draw would press pixels answering to nobody and call the silence a
+        // pass.
         let drawn = dividers
             .iter()
-            .map(|path| layout.divider(*path).is_some())
+            .map(|gap| layout.divider(*gap).is_some())
             .collect();
 
         Some(BandView {
@@ -2110,8 +2127,8 @@ impl Sim {
     /// would be blind to precisely the gesture this stage adds.
     fn fraction_trace(&self) -> String {
         let mut out = String::new();
-        for (path, _, fraction) in self.separators() {
-            let _ = write!(out, "{}:{fraction:.4} ", surface_label(path.surface));
+        for (gap, _, fraction) in self.separators() {
+            let _ = write!(out, "{}:{fraction:.4} ", surface_label(gap.row.surface));
         }
         out
     }
@@ -2505,12 +2522,12 @@ impl Sim {
     /// anything.
     fn judge_junction_drag(
         &mut self,
-        moves: &[NodePath],
+        moves: &[GapPath],
         was: &[Option<f32>],
         forbidden: &mut Option<String>,
     ) -> (bool, bool) {
         let dragging = self.ctx.dragged_id().is_some();
-        let now = self.fractions_of(moves);
+        let now = self.boundaries_of(moves);
         let moved: Vec<bool> = was
             .iter()
             .zip(&now)
@@ -2554,12 +2571,12 @@ impl Sim {
         (changed > 0, dragging)
     }
 
-    /// The stored ratios of the named splits, in the order given, `None` for one that is gone.
+    /// The stored boundaries in the named gaps, in the order given, `None` for one that is gone.
     ///
-    /// Positional rather than a map: a junction names two or three splits and the caller wants
-    /// to count how many of them moved, which is a question about the pairing.
-    fn fractions_of(&self, paths: &[NodePath]) -> Vec<Option<f32>> {
-        paths.iter().map(|path| self.fraction_of(*path)).collect()
+    /// Positional rather than a map: a junction names two or three boundaries and the caller
+    /// wants to count how many of them moved, which is a question about the pairing.
+    fn boundaries_of(&self, gaps: &[GapPath]) -> Vec<Option<f32>> {
+        gaps.iter().map(|gap| self.boundary_of(*gap)).collect()
     }
 
     /// The tab the **dock** believes it is carrying, if any.
@@ -3028,8 +3045,8 @@ impl Sim {
                 if separators.is_empty() {
                     return None;
                 }
-                let (path, at, fraction) = separators[node % separators.len()];
-                if self.window_over(at, path.surface) || self.handle_over(at) {
+                let (gap, at, fraction) = separators[node % separators.len()];
+                if self.window_over(at, gap.row.surface) || self.handle_over(at) {
                     // A separator under a floating window — or under the cross-split toggle —
                     // is not the thing the pointer would reach; the same refusal the tab aims
                     // make, for the same reason.
@@ -3042,7 +3059,7 @@ impl Sim {
                 // the pointer was released over gets focused instead. 8 px and up moves the
                 // boundary and commits exactly once. A generator that drew smaller offsets would
                 // be testing the click path under the name of the drag one.
-                let vertical = self.state[path].is_vertical();
+                let vertical = self.state[gap.row].is_vertical();
                 let delta = f32::from(by);
                 let to = if vertical {
                     at + Vec2::new(0.0, delta)
@@ -3055,12 +3072,12 @@ impl Sim {
                 // This divider and no other. Holding it changes the *range* of every split
                 // beneath it, which is precisely the pressure the frame pass must not answer by
                 // rewriting their stored ratios.
-                boundaries = BoundaryRule::Only(vec![path]);
+                boundaries = BoundaryRule::Only(vec![gap]);
 
                 // The rule is read off the model, not predicted from the delta: a drag that ran
                 // into the clamp moved nothing, and a dock that announces a commit for it is
                 // exactly the fault this judges.
-                commits = if self.fraction_of(path) == Some(fraction) {
+                commits = if self.boundary_of(gap) == Some(fraction) {
                     self.separator.clamped += 1;
                     CommitRule::Exactly(0)
                 } else {
@@ -3090,8 +3107,8 @@ impl Sim {
                 if separators.is_empty() {
                     return None;
                 }
-                let (path, at, fraction) = separators[node % separators.len()];
-                if self.window_over(at, path.surface) || self.handle_over(at) {
+                let (gap, at, fraction) = separators[node % separators.len()];
+                if self.window_over(at, gap.row.surface) || self.handle_over(at) {
                     self.refused[refused_index(Refused::Contested)] += 1;
                     return None;
                 }
@@ -3102,11 +3119,11 @@ impl Sim {
                 // A press without motion may not move a boundary. Not a matter of what the dock
                 // announced — this one is about the state itself, so it is judged whatever the
                 // events say.
-                if self.fraction_of(path) != Some(fraction) {
+                if self.boundary_of(gap) != Some(fraction) {
                     forbidden = Some(format!(
                         "a separator was pressed and released without the pointer moving, and the \
                          boundary went from {fraction} to {:?}",
-                        self.fraction_of(path)
+                        self.boundary_of(gap)
                     ));
                 }
 
@@ -3134,19 +3151,19 @@ impl Sim {
                 if separators.is_empty() {
                     return None;
                 }
-                let (path, at, fraction) = separators[node % separators.len()];
-                if self.window_over(at, path.surface) || self.handle_over(at) {
+                let (gap, at, fraction) = separators[node % separators.len()];
+                if self.window_over(at, gap.row.surface) || self.handle_over(at) {
                     self.refused[refused_index(Refused::Contested)] += 1;
                     return None;
                 }
                 let focus_before = self.focus_trace();
                 self.double_click(at);
-                boundaries = BoundaryRule::Only(vec![path]);
+                boundaries = BoundaryRule::Only(vec![gap]);
                 // Two independent changes, counted separately: the centring itself, and the
                 // focus move a click in the gap can also cause (see `Step::GrabSeparator`). A
                 // double-click on an already-centred separator does neither, and then the dock
                 // must say nothing at all.
-                let centred = self.fraction_of(path) != Some(fraction);
+                let centred = self.boundary_of(gap) != Some(fraction);
                 if centred {
                     self.separator.centrings += 1;
                 }
@@ -3235,11 +3252,11 @@ impl Sim {
                 // stay off this button, and `at` is the button, so applying it here would make
                 // the step refuse itself. It did, silently, for a whole run — every press was
                 // skipped and the sweep reported no cross was ever offered.
-                if self.window_over(at, path.surface) {
+                if self.window_over(at, path.row.surface) {
                     self.refused[refused_index(Refused::Contested)] += 1;
                     return None;
                 }
-                let horizontal_before = self.state[path].is_horizontal();
+                let horizontal_before = self.state[path.row].is_horizontal();
                 let rects_before = self.leaf_rects();
                 let focus_before = self.focus_trace();
                 self.cross.offered += 1;
@@ -3263,7 +3280,7 @@ impl Sim {
                 // nothing, so that the press a drag falls short of cannot rewrite the tree.
                 self.click_holding(at, Modifiers::COMMAND);
 
-                let flipped = self.state[path].is_horizontal() != horizontal_before;
+                let flipped = self.state[path.row].is_horizontal() != horizontal_before;
                 if flipped && !can_transpose {
                     forbidden = Some(format!(
                         "a ctrl+click transposed the cross at {path:?}, whose bands carry a part \
@@ -3340,13 +3357,13 @@ impl Sim {
                     return None;
                 }
                 let point = handles[junction % handles.len()].clone();
-                if self.window_over(point.at, point.outer.surface) {
+                if self.window_over(point.at, point.outer.row.surface) {
                     self.refused[refused_index(Refused::Contested)] += 1;
                     return None;
                 }
                 self.junction.offered += 1;
 
-                let was = self.fractions_of(&point.moves);
+                let was = self.boundaries_of(&point.moves);
                 let focus_before = self.focus_trace();
                 self.run_frame(vec![Event::PointerMoved(point.at)]);
                 self.run_frame(vec![Event::PointerButton {
@@ -3395,7 +3412,7 @@ impl Sim {
                     return None;
                 }
                 let point = handles[junction % handles.len()].clone();
-                if self.window_over(point.at, point.outer.surface) {
+                if self.window_over(point.at, point.outer.row.surface) {
                     self.refused[refused_index(Refused::Contested)] += 1;
                     return None;
                 }
@@ -3433,7 +3450,7 @@ impl Sim {
                 let Some(hold) = self.junction_hold.clone() else {
                     return None;
                 };
-                let was = self.fractions_of(&hold.moves);
+                let was = self.boundaries_of(&hold.moves);
                 let focus_before = self.focus_trace();
                 let at = self.carry(hold.at, Vec2::new(f32::from(by[0]), f32::from(by[1])));
                 let (moved, dragging) = self.judge_junction_drag(&hold.moves, &was, &mut forbidden);
@@ -3644,15 +3661,20 @@ impl Sim {
         })
     }
 
-    /// Every split's stored ratio, by the node that owns it.
+    /// Every row's stored boundaries, one per gap, by the gap that holds it.
     ///
-    /// Keyed by [`NodePath`] rather than by position: node ids are stable across structural
-    /// edits (that is the point of the arena), so a split that survives a step is comparable
+    /// Keyed by [`GapPath`] rather than by position: node ids are stable across structural
+    /// edits (that is the point of the arena), so a row that survives a step is comparable
     /// with itself and one that did not simply drops out.
     fn boundaries(&self) -> Boundaries {
         self.state
             .iter_all_nodes()
-            .filter_map(|(path, node)| node.get_row().map(|split| (path, split.fraction())))
+            .filter_map(|(path, node)| node.get_row().map(|row| (path, row)))
+            .flat_map(|(path, row)| {
+                row.gaps()
+                    .map(move |gap| (GapPath::new(path, gap), row.boundary(gap)))
+                    .collect::<Vec<_>>()
+            })
             .collect()
     }
 
@@ -3680,17 +3702,22 @@ impl Sim {
                 };
                 range > 0.0 && range < 2.0 * self.style.separator.extra
             })
-            .filter(|(path, _)| self.fraction_of(*path) != Some(0.5))
+            .filter(|(_, node)| {
+                let row = node.get_row().expect("filtered to rows above");
+                row.gaps().any(|gap| row.boundary(gap) != 0.5)
+            })
             .count()
     }
 
-    /// The fraction of a split node, if it is still there and still a split.
-    fn fraction_of(&self, path: NodePath) -> Option<f32> {
+    /// The boundary stored in a gap, if its row is still there, still a row, and still has
+    /// that gap.
+    fn boundary_of(&self, gap: GapPath) -> Option<f32> {
         self.state
-            .node(path)
+            .node(gap.row)
             .ok()
             .and_then(|node| node.get_row())
-            .map(|split| split.fraction())
+            .filter(|row| row.has_gap(gap.gap))
+            .map(|row| row.boundary(gap.gap))
     }
 
     /// Whether a floating window other than `owner` sits over `point`.
@@ -4332,21 +4359,21 @@ fn boundary_drift_complaint(
         return None;
     }
     watch.under_pressure += under_pressure;
-    for (path, was) in before {
+    for (gap, was) in before {
         if let BoundaryRule::Only(named) = &effect.boundaries
-            && named.contains(path)
+            && named.contains(gap)
         {
             continue;
         }
-        let Some((_, now)) = after.iter().find(|(other, _)| other == path) else {
+        let Some((_, now)) = after.iter().find(|(other, _)| other == gap) else {
             continue;
         };
         watch.checked += 1;
         if now != was {
             return Some(format!(
-                "the split at {path:?} went from fraction {was} to {now} during a step that did \
-                 not name it ({:?}) — `fraction` is persisted state, so something in the frame \
-                 pass rewrote a layout the user did not touch",
+                "the boundary in {gap:?} went from {was} to {now} during a step that did not \
+                 name it ({:?}) — a boundary is persisted state, so something in the frame pass \
+                 rewrote a layout the user did not touch",
                 effect.boundaries
             ));
         }
@@ -4533,21 +4560,20 @@ fn commit_complaint(effect: &Effect, commits: Commits) -> Option<String> {
     }
 }
 
-/// Every split's fraction, checked for the one thing a gesture must never do to it.
+/// Every boundary of every row, checked for the one thing a gesture must never do to it.
 ///
-/// `fraction` is clamped by `show_separator` so that neither child is squeezed out of existence;
-/// nothing in the model enforces that, and nothing in `validate()` should — a fraction is a
-/// number the model is happy to carry, and the invariant belongs to the gesture that writes it.
-/// So it is judged here, where the gesture runs.
+/// A boundary is clamped by `show_divider` so that neither neighbour is squeezed out of
+/// existence; nothing in the model enforces that, and nothing in `validate()` should — a
+/// boundary is a number the model is happy to carry, and the invariant belongs to the gesture
+/// that writes it. So it is judged here, where the gesture runs.
 fn fraction_complaint(sim: &Sim) -> Option<String> {
-    sim.state
-        .iter_all_nodes()
-        .filter_map(|(path, node)| node.get_row().map(|split| (path, split.fraction())))
-        .find(|(_, fraction)| !(fraction.is_finite() && *fraction > 0.0 && *fraction < 1.0))
-        .map(|(path, fraction)| {
+    sim.boundaries()
+        .into_iter()
+        .find(|(_, boundary)| !(boundary.is_finite() && *boundary > 0.0 && *boundary < 1.0))
+        .map(|(gap, boundary)| {
             format!(
-                "the split at {path:?} sits at fraction {fraction}, which gives one of its \
-                 children no room at all — a panel the user can neither see nor drag back"
+                "the boundary in {gap:?} sits at {boundary}, which gives one of its neighbours \
+                 no room at all — a panel the user can neither see nor drag back"
             )
         })
 }
@@ -4795,8 +4821,9 @@ fn shrink(steps: &[Step], fails: &dyn Fn(&[Step]) -> bool) -> Vec<Step> {
 // The harness itself
 // ---------------------------------------------------------------------------------------
 
-/// A dock split in two, with the separator between them found and reported.
-fn split_scene(split: Split) -> (Sim, NodePath, Pos2) {
+/// A dock split in two, with the separator between them found and reported: the gap it is
+/// drawn in, and where to grab it.
+fn split_scene(split: Split) -> (Sim, GapPath, Pos2) {
     let mut sim = Sim::new();
     let root = sim.state.main_surface().root().unwrap();
     sim.state.split(
@@ -4813,8 +4840,8 @@ fn split_scene(split: Split) -> (Sim, NodePath, Pos2) {
         1,
         "one split, one separator to grab: {separators:?}"
     );
-    let (path, at, _) = separators[0];
-    (sim, path, at)
+    let (gap, at, _) = separators[0];
+    (sim, gap, at)
 }
 
 /// Focus moving between two leaves of the same surface is a change the trace must show.
@@ -4888,12 +4915,12 @@ fn the_point_a_separator_gesture_aims_at_belongs_to_no_leaf() {
 #[test]
 fn dragging_a_separator_moves_the_boundary_and_commits_once() {
     let (mut sim, path, at) = split_scene(Split::Right);
-    let before = sim.fraction_of(path).expect("a split to drag");
+    let before = sim.boundary_of(path).expect("a split to drag");
     sim.take_commits();
 
     sim.drag(at, at + Vec2::new(120.0, 0.0));
 
-    let after = sim.fraction_of(path).expect("the split is still there");
+    let after = sim.boundary_of(path).expect("the split is still there");
     assert!(
         after > before,
         "dragging the separator right must move the boundary right: {before} -> {after}"
@@ -4916,13 +4943,13 @@ fn dragging_a_separator_moves_the_boundary_and_commits_once() {
 fn a_separator_grabbed_and_released_commits_nothing() {
     let (mut sim, path, at) = split_scene(Split::Below);
     let before = sim.trace();
-    let fraction = sim.fraction_of(path).expect("a split to grab");
+    let fraction = sim.boundary_of(path).expect("a split to grab");
     sim.take_commits();
 
     sim.grab(at);
 
     assert_eq!(
-        sim.fraction_of(path),
+        sim.boundary_of(path),
         Some(fraction),
         "a press without motion may not move the boundary"
     );
@@ -5017,7 +5044,7 @@ fn a_dock_with_nothing_open_can_still_be_brought_back() {
 fn double_clicking_a_separator_centres_it_once() {
     let (mut sim, path, at) = split_scene(Split::Right);
     sim.drag(at, at + Vec2::new(150.0, 0.0));
-    let moved = sim.fraction_of(path).expect("a split to centre");
+    let moved = sim.boundary_of(path).expect("a split to centre");
     assert!(
         (moved - 0.5).abs() > 0.01,
         "the scene must start off-centre for the gesture to have anything to do: {moved}"
@@ -5029,7 +5056,7 @@ fn double_clicking_a_separator_centres_it_once() {
     sim.double_click(at);
 
     assert_eq!(
-        sim.fraction_of(path),
+        sim.boundary_of(path),
         Some(0.5),
         "a double-click centres the separator"
     );
@@ -5038,7 +5065,7 @@ fn double_clicking_a_separator_centres_it_once() {
     let (_, at, _) = sim.separators()[0];
     sim.double_click(at);
     assert_eq!(
-        sim.fraction_of(path),
+        sim.boundary_of(path),
         Some(0.5),
         "centring an already centred separator leaves it where it is"
     );
@@ -5062,7 +5089,7 @@ fn a_separator_cannot_squeeze_a_child_to_nothing() {
 
     // Well past the left edge of the node, in one motion.
     sim.drag(at, at + Vec2::new(-4000.0, 0.0));
-    let clamped = sim.fraction_of(path).expect("a split to clamp");
+    let clamped = sim.boundary_of(path).expect("a split to clamp");
     assert!(
         clamped > 0.0,
         "the boundary was shoved out of the node: fraction {clamped}"
@@ -5078,7 +5105,7 @@ fn a_separator_cannot_squeeze_a_child_to_nothing() {
     sim.drag(at, at + Vec2::new(-4000.0, 0.0));
 
     assert_eq!(
-        sim.fraction_of(path),
+        sim.boundary_of(path),
         Some(clamped),
         "a drag that is already against the clamp moves nothing"
     );
@@ -5121,11 +5148,15 @@ fn a_node_too_small_for_the_margin_keeps_both_children() {
         .separators()
         .into_iter()
         .min_by(|a, b| {
-            let height = |p: NodePath| layout.get(p).map_or(f32::MAX, |g| g.rect.height());
+            let height = |g: GapPath| layout.get(g.row).map_or(f32::MAX, |g| g.rect.height());
             height(a.0).total_cmp(&height(b.0))
         })
         .expect("a separator to drag");
-    let range = layout.get(path).expect("a laid-out split").rect.height();
+    let range = layout
+        .get(path.row)
+        .expect("a laid-out split")
+        .rect
+        .height();
     assert!(
         range <= sim.style.separator.extra,
         "the scene must contain a node no taller than the margin itself — that is where the old \
@@ -5136,7 +5167,7 @@ fn a_node_too_small_for_the_margin_keeps_both_children() {
 
     sim.drag(at, at + Vec2::new(0.0, -4000.0));
 
-    let after = sim.fraction_of(path).expect("the split is still there");
+    let after = sim.boundary_of(path).expect("the split is still there");
     assert!(
         after > 0.0 && after < 1.0,
         "the boundary was driven to {after}, which leaves one child with no height at all \
@@ -5180,7 +5211,7 @@ fn a_ratio_the_window_grew_too_small_for_comes_back_when_it_grows_again() {
     // The split is a node of its own; `root` named the leaf, which is now its first child.
     let (path, _, _) = sim.separators()[0];
     assert_eq!(
-        sim.fraction_of(path),
+        sim.boundary_of(path),
         Some(0.3),
         "the scene starts at the ratio it was built with"
     );
@@ -5193,7 +5224,7 @@ fn a_ratio_the_window_grew_too_small_for_comes_back_when_it_grows_again() {
     // Shrink the window until the split's node cannot leave the margin on both sides. That is
     // the regime the old clamp collapsed to a point, and the test proves nothing without it.
     sim.resize(Vec2::new(1280.0, 260.0));
-    let squeezed_range = sim.layout().get(path).unwrap().rect.height();
+    let squeezed_range = sim.layout().get(path.row).unwrap().rect.height();
     assert!(
         squeezed_range < 2.0 * sim.style.separator.extra,
         "the shrunk window must leave the split with no room for the margin on both sides, and \
@@ -5201,7 +5232,7 @@ fn a_ratio_the_window_grew_too_small_for_comes_back_when_it_grows_again() {
         sim.style.separator.extra
     );
     assert_eq!(
-        sim.fraction_of(path),
+        sim.boundary_of(path),
         Some(0.3),
         "the stored ratio is state; a window resize is not a gesture and may not write it"
     );
@@ -5223,7 +5254,7 @@ fn a_ratio_the_window_grew_too_small_for_comes_back_when_it_grows_again() {
 
     sim.resize(SCREEN);
     assert_eq!(
-        sim.fraction_of(path),
+        sim.boundary_of(path),
         Some(0.3),
         "and it is still there once there is room for it again"
     );
@@ -5278,7 +5309,7 @@ fn a_drag_on_a_divider_with_no_room_leaves_the_ratio_alone() {
     // Squeeze the window until the split cannot leave the margin on both sides. Without this the
     // band has room, the drag is an ordinary one, and the test is about nothing.
     sim.resize(Vec2::new(1280.0, 260.0));
-    let range = sim.layout().get(path).unwrap().rect.height();
+    let range = sim.layout().get(path.row).unwrap().rect.height();
     assert!(
         range < 2.0 * sim.style.separator.extra,
         "the scene must leave the split with no room for the margin on both sides, and this one \
@@ -5286,7 +5317,7 @@ fn a_drag_on_a_divider_with_no_room_leaves_the_ratio_alone() {
         sim.style.separator.extra
     );
     assert_eq!(
-        sim.fraction_of(path),
+        sim.boundary_of(path),
         Some(0.3),
         "the resize is not a gesture and may not write the ratio — that is the sibling test's \
          subject, and this one starts where it ends"
@@ -5297,7 +5328,7 @@ fn a_drag_on_a_divider_with_no_room_leaves_the_ratio_alone() {
     sim.drag(at, at + Vec2::new(0.0, 120.0));
 
     assert_eq!(
-        sim.fraction_of(path),
+        sim.boundary_of(path),
         Some(0.3),
         "the boundary had nowhere to go — the band is the single point 0.5 here — so the drag \
          moved nothing, and a gesture that moved nothing may not replace the stored ratio: {}",
@@ -5315,7 +5346,7 @@ fn a_drag_on_a_divider_with_no_room_leaves_the_ratio_alone() {
     let (_, at, before) = sim.separators()[0];
     sim.drag(at, at + Vec2::new(0.0, 120.0));
     assert_ne!(
-        sim.fraction_of(path),
+        sim.boundary_of(path),
         Some(before),
         "with room to move, the same drag has to move the boundary — otherwise the half above \
          passes because nothing was ever grabbed"
@@ -5343,14 +5374,14 @@ fn a_ratio_the_margin_cannot_honour_is_drawn_inside_it_and_left_in_the_tree() {
     sim.run_frame(vec![]);
     let (path, _, _) = sim.separators()[0];
 
-    let range = sim.layout().get(path).unwrap().rect.height();
+    let range = sim.layout().get(path.row).unwrap().rect.height();
     assert!(
         range > 2.0 * sim.style.separator.extra,
         "this case is about a node with room to spare — {range} px against 2 x {}",
         sim.style.separator.extra
     );
     assert_eq!(
-        sim.fraction_of(path),
+        sim.boundary_of(path),
         Some(0.02),
         "nothing but a gesture writes the ratio, and there was no gesture"
     );

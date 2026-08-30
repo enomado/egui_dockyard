@@ -42,7 +42,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use egui_dockyard::egui::{CentralPanel, Context, Id, Pos2, RawInput, Rect, Ui, Vec2, WidgetText};
-use egui_dockyard::{DockArea, DockLayout, DockState, Style};
+use egui_dockyard::{DockArea, DockLayout, DockState, GapPath, Style};
 
 type Tab = ron::Value;
 
@@ -140,8 +140,20 @@ fn dump(state: &DockState<Tab>, layout: &DockLayout) -> String {
                     Some(viewport) => write_rect(&mut out, "viewport", viewport),
                     None => out.push_str("  viewport none\n"),
                 }
-                match geometry.divider {
-                    Some(divider) => write_rect(&mut out, "divider", divider),
+                // One line per gap of a row — a pair has one — and, for a leaf, the same
+                // `divider none` a leaf printed while the divider was a field of every node's
+                // geometry. Kept so that the dump of stage 5 diffs clean against stage 4's,
+                // where this line was unconditional; stage 7, whose dump is expected to change,
+                // is free to drop it.
+                match node.get_row() {
+                    Some(row) => {
+                        for gap in row.gaps() {
+                            match layout.divider(GapPath::new(path, gap)) {
+                                Some(divider) => write_rect(&mut out, "divider", divider),
+                                None => out.push_str("  divider none\n"),
+                            }
+                        }
+                    }
                     None => out.push_str("  divider none\n"),
                 }
                 match geometry.side_strip {

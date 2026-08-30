@@ -52,7 +52,7 @@ pub use node::Node;
 pub use node::RowNode;
 pub use node::Share;
 pub use node::TabId;
-pub use node_id::{ChildIndex, NodeId, NodePath};
+pub use node_id::{ChildIndex, GapIndex, GapPath, NodeId, NodePath, RowGap};
 pub use tab_index::{TabIndex, TabPath};
 pub use tab_iter::TabIter;
 pub use validate::{DockViolation, SurfaceViolation, TreeViolation};

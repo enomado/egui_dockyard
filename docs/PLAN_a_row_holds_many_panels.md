@@ -424,31 +424,102 @@ that tree build with `--all-targets`; `dock_layout_gate` 9/9, `main_app` 975/975
 what those three places name, so they will be visited again — and stage 5's own DoD should say so
 rather than discovering it.
 
-### Stage 5 — a divider is addressed as a gap
+### Stage 5 — a divider is addressed as a gap ✅ done 30.08
 
-Today a divider is addressed by the *node* of its split, which works only because a split has
-exactly one. It becomes `GapPath { row: NodePath, gap: GapIndex }` — with `gap` always `0`
-while rows are pairs, so the change is in the language, not in the behaviour.
+A divider used to be addressed by the *node* of its split, which worked only because a split
+had exactly one. It is now a **gap**: `GapIndex(pub usize)` — gap `k` lies between children `k`
+and `k + 1` — with `RowGap { row: NodeId, gap }` for the places that walk one tree and
+`GapPath { row: NodePath, gap }` for everything that reaches across surfaces, all three beside
+`ChildIndex` in `node_id.rs`. While rows are pairs the index is always `0`, so the change is in
+the language and not in the behaviour, and the parity below says so.
 
-Readers to move: `DockLayout::divider` and `NodeGeometry::divider`, `separator_rect`,
-`resize_id`, `DragSubject::Separator`, `DockMutation::SetSplitFraction`, `nudge_split`,
-`split_gesture`, and the six junction sites. Plus `RowNode::fraction` / `set_fraction`, which
-stage 4 left as the pair spelling precisely because a gap has no name yet.
+What speaks of a gap now:
 
-**In the application**, which stage 4 found writing as well as reading: `tree_layout/layouts.rs`
-and `live_api/host/panels.rs` in `rust_app`, and the `dock_layout_gate` test. Look at them
-*before* moving the pin — `DockMutation` is what the live-api op speaks.
+* **the model.** `RowNode::boundary(gap)` / `set_boundary(gap, at)`. A boundary is *derived* —
+  the running sum of the weights up to and including child `gap`, over the total — and a write
+  touches only the two weights the gap lies between, so every other boundary of the row stays
+  where it was. That is decision 1 of this plan arriving as arithmetic, and stage 0's oracle
+  stated on the model where it is reachable today
+  (`moving_one_boundary_of_a_row_of_three_leaves_the_other_alone`). `gaps()`, `gap_count()`,
+  `has_gap()`, and `only_gap()` — the pair spelling, greppable like `children_pair`, owed a loop
+  by stage 6. `fraction()` / `set_fraction()` **stay**, as the pair spelling for the readers that
+  genuinely speak of one number per row — the wire (`node_out`), the shape dump, and the
+  application's own binary wire — and are implemented over the gap: `set_fraction(f)` is
+  `set_boundary(GapIndex(0), f)`, which on a row built by `pair` writes `[f, 1 − f]` to the bit
+  (`a_boundary_written_through_its_gap_is_the_pair_it_would_have_been`, 10 001 boundaries, by
+  bits);
+* **the geometry.** `DockLayout` keeps `dividers: HashMap<GapPath, Rect>` — a map of its own
+  rather than a field of `NodeGeometry`, because that struct is per node and `Copy`, and a row
+  has one divider per gap. `divider(gap)`, `set_divider(gap, Option<Rect>)` (an absence still
+  *arrives*: `None` removes), `forget_dividers(row)` for the branch that stows a row without
+  looking at its children, and `forget` / `retain_live` drop a row's gaps with the row.
+  `NodeGeometry::divider` is gone;
+* **the chain.** `Chain::dividers: Vec<RowGap>`, and `collect_chain` is the loop the stage-2 note
+  promised: between every two children, one gap. The transposition's id pool is now
+  `dividers.map(|d| d.row)` — one id per row only while rows are pairs, which stage 7's pool
+  arithmetic replaces;
+* **the gestures.** `DragSubject::Separator { gap }`, `DragSubject::Junction { outer: GapPath }`,
+  `JunctionArms::{Tee(GapPath), Cross([GapPath; 2])}`, `DockMutation::SetBoundary { gap, at }`
+  (was `SetSplitFraction { path, fraction }`), `nudge_boundary` / `boundary_gesture` /
+  `boundary_at` (were `nudge_split` / `split_gesture` / `split_fraction`). `show_separator` is
+  now a loop over the row's gaps into `show_divider`, and the divider's widget id carries the
+  gap. In the junction module `Band::dividers: Vec<GapPath>`, `Junctions::outer: GapPath`, the
+  detector reads the two neighbours of the gap through a new `gap_neighbours(gap)` (always two,
+  whatever the row holds — which is why it, and not `child_paths`, is what a junction is about),
+  and `handle_room` walks every gap of every row. `TransposeCross` keeps `outer: NodePath`: a
+  transposition is about the row and its two chains, and the line of a pair is its only gap;
+* **the sweep.** `tests/dst.rs` names a gap everywhere it named a split: `separators()` and
+  `junctions()` iterate gaps, `band()` walks them, `Boundaries` and `BoundaryRule::Only` are
+  keyed by `GapPath`, `boundary_of` / `boundaries_of` replace `fraction_of` / `fractions_of`.
 
-**DoD**: parity, measured by `rect_probe` and `shape_probe` over the corpus the way stage 4 was;
-the sweep replays the same gestures at the same points; the `dst.rs` divider step names a gap and
-still finds every divider it found before.
+**In the application: nothing.** Stage 4's three sites (`layouts.rs` writes `set_fraction`,
+`host/panels.rs` reads `fraction()`, the `dock_layout_gate` test) all speak the pair spelling
+this stage kept, and `DockMutation` turned out not to be what the live-api op speaks — the app
+has its own `SetSplitFraction` op that climbs to the parent row and calls `set_fraction`. Checked
+by building every consumer against the new pin (see the handoff), not assumed.
+
+**DoD** (met):
+
+* `rect_probe`: 544 layouts, **4141 nodes, byte-identical** (`d227401611a0…` both sides). The
+  probe prints one `divider` line per gap of a row and keeps a leaf's `divider none` line, so
+  the dump stays comparable with stage 4's; `shape_probe` byte-identical too (`bfc8ebb4…`);
+* the DST sweep replays the same 96 seeds × 30 steps with the map-coverage line and **all eight
+  watches identical** to the run before the change (separator: 24 drags / 16 moves / 8 clamped
+  / 12 grabs / 3 centrings; junction: 18 offered / 4 `crossings_moved_both` / 16 moves);
+* `cargo test --all-features`: **300 passed, 0 failed**, plus stage 0's two ignored. Six of the
+  300 are new — three on `RowNode` (the two above and `a_row_has_one_gap_fewer_than_it_has_children`),
+  three on the divider map (`a_divider_set_to_none_is_gone`, `a_divider_does_not_outlive_its_row`,
+  `forgetting_a_row_forgets_every_gap_it_had`).
+
+#### Mutants
+
+Nine, all killed; two of them only by the unit written for them, and that is the finding.
+
+| Mutant | Killed by |
+|---|---|
+| `boundary` sums the weights *before* the gap, not up to it | 30+ tests: row units, persist, shape, the junction module |
+| `set_boundary` hands the second neighbour the whole remainder (`total − cut` for `after − cut`) | **only** `moving_one_boundary_of_a_row_of_three_leaves_the_other_alone`. On a pair the two numbers are the same, so 167 other tests and both probes pass — stage 4's lesson again: the property this stage exists for is reachable only on a row built by hand until stage 7 |
+| `collect_chain` names the gap *after* each child | the chain unit and 30 junction tests |
+| the stowed branch stops forgetting its dividers | `stowing_a_side_takes_its_insides_off_the_map` |
+| `set_divider(gap, None)` leaves last frame's line in place | the map unit, and three tests in `a_hidden_half_has_no_boundary_to_drag` — the 0b junction oracle among them |
+| `retain_live` keeps the dividers of rows that left the tree | `a_divider_does_not_outlive_its_row` — new, and nothing else: no reader asks for a dead row's line today |
+| `forget` keeps the forgotten row's lines | `forgetting_a_row_forgets_every_gap_it_had` — new; the scripted stow scene has no nested row inside the side, and the sweep's `stowed_a_deep_side` (3) does not judge the map |
+| `handle_room` ignores every other divider of the surface | `a_divider_inside_a_part_is_not_swallowed_by_the_button` |
+| a band's gaps are addressed on the main surface whatever surface the band is on | `the_tee_offers_a_handle_where_the_scenes_press` (the window scene) — **and the DST sweep passed it**, 22/22 with every counter unchanged. The sweep has no counter for a junction pressed in a floating window, so it cannot tell "the crate misaddresses window junctions" from a run that never pressed one; recorded in the handoff's findings |
+
+Not mutated, and why: `gap_neighbours` ignoring the index, `show_separator` drawing only gap
+`0`, the widget id without the gap, `boundary_gesture`'s `has_gap` guard — every one of them is
+identical on a pair. They are what stage 7 reaches, and a mutant nothing can kill is not a
+mutant but a note.
 
 ### Stage 6 — the layout cuts a row
 
 `cut_split` → `cut_row`, `SplitCut` → `RowCut { children: Vec<Rect>, dividers: Vec<Option<Rect>>,
 side_strips: Vec<Option<SideStrip>> }`. Same three branches, written over `n` instead of two.
 `update_split_collapsed` sums or maxes over the children rather than over `left`/`right`;
-`strip_columns` is already recursive and becomes a fold over the row.
+`strip_columns` is already recursive and becomes a fold over the row. The callers of
+`RowNode::only_gap` (`compute_rect_sizes`) and of `child_paths` are this stage's list, and
+`compute_rect_sizes` writes one `set_divider` per gap of the cut.
 
 Still on a binary tree. The last stage that is parity, and the one that makes stage 7 small.
 

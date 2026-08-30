@@ -14,7 +14,6 @@ use super::{
     state::{DragSubject, State},
     tab_removal::TabRemoval,
 };
-use crate::NodePath;
 use crate::dock_area::tab_removal::ForcedRemoval;
 use crate::layout::{DockLayout, SideStrip};
 use crate::tab_viewer::OnCloseResponse;
@@ -22,6 +21,7 @@ use crate::{
     AllowedSplits, DockArea, Node, OverlayType, Style, SurfaceIndex, TabDestination, TabViewer,
     utils::{expand_to_pixel, fade_dock_style, map_to_pixel},
 };
+use crate::{GapIndex, GapPath, NodePath};
 
 mod junction;
 mod leaf;
@@ -275,7 +275,7 @@ impl<Tab> DockArea<'_, Tab> {
             | DockMutation::SetLeafCollapsed { .. }
             | DockMutation::SetSplitStowed { .. }
             | DockMutation::SetLeafScroll { .. }
-            | DockMutation::SetSplitFraction { .. }
+            | DockMutation::SetBoundary { .. }
             | DockMutation::SetWindowMinimized { .. }
             | DockMutation::WindowShown { .. }
             | DockMutation::TransposeCross { .. }
@@ -367,11 +367,11 @@ impl<Tab> DockArea<'_, Tab> {
                     // No `LayoutCommitted`: scrolling a tab bar has never been a layout edit a
                     // consumer diffs, and it is requested on plain resizes too (the clamp).
                 }
-                DockMutation::SetSplitFraction { path, fraction } => {
-                    self.dock_state[path.surface][path.node]
+                DockMutation::SetBoundary { gap, at } => {
+                    self.dock_state[gap.row.surface][gap.row.node]
                         .get_row_mut()
-                        .expect("a fraction is only requested for a split")
-                        .set_fraction(fraction);
+                        .expect("a boundary is only requested for a row")
+                        .set_boundary(gap.gap, at);
                     // No event either: the gesture that asked already said what it was —
                     // `SeparatorDragging` while the hand moves, `LayoutCommitted` on release or
                     // on the double-click reset.
@@ -698,6 +698,33 @@ impl<Tab> DockArea<'_, Tab> {
         ]
     }
 
+    /// The paths of the two children `gap` lies between, first (left / top) then second.
+    ///
+    /// Always exactly two, whatever the row holds — that is what a gap *is* — which is why the
+    /// junction detector speaks of these rather than of [`Self::child_paths`]: the line a junction
+    /// sits on is the line between two neighbours, not "the line of the split".
+    ///
+    /// # Panics
+    ///
+    /// If `gap` does not name a gap of a row.
+    #[track_caller]
+    fn gap_neighbours(&self, gap: GapPath) -> [NodePath; 2] {
+        let row = self.dock_state[gap.row]
+            .get_row()
+            .expect("only a row has gaps");
+        let children = row.children();
+        assert!(
+            row.has_gap(gap.gap),
+            "gap {} of a row with {} gaps",
+            gap.gap.0,
+            row.gap_count()
+        );
+        [
+            NodePath::new(gap.row.surface, children[gap.gap.0]),
+            NodePath::new(gap.row.surface, children[gap.gap.0 + 1]),
+        ]
+    }
+
     fn allocate_area_for_root_node(&mut self, ui: &mut Ui, surface: SurfaceIndex) -> Rect {
         let style = self.style.as_ref().unwrap();
         let mut rect = ui.available_rect_before_wrap();
@@ -737,12 +764,12 @@ impl<Tab> DockArea<'_, Tab> {
     /// on staleness in that function.
     fn compute_rect_sizes(&mut self, pixels_per_point: f32, path: NodePath, max_rect: Rect) {
         // A side put away as a unit is one bar for whatever it contains: there are no children
-        // to cut it into, and therefore no line between them. Said out loud rather than left to
-        // the branch not running, because "no divider" is an answer that has to *arrive* — the
-        // entry outlives the frame, so a split that stops answering keeps the line it drew
-        // before it was stowed, lying across the strip it has become.
+        // to cut it into, and therefore no line between any of them. Said out loud rather than
+        // left to the branch not running, because "no divider" is an answer that has to
+        // *arrive* — the entry outlives the frame, so a row that stops answering keeps the line
+        // it drew before it was stowed, lying across the strip it has become.
         if self.dock_state[path].is_stowed() {
-            self.layout.set_divider(path, None);
+            self.layout.forget_dividers(path);
             return;
         }
 
@@ -752,8 +779,15 @@ impl<Tab> DockArea<'_, Tab> {
         self.layout.set_rect(left_path, cut.children[0]);
         self.layout.set_rect(right_path, cut.children[1]);
         // Unconditional, both of them: a branch cannot leave a stale answer behind by saying
-        // nothing, because `SplitCut` made it say something.
-        self.layout.set_divider(path, cut.divider);
+        // nothing, because `SplitCut` made it say something. The pair's only gap, because
+        // `cut_split` cuts one line; stage 6's `cut_row` hands back one per gap and this
+        // becomes a loop.
+        let gap = self.dock_state[path]
+            .get_row()
+            .expect("a parent is a row")
+            .only_gap();
+        self.layout
+            .set_divider(GapPath::new(path, gap), cut.divider);
         for (child, side) in [left_path, right_path].into_iter().zip(cut.side_strips) {
             if let Some(side) = side {
                 self.layout.set_side_strip(child, side);
@@ -1043,30 +1077,35 @@ impl<Tab> DockArea<'_, Tab> {
         unreachable!("a parent node is either horizontal or vertical, and this one is a parent")
     }
 
-    /// The rectangle the divider of the split at `path` is drawn in — and, expanded by
+    /// The rectangle the divider in `gap` is drawn in — and, expanded by
     /// [`SeparatorStyle::extra_interact_width`](crate::SeparatorStyle::extra_interact_width),
     /// grabbed by.
     ///
-    /// `None` where there is no divider on screen to speak of: a node that is not a split, one
-    /// the layout pass has no rectangle for, or a split it cut at a strip's edge rather than at
-    /// its ratio. See [`NodeGeometry::divider`](crate::NodeGeometry::divider) for that last one.
+    /// `None` where there is no divider on screen to speak of: a gap of nothing (a leaf, or a
+    /// gap past the row's last), a row the layout pass has no rectangle for, or a gap it cut at
+    /// a strip's edge rather than at its ratio. See [`DockLayout::divider`] for that last one.
     ///
-    /// A lookup rather than a derivation, and that is the whole point of the field. The painted
+    /// A lookup rather than a derivation, and that is the whole point of the map. The painted
     /// divider, the rectangle it is grabbed by, the cross-split button sized by how close the
-    /// nearest other divider is (`DockArea::toggle_room`) and the sweep in `tests/dst.rs` all
+    /// nearest other divider is (`DockArea::handle_room`) and the sweep in `tests/dst.rs` all
     /// have to name the same line, and the way to make that true is for one place to decide
     /// where it is. That place is the layout pass, which cannot avoid deciding: cutting the two
-    /// children *is* choosing the line between them. It used to compute the line, throw it away,
-    /// and leave this function to compute it again from the ratio — along with a separate rule
-    /// for whether there was one at all, which is the copy that drifted when the sideways branch
-    /// was added.
+    /// neighbours *is* choosing the line between them. It used to compute the line, throw it
+    /// away, and leave this function to compute it again from the ratio — along with a separate
+    /// rule for whether there was one at all, which is the copy that drifted when the sideways
+    /// branch was added.
     ///
-    /// It also answers quietly for a path that names nothing, where indexing the tree here used
+    /// It also answers quietly for a gap that names nothing, where indexing the tree here used
     /// to panic (`no node 0.1 in this tree`, from a leaf closed mid-gesture at DST seed 1).
-    pub(super) fn separator_rect(&self, path: NodePath) -> Option<Rect> {
-        self.layout.divider(path)
+    pub(super) fn separator_rect(&self, gap: GapPath) -> Option<Rect> {
+        self.layout.divider(gap)
     }
 
+    /// Draws and interacts every divider of the row at `path`: one per gap.
+    ///
+    /// The loop is the whole of this function, and it is here rather than in the caller so that
+    /// "a row draws its dividers" is said once: a pair has one gap, a row of five has four, and
+    /// each is a separator of its own with its own widget, its own gesture and its own junctions.
     fn show_separator(
         &mut self,
         ui: &mut Ui,
@@ -1074,21 +1113,43 @@ impl<Tab> DockArea<'_, Tab> {
         fade_style: Option<&Style>,
         state: &mut State,
     ) {
+        // Collected first, because drawing a divider takes `&mut self` and the row is borrowed
+        // from the tree. The order is the row's own, first gap first.
+        let gaps: Vec<GapIndex> = self.dock_state[path]
+            .get_row()
+            .expect("only a row has dividers")
+            .gaps()
+            .collect();
+        for gap in gaps {
+            self.show_divider(ui, GapPath::new(path, gap), fade_style, state);
+        }
+    }
+
+    /// One divider: painted where the layout cut it, grabbed there, and moved by the drag, the
+    /// arrow keys and the double-click. The junction handles on its line come at the end.
+    fn show_divider(
+        &mut self,
+        ui: &mut Ui,
+        gap: GapPath,
+        fade_style: Option<&Style>,
+        state: &mut State,
+    ) {
+        let path = gap.row;
         assert!(self.dock_state[path.surface][path.node].is_parent());
 
         // Where the divider is *this frame*, as the layout pass recorded it — `None` when it
-        // cut the split at a strip's edge instead of at its ratio, and then there is nothing
+        // cut the gap at a strip's edge instead of at its ratio, and then there is nothing
         // here to paint or to hit-test. Asking the geometry rather than re-deriving the rule is
         // what keeps this from falling behind the next branch added to the layout.
-        let Some(drawn) = self.separator_rect(path) else {
+        let Some(drawn) = self.separator_rect(gap) else {
             return;
         };
 
         // Cloned out of `style` up front, and not where they are used: `style` may be borrowed
-        // from `self.style`, while everything below that *writes* — `nudge_split`, the junction
-        // handles — takes `&mut self`. Holding the borrow across those calls is what used to
-        // force the write to be inlined here, in a `&mut` match on the node, where no second
-        // caller could reach it.
+        // from `self.style`, while everything below that *writes* — `nudge_boundary`, the
+        // junction handles — takes `&mut self`. Holding the borrow across those calls is what
+        // used to force the write to be inlined here, in a `&mut` match on the node, where no
+        // second caller could reach it.
         let style = fade_style.unwrap_or_else(|| self.style.as_ref().unwrap());
         let separator_style = style.separator.clone();
         let toggle_style = style.cross_split_toggle.clone();
@@ -1106,11 +1167,11 @@ impl<Tab> DockArea<'_, Tab> {
             if let Node::Row(row) = &self.dock_state[path.surface][path.node]
                 && row.is_orientation()
             {
-                // Which axis this split divides, and nothing else is read off the node: the
+                // Which axis this row divides, and nothing else is read off the node: the
                 // borrow of the tree ends here, because every write below goes through
-                // `nudge_split`, which takes `&mut self`. What the gesture answers to — the band
-                // this frame's geometry can honour — lives there too, so the divider drawn, the
-                // rectangle it is grabbed by and the ratio a drag writes all name one line
+                // `nudge_boundary`, which takes `&mut self`. What the gesture answers to — the
+                // band this frame's geometry can honour — lives there too, so the divider drawn,
+                // the rectangle it is grabbed by and the ratio a drag writes all name one line
                 // (see `SeparatorBand`).
                 let separator = drawn;
 
@@ -1118,7 +1179,9 @@ impl<Tab> DockArea<'_, Tab> {
                 expand.dim_point += separator_style.extra_interact_width / 2.0;
                 let interact_rect = separator.expand2(expand);
 
-                let resize_id = ui.id().with((path.node, "separator"));
+                // The gap is part of the id: a row of three has two of these widgets, and a
+                // press has to know which of them it holds.
+                let resize_id = ui.id().with((path.node, gap.gap, "separator"));
                 let response = ui.interact(interact_rect, resize_id, Sense::click_and_drag())
                     .on_hover_and_drag_cursor(paste!{ CursorIcon::[<Resize orientation>]});
 
@@ -1185,7 +1248,7 @@ impl<Tab> DockArea<'_, Tab> {
                 if response.drag_started() {
                     state.begin_drag(
                         response.id,
-                        DragSubject::Separator { path },
+                        DragSubject::Separator { gap },
                         // egui reports where the press landed on the frame it decides a drag —
                         // it is what `drag_started()` is derived from.
                         response
@@ -1198,11 +1261,11 @@ impl<Tab> DockArea<'_, Tab> {
                 // `drag_delta()` is zero on any frame the separator is not being dragged, so a
                 // non-zero delta *is* the gesture; arrow nudges are never zero either. What the
                 // delta is allowed to do to the stored ratio — and when it is allowed to do
-                // nothing at all — is `nudge_split`'s business, shared with the junction
+                // nothing at all — is `nudge_boundary`'s business, shared with the junction
                 // handles, which move two or three of these at once.
                 let is_arrow = arrow_key_offset.is_some();
                 let delta = arrow_key_offset.unwrap_or(response.drag_delta()).dim_point;
-                if self.nudge_split(path, pixels_per_point, separator_style.extra, delta) {
+                if self.nudge_boundary(gap, pixels_per_point, separator_style.extra, delta) {
                     if is_arrow {
                         self.events.push(DockEvent::LayoutCommitted);
                     } else {
@@ -1232,58 +1295,60 @@ impl<Tab> DockArea<'_, Tab> {
                     self.events.push(DockEvent::LayoutCommitted);
                 }
 
-                if response.double_clicked() && self.split_fraction(path) != 0.5 {
-                    self.mutations.push(DockMutation::SetSplitFraction {
-                        path,
-                        fraction: 0.5,
-                    });
+                if response.double_clicked() && self.boundary_at(gap) != 0.5 {
+                    self.mutations.push(DockMutation::SetBoundary { gap, at: 0.5 });
                     self.events.push(DockEvent::LayoutCommitted);
                 }
             }
         }
 
-        self.draw_junction_handles(ui, path, &separator_style, &toggle_style, state);
+        self.draw_junction_handles(ui, gap, &separator_style, &toggle_style, state);
     }
 
-    /// The ratio stored on the split at `path`.
+    /// Where the boundary in `gap` sits, as its row stores it.
     ///
     /// # Panics
     ///
-    /// If `path` does not name a split.
+    /// If `gap` does not name a gap of a row.
     #[track_caller]
-    fn split_fraction(&self, path: NodePath) -> f32 {
-        self.dock_state[path]
+    fn boundary_at(&self, gap: GapPath) -> f32 {
+        self.dock_state[gap.row]
             .get_row()
-            .expect("only a split has a fraction")
-            .fraction()
+            .expect("only a row has a boundary")
+            .boundary(gap.gap)
     }
 
-    /// The interval the split at `path` is cut from this frame, and the band its boundary may
-    /// be moved in — `None` wherever a gesture cannot move it at all.
+    /// The interval the row of `gap` is cut from this frame, and the band the boundary in that
+    /// gap may be moved in — `None` wherever a gesture cannot move it at all.
     ///
-    /// The `None` cases are the three guards a write has to pass, stated once rather than at
-    /// each of the two call sites. A node with no rectangle or no split has no boundary;
+    /// The `None` cases are the guards a write has to pass, stated once rather than at each of
+    /// the two call sites. A node with no rectangle, no row, or no such gap has no boundary;
     /// `range > 0.0` because `delta / range` is not finite otherwise; and `band.min < band.max`
     /// because on a node too short to leave the margin on both sides the band is the single
     /// point `0.5`, so the clamp answers `0.5` whatever the delta was — writing that "answer"
     /// replaces the stored ratio with dead centre, which is the loss [`SeparatorBand`] exists to
     /// prevent. Found by the frame sweep, on a divider a tab drag grabbed by accident: 0.75
     /// became 0.5 during a step that never named it.
-    fn split_gesture(
+    ///
+    /// The band is the *row's* whole interval less the margins, which is right for a pair and
+    /// is stage 7's to narrow to the two neighbouring boundaries once a row can hold more.
+    fn boundary_gesture(
         &self,
-        path: NodePath,
+        gap: GapPath,
         pixels_per_point: f32,
         extra: f32,
     ) -> Option<(f32, SeparatorBand)> {
-        let node = &self.dock_state[path];
-        let split = node.get_row()?;
-        let rect = split_rect(self.layout.rect(path)?, pixels_per_point);
+        let node = &self.dock_state[gap.row];
+        let row = node.get_row()?;
+        // A gap the row no longer has — a gesture can outlive the shape it grabbed.
+        row.has_gap(gap.gap).then_some(())?;
+        let rect = split_rect(self.layout.rect(gap.row)?, pixels_per_point);
         let range = if node.is_horizontal() {
             rect.width()
         } else {
             rect.height()
         };
-        let band = SeparatorBand::new(split.fraction(), range, extra);
+        let band = SeparatorBand::new(row.boundary(gap.gap), range, extra);
         // Negated on purpose, and clippy's rewrite is not equivalent — see `SeparatorBand::new`.
         #[allow(clippy::neg_cmp_op_on_partial_ord)]
         if !(range > 0.0) || band.min >= band.max {
@@ -1292,11 +1357,11 @@ impl<Tab> DockArea<'_, Tab> {
         Some((range, band))
     }
 
-    /// Moves the boundary of the split at `path` by `delta` points along its own axis. Answers
-    /// whether the stored ratio changed.
+    /// Moves the boundary in `gap` by `delta` points along its row's own axis. Answers whether
+    /// the stored ratio changed.
     ///
-    /// **The only place a gesture writes a `fraction`** — see the note on [`SeparatorBand`]
-    /// listing every writer there is and why that list is worth keeping short. `show_separator`
+    /// **The only place a gesture writes a boundary** — see the note on [`SeparatorBand`]
+    /// listing every writer there is and why that list is worth keeping short. `show_divider`
     /// calls it for the divider under the pointer, a junction handle for the two boundaries a
     /// corner is made of; both get the same clamp because it is the same function, not the same
     /// idea written twice.
@@ -1304,9 +1369,9 @@ impl<Tab> DockArea<'_, Tab> {
     /// The delta is in **points**, not in fractions, and that is what makes a junction possible:
     /// the boundary is drawn at `near + range * effective`, so `delta / range` moves it by
     /// exactly `delta` points whatever interval it was cut from.
-    fn nudge_split(
+    fn nudge_boundary(
         &mut self,
-        path: NodePath,
+        gap: GapPath,
         pixels_per_point: f32,
         extra: f32,
         delta: f32,
@@ -1314,17 +1379,14 @@ impl<Tab> DockArea<'_, Tab> {
         if delta == 0.0 {
             return false;
         }
-        let Some((range, band)) = self.split_gesture(path, pixels_per_point, extra) else {
+        let Some((range, band)) = self.boundary_gesture(gap, pixels_per_point, extra) else {
             return false;
         };
-        let new_fraction = (band.effective + delta / range).clamp(band.min, band.max);
-        if self.split_fraction(path) == new_fraction {
+        let at = (band.effective + delta / range).clamp(band.min, band.max);
+        if self.boundary_at(gap) == at {
             return false;
         }
-        self.mutations.push(DockMutation::SetSplitFraction {
-            path,
-            fraction: new_fraction,
-        });
+        self.mutations.push(DockMutation::SetBoundary { gap, at });
         true
     }
 }
@@ -1333,7 +1395,7 @@ impl<Tab> DockArea<'_, Tab> {
 ///
 /// A function, and called by both halves, because they have to name the *same* rectangle:
 /// [`DockArea::compute_rect_sizes`] cuts the two children out of it, and
-/// [`DockArea::show_separator`] draws the divider between them against it, hit-tests it there
+/// [`DockArea::show_divider`] draws the divider between them against it, hit-tests it there
 /// and moves it from there. They used to derive it separately — the layout pass snapped, the
 /// separator did not — so the divider was measured against a slightly different node than the
 /// children were: a boundary up to `2 / pixels_per_point` px off the gap it is supposed to sit
@@ -1444,8 +1506,8 @@ fn split_rect(node_rect: Rect, pixels_per_point: f32) -> Rect {
 /// That makes every writer a place where the tree and the screen can quietly part company, and
 /// there are only four of them:
 ///
-/// * [`DockArea::nudge_split`] — every gesture that moves a boundary, whether the drag and the
-///   arrow keys in [`DockArea::show_separator`] or a drag on a junction handle, which moves two
+/// * [`DockArea::nudge_boundary`] — every gesture that moves a boundary, whether the drag and
+///   the arrow keys in [`DockArea::show_divider`] or a drag on a junction handle, which moves two
 ///   or three of them at once. It clamps into `min..max`, so it asks. One function and not one
 ///   per gesture: a second copy of this arithmetic is a second answer to "how far may this go";
 /// * the double-click in the same place — writes `0.5`, which is in every band there is, since
@@ -1477,7 +1539,7 @@ struct SplitCut {
     children: [Rect; 2],
 
     /// The line between them, or [`None`] if this cut left none — see
-    /// [`NodeGeometry::divider`](crate::NodeGeometry::divider).
+    /// [`DockLayout::divider`].
     divider: Option<Rect>,
 
     /// Which edge each child was pressed against, for a child this cut squeezed into a sideways

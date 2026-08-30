@@ -82,10 +82,15 @@ impl<Tab> Tree<Tab> {
             chain.parts.push(node);
             return;
         }
+        // A pair on purpose, not a loop over the children: `dividers` names a divider by the
+        // *node* of the split that draws it, which works only while a split draws exactly one.
+        // A row of three written as a loop here would push the same id twice and call it two
+        // dividers. Stage 5 of the n-ary plan gives a divider its own address (a gap in a row),
+        // and that is what turns this into a loop.
         let [first, second] = self[node]
             .get_split()
             .expect("a node in a chain is a split")
-            .children();
+            .children_pair();
         self.collect_chain(first, horizontal, chain);
         chain.dividers.push(node);
         self.collect_chain(second, horizontal, chain);
@@ -125,10 +130,14 @@ impl<Tab> Tree<Tab> {
     ) {
         let outer_horizontal = self[outer].is_horizontal();
         let inner_horizontal = !outer_horizontal;
+        // A pair, and honestly so at every level of this function: a crossing is made of
+        // exactly two chains, which is why `at`, `bounds` and `chains` are pairs as well. A
+        // transposition of a row of three is a different gesture, not a wider version of this
+        // one, so nothing here is waiting for a row.
         let [first, second] = self[outer]
             .get_split()
             .expect("a transposition is rooted at the split between the two chains")
-            .children();
+            .children_pair();
         let chains = [
             self.chain(first, inner_horizontal),
             self.chain(second, inner_horizontal),

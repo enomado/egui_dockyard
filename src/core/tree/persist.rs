@@ -103,7 +103,11 @@ fn node_out<Tab>(tree: &Tree<Tab>, id: NodeId) -> NodeOut<'_, Tab> {
             collapsed: leaf.collapsed,
         },
         node @ (Node::Vertical(split) | Node::Horizontal(split)) => {
-            let [left, right] = split.children();
+            // A pair because the *wire* is a pair: `NodeOut` holds `[Box<NodeOut>; 2]`, and a
+            // saved layout is read by versions of this crate that know nothing about rows. The
+            // format is stage 7's to change, and it changes on both sides at once — writer,
+            // reader and the tombstone for what is already on disk.
+            let [left, right] = split.children_pair();
             let children = [
                 Box::new(node_out(tree, left)),
                 Box::new(node_out(tree, right)),
@@ -776,10 +780,13 @@ mod tests {
     fn round_trip_keeps_a_subtree_stowed_and_its_insides_untouched() {
         let mut tree = sample();
         let root = tree.root().unwrap();
-        let [_, right] = tree[root].get_split().unwrap().children();
+        // `children_pair` throughout this test: `sample()` builds the scene two children at a
+        // time, so naming both is naming what the fixture just made, not an assumption about
+        // what a split can hold.
+        let [_, right] = tree[root].get_split().unwrap().children_pair();
         // A leaf collapsed *inside* what is about to be put away: the state that "collapse
         // every leaf" would have destroyed and cannot tell apart afterwards.
-        let [inner_top, _] = tree[right].get_split().unwrap().children();
+        let [inner_top, _] = tree[right].get_split().unwrap().children_pair();
         tree.set_leaf_collapsed(inner_top, true);
         tree.set_split_stowed(right, true);
 
@@ -790,7 +797,7 @@ mod tests {
         assert_eq!(shape(&back), shape(&tree));
 
         let root = back.root().unwrap();
-        let [_, right] = back[root].get_split().unwrap().children();
+        let [_, right] = back[root].get_split().unwrap().children_pair();
         assert!(back[right].is_stowed(), "the subtree came back put away");
         assert_eq!(
             back[right].collapsed_leaf_count(),
@@ -798,7 +805,7 @@ mod tests {
             "one bar, one row — recomputed on load from the field that was read back"
         );
 
-        let [inner_top, inner_bottom] = back[right].get_split().unwrap().children();
+        let [inner_top, inner_bottom] = back[right].get_split().unwrap().children_pair();
         assert!(
             back[inner_top].is_collapsed(),
             "the leaf that was collapsed inside is still collapsed"
@@ -943,7 +950,9 @@ mod tests {
 
         let root = tree.root().unwrap();
         assert_eq!(tree[root].get_split().unwrap().fraction, 0.75);
-        let [left, right] = tree.children(root).unwrap();
+        // The pair this very JSON literal describes — see the note in
+        // `round_trip_keeps_a_subtree_stowed_and_its_insides_untouched`.
+        let [left, right] = tree.children_pair(root).unwrap();
         assert_eq!(tree.leaf(left).unwrap().active_index(), Some(TabIndex(1)));
         assert_eq!(
             tree.focused_leaf(),

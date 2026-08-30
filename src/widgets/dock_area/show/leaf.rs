@@ -1434,10 +1434,9 @@ impl<Tab> DockArea<'_, Tab> {
         while let Some(node) = stack.pop() {
             if self.dock_state[path.surface][node].is_leaf() {
                 leaves.push(NodePath::new(path.surface, node));
-            } else if let Some([left, right]) = self.dock_state[path.surface].children(node) {
+            } else if let Some(children) = self.dock_state[path.surface].children(node) {
                 // Pushed back to front: the stack hands the first child back first.
-                stack.push(right);
-                stack.push(left);
+                stack.extend(children.iter().rev().copied());
             }
         }
 

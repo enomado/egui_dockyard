@@ -245,7 +245,7 @@ impl<Tab> Tree<Tab> {
                 .node(id)
                 .map(|node| node.get_split().map(|s| s.children()))
             {
-                stack.extend(children.into_iter().flatten().filter(|child| {
+                stack.extend(children.into_iter().flatten().copied().filter(|child| {
                     // Broken child links are reported below; do not walk into them.
                     self.contains(*child)
                 }));
@@ -285,7 +285,7 @@ impl<Tab> Tree<Tab> {
 
             match node {
                 Node::Vertical(split) | Node::Horizontal(split) => {
-                    for child in split.children() {
+                    for &child in split.children() {
                         if self.parent(child) != Some(id) {
                             violations.push(TreeViolation::ChildLinkBroken { node: id, child });
                         }

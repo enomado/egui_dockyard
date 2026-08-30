@@ -149,7 +149,7 @@ impl<Tab> Tree<Tab> {
                     .children(id)
                     .expect("a regrouping reuses as a split only a node that is one");
                 old_splits.push(id);
-                stack.extend(children);
+                stack.extend(children.iter().copied());
             } else {
                 old_keeps.push(id);
             }

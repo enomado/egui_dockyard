@@ -661,7 +661,9 @@ fn the_modifier_adds_nothing_on_a_leaf_that_is_its_own_side() {
     // `open` is the other child of the root — a side of one leaf.
     let open = state
         .main_surface()
-        .children(open)
+        // The root of this scene is the split the test itself just made, so its two children are
+        // what the fixture built — `children_pair` names them rather than assuming them.
+        .children_pair(open)
         .map(|[first, second]| if first == side { second } else { first })
         .expect("the root is a split");
     let ctx = Context::default();

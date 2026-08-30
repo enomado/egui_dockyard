@@ -68,9 +68,26 @@ impl SplitNode {
         }
     }
 
-    /// Both children, first (left / top) then second (right / bottom).
+    /// This split's children, in order: first (left / top), then second (right / bottom).
+    ///
+    /// A slice and not a pair, although a split holds exactly two of them today. Almost every
+    /// reader of this method walks a subtree, counts leaves or forwards the children to a
+    /// queue — questions a row of five answers exactly as a pair does, and which therefore
+    /// need not be written twice when a row can hold five. The readers that genuinely need
+    /// *two* say so by name, through [`children_pair`](Self::children_pair).
     #[inline(always)]
-    pub const fn children(&self) -> [NodeId; 2] {
+    pub fn children(&self) -> &[NodeId] {
+        &self.children
+    }
+
+    /// Both children, first (left / top) then second (right / bottom).
+    ///
+    /// The pair spelling, deliberately a *different name* rather than a destructuring of
+    /// [`children`](Self::children): every place that still needs a split to hold exactly two
+    /// is then a grep for one identifier instead of a reading of the crate. Each caller carries
+    /// a note saying why a pair is the honest shape there, or which stage owes it a row.
+    #[inline(always)]
+    pub const fn children_pair(&self) -> [NodeId; 2] {
         self.children
     }
 

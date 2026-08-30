@@ -1404,7 +1404,7 @@ impl Sim {
         let mut leaves = 0;
         while let Some(node) = stack.pop() {
             match tree.children(node) {
-                Some(children) => stack.extend(children),
+                Some(children) => stack.extend(children.iter().copied()),
                 None => leaves += 1,
             }
         }
@@ -1659,7 +1659,10 @@ impl Sim {
                 let split = node.get_split()?;
                 let vertical = matches!(node, Node::Vertical(_));
 
-                let [first, second] = self.state[path.surface].children(path.node)?;
+                // A pair, like the divider it is measuring: this reads the gap *between* two
+                // children, which is what a split has exactly one of today. Stage 5 of the
+                // n-ary plan gives that gap an address, and this becomes a loop over gaps.
+                let [first, second] = self.state[path.surface].children_pair(path.node)?;
                 let child_path = |child: NodeId| NodePath::new(path.surface, child);
                 layout.divider(path)?;
 
@@ -1791,7 +1794,9 @@ impl Sim {
                 let inner_horizontal = !outer_horizontal;
                 let at = |id: NodeId| NodePath::new(path.surface, id);
 
-                let [c0, c1] = self.state[path.surface].children(path.node)?;
+                // A pair because a transposable crossing is one: two chains, one line each.
+                // Mirrors `Tree::transpose_cross`, which takes its `at` and `bounds` as pairs.
+                let [c0, c1] = self.state[path.surface].children_pair(path.node)?;
                 let bands = [
                     self.band(path.surface, c0, inner_horizontal, &layout)?,
                     self.band(path.surface, c1, inner_horizontal, &layout)?,
@@ -1962,7 +1967,13 @@ impl Sim {
                 Node::Vertical(_) => !horizontal,
                 _ => false,
             };
-            let Some([first, second]) = (if in_chain { tree.children(node) } else { None }) else {
+            // A pair for the same reason `Tree::collect_chain` uses one: a divider is named by
+            // the node of the split that draws it, so a loop here would push one id twice.
+            let Some([first, second]) = (if in_chain {
+                tree.children_pair(node)
+            } else {
+                None
+            }) else {
                 parts.push(node);
                 return;
             };

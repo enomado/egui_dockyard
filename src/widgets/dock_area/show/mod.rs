@@ -327,12 +327,14 @@ impl<Tab> DockArea<'_, Tab> {
                         let Some(children) = self.dock_state[outer.surface].children(node) else {
                             continue;
                         };
+                        // Queued before the cut below, and only so that the borrow of the tree
+                        // ends first — the queue is drained in exactly the order it was.
+                        queue.extend(children.iter().copied());
                         self.compute_rect_sizes(
                             pixels_per_point,
                             NodePath::new(outer.surface, node),
                             max_rect,
                         );
-                        queue.extend(children);
                     }
                 }
                 DockMutation::SetLeafCollapsed { path, collapsed } => {
@@ -682,10 +684,14 @@ impl<Tab> DockArea<'_, Tab> {
     /// If `path` does not name a split.
     #[track_caller]
     fn child_paths(&self, path: NodePath) -> [NodePath; 2] {
+        // A pair because everything downstream of it is one: `show_separator`, `cut_split` and
+        // the junction detector all speak of two halves and one line between them. Stage 6 of
+        // the n-ary plan turns `cut_split` into `cut_row` and this into a list of paths; until
+        // then a `Vec` here would only be a pair wearing a wider type.
         let [left, right] = self.dock_state[path]
             .get_split()
             .expect("only a split has children")
-            .children();
+            .children_pair();
         [
             NodePath::new(path.surface, left),
             NodePath::new(path.surface, right),

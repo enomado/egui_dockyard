@@ -232,10 +232,25 @@ impl<Tab> Tree<Tab> {
         self.nodes.get(id).and_then(|entry| entry.parent)
     }
 
-    /// The two children of `id`, or `None` if it is a leaf (or not in this tree).
+    /// The children of `id`, in order, or `None` if it is a leaf (or not in this tree).
+    ///
+    /// See [`SplitNode::children`] for why this is a slice; [`children_pair`](Self::children_pair)
+    /// is the spelling for callers that need exactly two.
     #[inline]
-    pub fn children(&self, id: NodeId) -> Option<[NodeId; 2]> {
+    pub fn children(&self, id: NodeId) -> Option<&[NodeId]> {
         self.node(id).ok()?.get_split().map(SplitNode::children)
+    }
+
+    /// The two children of `id`, or `None` if it is a leaf (or not in this tree).
+    ///
+    /// See [`SplitNode::children_pair`]: a caller of this one is a caller that still needs a
+    /// split to hold exactly two children.
+    #[inline]
+    pub fn children_pair(&self, id: NodeId) -> Option<[NodeId; 2]> {
+        self.node(id)
+            .ok()?
+            .get_split()
+            .map(SplitNode::children_pair)
     }
 
     /// Immutably borrows the node `id` names.
@@ -324,7 +339,7 @@ impl<Tab> Tree<Tab> {
         while let Some(id) = queue.pop_front() {
             order.push(id);
             if let Some(children) = self.children(id) {
-                queue.extend(children);
+                queue.extend(children.iter().copied());
             }
         }
         order
@@ -375,7 +390,7 @@ impl<Tab> Tree<Tab> {
             if (hidden.contains(&id) || self[id].is_stowed())
                 && let Some(children) = self.children(id)
             {
-                hidden.extend(children);
+                hidden.extend(children.iter().copied());
             }
         }
         hidden
@@ -670,7 +685,12 @@ impl<Tab> Tree<Tab> {
             return;
         };
 
-        let [left, right] = self.children(parent).expect("a parent is always a split");
+        // A pair, and honestly so *today*: "the sibling" is a question only a pair can answer.
+        // Stage 7 of the n-ary plan is where it stops being one — a row of five loses a child
+        // and stays a row, and only the last-child-standing case dissolves it.
+        let [left, right] = self
+            .children_pair(parent)
+            .expect("a parent is always a split");
         let sibling = if left == node { right } else { left };
         let grandparent = self.parent(parent);
         let where_parent_sat = grandparent.map(|split_id| {
@@ -714,7 +734,7 @@ impl<Tab> Tree<Tab> {
         while let Some(id) = queue.pop_front() {
             match self.children(id) {
                 None => return Some(id),
-                Some(children) => queue.extend(children),
+                Some(children) => queue.extend(children.iter().copied()),
             }
         }
         None
@@ -844,7 +864,11 @@ impl<Tab> Tree<Tab> {
                 })
             }
             Node::Vertical(split) | Node::Horizontal(split) => {
-                let [left, right] = split.children();
+                // A pair, and the arithmetic below is why: "one child survived, so it takes the
+                // split's place" is a rule about two. Over a row it becomes "keep the survivors,
+                // dissolve at one left", which is stage 7's business and not a rewrite this
+                // stage can make honestly — the shares would have to be filtered with them.
+                let [left, right] = split.children_pair();
                 let left = self.copy_filtered(left, target, function, focus);
                 let right = self.copy_filtered(right, target, function, focus);
                 match (left, right) {
@@ -1007,25 +1031,38 @@ impl<Tab> Tree<Tab> {
     ///
     /// If `split` is not a live split of this tree.
     fn update_split_collapsed(&mut self, split: NodeId) {
-        let [left, right] = self
-            .children(split)
-            .expect("update_split_collapsed on a node that is not a split");
-        let left_count = self[left].collapsed_leaf_count();
-        let right_count = self[right].collapsed_leaf_count();
-        // A stowed split draws one bar for the whole subtree, so it costs one row whatever is
-        // inside — asked first, because the arithmetic below is about a subtree that is *shown*.
-        let count = if self[split].is_stowed() {
-            1
-        // A horizontal split stacks its children side by side, so the collapsed rows
-        // overlap; a vertical one stacks them, so they add up.
-        } else if self[split].is_horizontal() {
-            max(left_count, right_count)
-        } else {
-            left_count + right_count
+        // Both numbers are read out of the children before anything is written, so that the
+        // borrow of the tree ends before the two setters below need it mutably. Written as a
+        // fold rather than over `left` / `right`: `max` and `sum` over two children are what
+        // they always were, and over five they are what a row means.
+        let (count, all_collapsed) = {
+            let children = self
+                .children(split)
+                .expect("update_split_collapsed on a node that is not a split");
+            let counts = || {
+                children
+                    .iter()
+                    .map(|child| self[*child].collapsed_leaf_count())
+            };
+            // A stowed split draws one bar for the whole subtree, so it costs one row whatever
+            // is inside — asked first, because the arithmetic below is about a subtree that is
+            // *shown*.
+            let count = if self[split].is_stowed() {
+                1
+            // A horizontal split stacks its children side by side, so the collapsed rows
+            // overlap; a vertical one stacks them, so they add up.
+            } else if self[split].is_horizontal() {
+                counts().fold(0, max)
+            } else {
+                counts().sum()
+            };
+            (
+                count,
+                children.iter().all(|child| self[*child].is_collapsed()),
+            )
         };
-        let both_collapsed = self[left].is_collapsed() && self[right].is_collapsed();
         self[split].set_collapsed_leaf_count(count);
-        self[split].set_collapsed(both_collapsed);
+        self[split].set_collapsed(all_collapsed);
     }
 
     /// Mirrors the root's bookkeeping onto the tree itself, which is where the window

@@ -221,15 +221,50 @@ tombstone; `focus_path` wins if a file somehow carries both.
 `Side::other()` went with the type: it had no caller in the crate, in the tests, in the fuzz
 targets or in the application, and "the other one" is not a question a row of three can answer.
 
-### Stage 2 — `children()` hands back a slice
+### Stage 2 — `children()` hands back a slice ✅ done 31.08
 
-`Tree::children(id) -> Option<&[NodeId]>`. Callers that genuinely want a pair say so by name —
-`children_pair()` — so that the *remaining* binary assumptions are a grep for one identifier
-instead of a reading of the crate.
+`Tree::children(id) -> Option<&[NodeId]>` and `SplitNode::children() -> &[NodeId]`. Callers
+that genuinely want a pair say so by name — `children_pair()` — so that the *remaining* binary
+assumptions are a grep for one identifier instead of a reading of the crate.
 
-**DoD**: `children_pair` appears exactly *N* times, and this plan is edited to record *N* and
-where. Each of them carries a comment saying why a pair is the honest shape there, or is a
-known debt for stage 6.
+**Six production call sites** keep a pair, and the recce's count of ten is how many there were:
+
+| Where | Why a pair | Owed to |
+|---|---|---|
+| `tree/mod.rs` `remove_leaf` | "the sibling" is a question only a pair can answer | stage 7 |
+| `tree/mod.rs` `copy_filtered` | "one child survived, so it takes the split's place" | stage 7 |
+| `tree/persist.rs` `node_out` | the **wire** is a pair: `NodeOut` holds `[Box<NodeOut>; 2]` | stage 7 |
+| `tree/transpose.rs` `collect_chain` | a divider is named by its split's **node**, so a loop would push one id twice and call it two dividers | stage 5 |
+| `tree/transpose.rs` `transpose_cross` | honest: a crossing is two chains, and `at` / `bounds` are pairs with it | — |
+| `show/mod.rs` `child_paths` | `show_separator`, `cut_split` and the junction detector all speak of two halves and one line | stage 6 |
+
+The other four went n-ary on the spot, because over two children the fold *is* what was
+written: `update_split_collapsed` (`max` / `sum` / `all` over the children, and the counts are
+read out before either setter runs, so the borrow ends first), its oracle in `proptests.rs`,
+`write_subtree_shape` (a loop that already says `H(a|b|c)` and for two children writes the same
+characters it always did), and `dock_shape`'s `children=` list. `strip_name_list`, `first_leaf`,
+`breadth_first`, `stowed_away`, `validate` and `regroup` simply walk a slice now.
+
+Eighteen more `children_pair` are in tests — nine in the `junction.rs` module, five in
+`persist.rs`, one in `a_side_can_be_stowed.rs`, three in `dst.rs`. Those name the two children
+of a scene the fixture *itself* built, which is not an assumption about what a split may hold;
+each file carries the note once rather than at every line, except the three in `dst.rs`, which
+mirror production sites and name them.
+
+**DoD** (met): the suite is green (293 tests, 25 binaries, plus stage 0's two `#[ignore]`s), and
+six mutants are killed by the gate that names each — the strip's depth-first order reversed
+(`a_strip_says_what_is_inside_it`, two tests), `max` → `sum` in the horizontal branch and `all`
+→ `any` in the collapsed one (the derived-counts proptest, and two unit tests for the second),
+the `|` between children moved (`the_subtree_shape_writes_splits_nesting_and_tabs_in_order`),
+and `children_pair` handing its two children back reversed.
+
+The sixth mutant is the finding. **Reversing the `children=` list of `dock_shape` survived the
+whole suite**: `subtree_shape` is pinned to the letter and `dock_shape` was not, although the
+comment explaining why the first one had to be ("both callers compare a dump against a dump, so
+a format that drifts is survived in silence") describes the second exactly — and stages 3, 4
+and 6 below add three more callers of that kind, since their parity is *this dump before*
+against *this dump after*. Pinned now by
+`the_dock_shape_writes_a_line_per_node_naming_children_by_position`, which the mutant fails.
 
 ### Stage 3 — orientation becomes a field
 

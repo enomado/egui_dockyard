@@ -1956,9 +1956,12 @@ mod tests {
         let (mut state, outer_id, [top_left, bottom_left, top_right, bottom_right]) =
             build_cross(true, 0.5, 0.5);
         let outer = NodePath::new(SurfaceIndex::main(), outer_id);
+        // `children_pair` in this test module names the two halves of a scene the fixtures here
+        // build as a cross — `build_cross` and its neighbours make pairs, so asking for two is
+        // asking what was just constructed rather than assuming what a split may hold.
         let [left_half, right_half] = state
             .main_surface()
-            .children(outer_id)
+            .children_pair(outer_id)
             .expect("the root of a cross is a split");
 
         // The two columns, and inside each the horizontal divider that has to meet the other.
@@ -2560,7 +2563,7 @@ mod tests {
 
         // Drag that divider down, grabbing it on its left half.
         let layout = DockLayout::load(&ctx, id);
-        let [c0, c1] = state.main_surface().children(outer_id).unwrap();
+        let [c0, c1] = state.main_surface().children_pair(outer_id).unwrap();
         let c0_rect = layout
             .rect(NodePath::new(SurfaceIndex::main(), c0))
             .unwrap();
@@ -2650,7 +2653,7 @@ mod tests {
             "the click did not flip the grouping, so there is no mid-pass edit to judge"
         );
 
-        let [c0, c1] = state.main_surface().children(outer_id).unwrap();
+        let [c0, c1] = state.main_surface().children_pair(outer_id).unwrap();
         let edited = [
             outer,
             NodePath::new(SurfaceIndex::main(), c0),
@@ -2741,7 +2744,7 @@ mod tests {
         if !in_chain {
             return 1;
         }
-        let [first, second] = state.main_surface().children(node).unwrap();
+        let [first, second] = state.main_surface().children_pair(node).unwrap();
         chain_parts(state, first, horizontal) + chain_parts(state, second, horizontal)
     }
 
@@ -2814,7 +2817,7 @@ mod tests {
         }
         let rect = layout.rect(path).expect("laid out this frame");
         let (lo, hi) = (edge(rect, horizontal, false), edge(rect, horizontal, true));
-        let [first, second] = state.main_surface().children(node).unwrap();
+        let [first, second] = state.main_surface().children_pair(node).unwrap();
         // Everything the first child contributes lies before this split's own boundary, so the
         // number of parts down there names which target is this split's.
         let k = chain_parts(state, first, horizontal);
@@ -2904,7 +2907,7 @@ mod tests {
         }
         // Read *after* cutting: splitting a leaf puts a fresh split node in its place, so the
         // ids the bands were built from are now parts of them, not their roots.
-        let roots = state.main_surface().children(outer).unwrap();
+        let roots = state.main_surface().children_pair(outer).unwrap();
 
         // The chains exist but sit wherever `0.5` put them. One render gives the bands the
         // extent their parts are cut from, and the requested fractions become absolute
@@ -2955,7 +2958,7 @@ mod tests {
         if !in_chain {
             return vec![root];
         }
-        let [first, second] = state.main_surface().children(root).unwrap();
+        let [first, second] = state.main_surface().children_pair(root).unwrap();
         let mut parts = band_parts_of(state, first, horizontal);
         parts.extend(band_parts_of(state, second, horizontal));
         parts
@@ -3376,7 +3379,7 @@ mod tests {
             [Leaning::Left, Leaning::Left],
         );
         let outer = NodePath::new(SurfaceIndex::main(), outer_id);
-        let [b0, b1] = state.main_surface().children(outer_id).unwrap();
+        let [b0, b1] = state.main_surface().children_pair(outer_id).unwrap();
         let positions = |state: &DockState<u32>| {
             (
                 divider_positions_of(&ctx, state, id, b0, false)[0],
@@ -3472,7 +3475,7 @@ mod tests {
             [Leaning::Left, Leaning::Left],
         );
         let outer = NodePath::new(SurfaceIndex::main(), outer_id);
-        let [b0, b1] = state.main_surface().children(outer_id).unwrap();
+        let [b0, b1] = state.main_surface().children_pair(outer_id).unwrap();
         let grabbed = |state: &DockState<u32>| divider_positions_of(&ctx, state, id, b0, false)[0];
         let neighbour =
             |state: &DockState<u32>| divider_positions_of(&ctx, state, id, b1, false)[0];

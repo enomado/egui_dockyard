@@ -67,11 +67,17 @@ fn write_subtree_shape<Tab: Display>(tree: &Tree<Tab>, id: NodeId, out: &mut Str
         }
         node => {
             out.push(if node.is_vertical() { 'V' } else { 'H' });
-            let [first, second] = tree.children(id).unwrap();
             out.push('(');
-            write_subtree_shape(tree, first, out);
-            out.push('|');
-            write_subtree_shape(tree, second, out);
+            // Written as a loop over however many children there are, not as a pair: the
+            // language then already says `H(a|b|c)` on the day a row can hold three, and for
+            // two children it is character for character what it always wrote — which is what
+            // `the_subtree_shape_writes_splits_nesting_and_tabs_in_order` is here to hold.
+            for (position, child) in tree.children(id).unwrap().iter().enumerate() {
+                if position > 0 {
+                    out.push('|');
+                }
+                write_subtree_shape(tree, *child, out);
+            }
             out.push(')');
         }
     }
@@ -133,7 +139,14 @@ pub fn dock_shape<Tab>(state: &DockState<Tab>, tab_label: impl Fn(&Tab) -> Strin
                         },
                         split.fraction,
                         split.fully_collapsed,
-                        split.children().map(position),
+                        // A `Vec` where this used to hand `[Option<usize>; 2]` to `{:?}`: both
+                        // print `[Some(1), Some(2)]`, so the dump is unchanged while the count
+                        // stops being fixed.
+                        split
+                            .children()
+                            .iter()
+                            .map(|child| position(*child))
+                            .collect::<Vec<_>>(),
                     )
                     .unwrap();
                 }
@@ -174,6 +187,32 @@ mod tests {
             "V([a,]|[b,c,])",
             "the dump format drifted — at the callers both sides of the comparison drift with \
              it and notice nothing"
+        );
+    }
+
+    /// The language of `dock_shape` is pinned to the letter, for the reason given above
+    /// `the_subtree_shape_writes_splits_nesting_and_tabs_in_order` and with one more caller
+    /// behind it: the n-ary plan spends three stages proving parity by comparing this dump
+    /// before a refactor with the same dump after it, and both sides of *that* comparison drift
+    /// together too. A writer that consistently mangled a field would leave every one of those
+    /// gates green while saying something untrue about the tree — which is exactly what a
+    /// mutation reversing the `children=` list did until this test existed.
+    #[test]
+    fn the_dock_shape_writes_a_line_per_node_naming_children_by_position() {
+        let mut state = DockState::new(vec!["a".to_string()]);
+        let root = state.main_surface().root().unwrap();
+        state
+            .main_surface_mut()
+            .split(root, Split::Right, 0.25, Node::leaf("b".to_string()));
+
+        assert_eq!(
+            dock_shape(&state, |tab| tab.clone()),
+            "surface 0: 3 nodes, focus Some(2)\n  \
+             0: horizontal fraction=0.25 collapsed=false children=[Some(1), Some(2)]\n  \
+             1: leaf active=Some(0) collapsed=false tabs=[\"a\"]\n  \
+             2: leaf active=Some(0) collapsed=false tabs=[\"b\"]\n",
+            "the dump format drifted — the parity gates that compare it against itself notice \
+             nothing"
         );
     }
 

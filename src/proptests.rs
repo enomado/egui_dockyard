@@ -178,15 +178,16 @@ proptest! {
 
                 for id in tree.breadth_first() {
                     let Some(split) = tree[id].get_split() else { continue };
-                    let [left, right] = split.children();
+                    let children = split.children();
+                    let counts = || children.iter().map(|child| tree[*child].collapsed_leaf_count());
                     // A stowed split draws one bar for whatever it contains, so it costs one
                     // row — the children's counts stop being the question.
                     let expected_count = if split.stowed {
                         1
                     } else if tree[id].is_horizontal() {
-                        tree[left].collapsed_leaf_count().max(tree[right].collapsed_leaf_count())
+                        counts().max().unwrap_or(0)
                     } else {
-                        tree[left].collapsed_leaf_count() + tree[right].collapsed_leaf_count()
+                        counts().sum()
                     };
                     prop_assert_eq!(
                         split.collapsed_leaf_count, expected_count,
@@ -195,7 +196,7 @@ proptest! {
                     );
                     prop_assert_eq!(
                         split.fully_collapsed,
-                        tree[left].is_collapsed() && tree[right].is_collapsed(),
+                        children.iter().all(|child| tree[*child].is_collapsed()),
                         "split {} disagrees with its children about being collapsed, after step {} ({:?})",
                         id, step, op
                     );

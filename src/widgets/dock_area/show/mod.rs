@@ -1153,22 +1153,24 @@ impl<Tab> DockArea<'_, Tab> {
                 )
             })
             .collect();
-        // Forward, because a divider pushed back by its predecessor pushes the next one in turn.
-        // A pair has one divider and no predecessor, so this pass cannot touch it: parity.
-        for index in 1..edges.len() {
-            let floor = edges[index - 1].1;
-            edges[index].0 = edges[index].0.max(floor);
-            edges[index].1 = edges[index].1.max(edges[index].0);
-        }
-        // And back, against the row's far edge, which the forward pass can walk past when the
-        // dividers do not fit in the row at all: the *last* child's span ends at `hi`, so a
-        // divider pushed beyond it would invert that one instead. Lowering only, and never below
-        // the divider before it, so the order the forward pass established survives.
-        let mut ceiling = hi;
-        for index in (0..edges.len()).rev() {
-            edges[index].1 = edges[index].1.min(ceiling);
-            edges[index].0 = edges[index].0.min(edges[index].1);
-            ceiling = edges[index].0;
+        // One pass, forwards, because a divider pushed along by its predecessor pushes the next
+        // one in turn. Each edge is put inside the row and never before the edge behind it, so
+        // the dividers come out in order and within the row, and a child between two of them is
+        // given a span of **zero** rather than of minus a divider.
+        //
+        // A pair has one divider, no predecessor, and a boundary the band already keeps inside
+        // the row, so this cannot touch it: parity.
+        //
+        // Written first as two passes, one from each end, on the reasoning that the forward one
+        // could walk the last divider past `hi`. The second could not be made to fire — not by
+        // the corpus (0 inside-out either way) and not by a scene built to aim at it — so it is
+        // a sentence here instead of code, and the clamp against `hi` that it existed for is
+        // folded into the one pass that is judged.
+        let mut floor = lo;
+        for edge in &mut edges {
+            edge.0 = edge.0.clamp(floor, hi);
+            edge.1 = edge.1.clamp(edge.0, hi);
+            floor = edge.1;
         }
         // Child `k` runs from the far edge of divider `k − 1` to the near edge of divider `k`;
         // the first and the last reach the row's own edges.
@@ -2541,6 +2543,62 @@ mod tests {
             None,
             "cut at the stack's edge"
         );
+    }
+
+    /// **A child squeezed to nothing is given nothing, never less than nothing.**
+    ///
+    /// Two boundaries of a row can land on the same point — a child of weight zero, or two
+    /// boundaries the margin pushes into the same limit — and the child between them is then
+    /// asked to fit between the far edge of one divider and the near edge of the next, which is
+    /// a divider's width *backwards*. An inverted rectangle is not a small rectangle: it is a
+    /// panel whose hit test and clipping disagree about which side of itself it is on.
+    ///
+    /// Unreachable while a row held two — one boundary has nothing to coincide with — so stage 6
+    /// wrote the branch and recorded the hole. Stage 7 made it reachable and the corpus probe
+    /// found it: 86 inside-out rectangles across 544 layouts, all in chains flattened on load.
+    /// Stated here as well, because a defect found by a probe run by hand is a defect nothing
+    /// runs again.
+    ///
+    /// A minimum size per child would be the other answer, and is deliberately not this feature
+    /// — see "What this does not do" in the plan.
+    ///
+    /// # Why four scenes and not one
+    ///
+    /// The repair is two passes, one from each end, and with the default margin **either one
+    /// alone** keeps this row honest — so a single scene would pin the pair while judging
+    /// neither. Zeroing `separator.extra` takes the margin's help away and separates them: the
+    /// weights piled at the far end walk the last divider past the row's edge, which only the
+    /// backward pass pulls in, and the weights piled at the near end walk the first one before
+    /// it, which only the forward pass does.
+    #[test]
+    fn a_child_squeezed_between_two_boundaries_is_given_nothing_not_less() {
+        let mut no_margin = style();
+        no_margin.separator.extra = 0.0;
+
+        // Every child asking for nothing puts the boundaries on the near edge; every child but
+        // the first asking for nothing puts them on the far edge.
+        for (label, style) in [("with a margin", style()), ("without one", no_margin)] {
+            for shares in [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0]] {
+                for horizontal in [true, false] {
+                    let where_at = format!("{label}, {shares:?}, horizontal={horizontal}");
+                    let (mut state, row, leaves) = row_of_three(horizontal, shares);
+                    let layout = lay_out(&mut state, &style, false);
+
+                    let whole = rect_of(&layout, row);
+                    for leaf in leaves {
+                        let rect = rect_of(&layout, leaf);
+                        assert!(
+                            rect.max.x >= rect.min.x && rect.max.y >= rect.min.y,
+                            "{where_at}: a leaf came out inside out: {rect:?}"
+                        );
+                        assert!(
+                            whole.contains_rect(rect),
+                            "{where_at}: {rect:?} is not inside its row {whole:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Every row collapsed: the stack hangs from the top, one tab bar each with a separator

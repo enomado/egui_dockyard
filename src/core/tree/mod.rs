@@ -1326,6 +1326,103 @@ mod test {
         assert_eq!(tree.validate(), Ok(()));
     }
 
+    /// **Splitting a panel of a row joins that row, and the boundary lands where it was asked
+    /// for** — measured from the panel that was split, not from the row.
+    ///
+    /// Two claims in one scene, and each is a way the join can be wrong. That the row grows
+    /// rather than nesting is the feature; that the newcomer takes `1 − fraction` of the
+    /// *target's own room*, on the side the `Split` names, is what makes the picture the same as
+    /// the nested spelling drew. Swapping the two sides survived the whole suite when this was
+    /// written: the acceptance oracle of the plan reads boundaries off the screen and asserts
+    /// only that they are *local*, so a row of equal thirds is equal thirds either way round.
+    #[test]
+    fn splitting_a_panel_of_a_row_joins_it_at_the_fraction_asked_for() {
+        // A quarter and not a half, because at a half the two sides of the split are the same
+        // number and swapping them is invisible: the mutant this test is for reverses which of
+        // the two keeps `fraction`.
+        for (split, expected) in [
+            // `b` joins to the right of `a`, so `a` keeps the first quarter of its own half.
+            (Split::Right, [0.125, 0.375, 0.5]),
+            // ...and to the left of it, so `a` is the one pushed off — and it is *still* the
+            // first of the two that keeps a quarter, because `fraction` names the near side.
+            (Split::Left, [0.125, 0.375, 0.5]),
+        ] {
+            let mut tree = Tree::new(vec![Tab(0)]);
+            let root = tree.root().unwrap();
+            let [a, c] = tree.split_right(root, 0.5, vec![Tab(1)]);
+            let row = tree.root().unwrap();
+            let [_, b] = tree.split(a, split, 0.25, Node::leaf(Tab(2)));
+
+            assert_eq!(
+                tree.parent(b),
+                Some(row),
+                "{split:?}: the newcomer joined the row instead of nesting a second one"
+            );
+            let children = tree.children(row).unwrap().to_vec();
+            assert_eq!(children.len(), 3, "{split:?}: one row of three");
+            // Which of the two is first depends on the side; the *weights* do not.
+            let order = match split {
+                Split::Left => vec![b, a, c],
+                _ => vec![a, b, c],
+            };
+            assert_eq!(children, order, "{split:?}: in screen order");
+            let shares: Vec<f32> = tree[row]
+                .get_row()
+                .unwrap()
+                .shares()
+                .iter()
+                .map(|share| share.0)
+                .collect();
+            assert_eq!(shares, expected, "{split:?}: the room `a` had, halved");
+            assert_eq!(tree.validate(), Ok(()));
+        }
+    }
+
+    /// **A row of three loses a panel and stays a row, and the survivors keep their ratios.**
+    ///
+    /// Decision 5 of the n-ary plan, taken with Стас: the weight goes back to the *row*, not to a
+    /// neighbour. Every boundary moves and no proportion changes — which is the only answer that
+    /// treats the row as a row rather than as the pair it used to be, where "the sibling takes
+    /// the place of their common parent" was the whole of removal.
+    ///
+    /// The weights are deliberately unequal. With three equal children, dropping the middle one
+    /// and dropping the *last* weight give the same two numbers, and a mutant that removes the
+    /// wrong one survives — which is exactly what it did before this test existed.
+    #[test]
+    fn a_row_of_three_that_loses_a_panel_keeps_the_others_in_proportion() {
+        let mut tree = Tree::new(vec![Tab(0)]);
+        let root = tree.root().unwrap();
+        // `a` a quarter, then the remaining three quarters split two-to-one: [¼, ½, ¼].
+        let [a, c] = tree.split_right(root, 0.25, vec![Tab(1)]);
+        let row = tree.root().unwrap();
+        let [_, d] = tree.split(c, Split::Right, 2.0 / 3.0, Node::leaf(Tab(2)));
+        assert_eq!(tree.children(row).unwrap(), [a, c, d]);
+
+        tree.remove_leaf(c);
+
+        assert_eq!(tree.root(), Some(row), "the row did not dissolve");
+        assert_eq!(
+            tree.children(row).unwrap(),
+            [a, d],
+            "the middle one is gone"
+        );
+        let at = tree[row].get_row().unwrap().boundary(GapIndex(0));
+        assert!(
+            (at - 0.5).abs() < 1e-6,
+            "the two survivors weighed a quarter each, so the boundary is the middle: {at}"
+        );
+        assert_eq!(tree.validate(), Ok(()));
+
+        // And down to two, removal dissolves the row as it always did.
+        tree.remove_leaf(a);
+        assert_eq!(
+            tree.root(),
+            Some(d),
+            "the last one standing takes the place"
+        );
+        assert_eq!(tree.validate(), Ok(()));
+    }
+
     /// And if an empty leaf is fabricated anyway, `split` says so instead of quietly repairing
     /// it: the arena is reachable from inside the crate, so the contract needs a witness.
     #[test]

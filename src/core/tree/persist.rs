@@ -831,7 +831,7 @@ impl<'de, Tab: Deserialize<'de>> Deserialize<'de> for crate::core::DockState<Tab
 
 #[cfg(test)]
 mod tests {
-    use crate::core::tree::{Node, Split, TabIndex, Tree};
+    use crate::core::tree::{GapIndex, Node, Split, TabIndex, Tree};
     use crate::core::{DockState, SurfaceIndex};
 
     fn shape(tree: &Tree<String>) -> Vec<(usize, Vec<String>)> {
@@ -1207,6 +1207,91 @@ mod tests {
             assert_eq!(tree[split].get_row().unwrap().fraction(), 0.5, "{bad}");
             assert_eq!(tree.validate(), Ok(()), "{bad}");
         }
+    }
+
+    /// **A chain of same-axis splits on disk loads as one row** — decision 3 of the n-ary plan,
+    /// and the whole reason the feature reaches layouts people already have.
+    ///
+    /// Written in the tombstone form on purpose: this is what every file on anyone's disk says,
+    /// and reading it 1:1 would leave two classes of layout — identical on screen, different
+    /// under the hand — for as long as those files last.
+    ///
+    /// The proportions are preserved exactly, because nesting *meant* a division of the outer
+    /// child's room: `H(a at ⅓, H(b at ½, c))` is three equal columns however it is spelled.
+    /// What the flat row does not preserve to the pixel is where the dividers' own width comes
+    /// out of — the nested spelling took one divider out of the right-hand group only — so a
+    /// deep chain's boundaries move by a fraction of a divider per level. That is measured in
+    /// the plan, not asserted here; what is asserted is the shape and the ratios.
+    #[test]
+    fn a_chain_of_same_axis_splits_loads_as_one_row() {
+        let leaf = |tab: &str| format!(r#"{{"Leaf":{{"tabs":["{tab}"],"active":0}}}}"#);
+        let json = format!(
+            r#"{{"root":{{"Horizontal":{{"fraction":0.33333334,"children":[{},
+               {{"Horizontal":{{"fraction":0.5,"children":[{},{}]}}}}]}}}}}}"#,
+            leaf("a"),
+            leaf("b"),
+            leaf("c")
+        );
+
+        let tree: Tree<String> = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(tree.validate(), Ok(()));
+        let root = tree.root().unwrap();
+        let row = tree[root].get_row().expect("the root is a row");
+        assert_eq!(row.children().len(), 3, "one row of three, not two nested");
+        assert_eq!(
+            tree.len(),
+            4,
+            "three leaves and one row — the inner one is gone"
+        );
+        // Equal thirds, to within the `f32` the file spelled the outer fraction in.
+        for (gap, expected) in [(GapIndex(0), 1.0 / 3.0), (GapIndex(1), 2.0 / 3.0)] {
+            let at = row.boundary(gap);
+            assert!(
+                (at - expected).abs() < 1e-6,
+                "boundary {} came back at {at}, not {expected}",
+                gap.0
+            );
+        }
+
+        // And it survives a round trip through the *new* form, which is what a build that has
+        // loaded such a file writes back.
+        let again: Tree<String> = serde_json::from_str(&serde_json::to_string(&tree).unwrap())
+            .expect("the row form reads back");
+        assert_eq!(again.validate(), Ok(()));
+        assert_eq!(
+            again[again.root().unwrap()]
+                .get_row()
+                .expect("still a row")
+                .children()
+                .len(),
+            3
+        );
+    }
+
+    /// A **stowed** inner row is not merged up, because stowing is a decision the user made
+    /// about that subtree: flattening it would put its panels back on screen.
+    #[test]
+    fn a_stowed_row_survives_the_chain_collapse() {
+        let leaf = |tab: &str| format!(r#"{{"Leaf":{{"tabs":["{tab}"],"active":0}}}}"#);
+        let json = format!(
+            r#"{{"root":{{"Horizontal":{{"fraction":0.5,"children":[{},
+               {{"Horizontal":{{"fraction":0.5,"stowed":true,"children":[{},{}]}}}}]}}}}}}"#,
+            leaf("a"),
+            leaf("b"),
+            leaf("c")
+        );
+
+        let tree: Tree<String> = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(tree.validate(), Ok(()));
+        let root = tree.root().unwrap();
+        let children = tree.children(root).expect("the root is a row").to_vec();
+        assert_eq!(children.len(), 2, "the stowed row stayed a node of its own");
+        assert!(
+            tree[children[1]].is_stowed(),
+            "and it is still put away, which is the point of not merging it"
+        );
     }
 
     /// Focus that a file cannot honour (it names a split) is dropped rather than stored as

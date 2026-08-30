@@ -51,14 +51,70 @@ tabs when there is room going spare; it cannot narrow one.
 a tab may be *widened* to an equal share when there is room spare. A bar that is both filled and
 overfull therefore still squeezes.
 
+## Revised the same day: fade, not ellipsis
+
+Стас, on seeing the first version: *"под элипсис можно съесть больше букв… а лучше на самом деле
+делать не элипсис — потому что он тоже ест место — а небольшой градиент в альфу. как chrome
+браузер делал?"*
+
+He is describing what the browsers actually do, and they document why:
+
+* **Chrome** fades tab labels rather than clipping them, and has since 32.
+* **Firefox** switched in 53 — [bug 658467, "Fade out tab label on overflow instead of
+  ellipsis"](https://bugzilla.mozilla.org/show_bug.cgi?id=658467), implemented with
+  `mask-image: linear-gradient(...)`. The reasoning in the bug is his: *the fadeout gives 1-2 more
+  characters to the user and looks smoother*.
+* **VS Code** did the same for `tabSizing: shrink` in
+  [PR #39829](https://github.com/microsoft/vscode/pull/39829).
+* Firefox also fades **beside its scroll arrows** — an 18 px gradient spacer — rather than marking
+  the overflow with a glyph. Chrome does not scroll at all; it offers a Tab Search list instead.
+
+So the ellipsis went, in both places it had just been added:
+
+1. **A cut name fades.** The name is laid out whole, clipped to the tab, and the last
+   [`FADE_LENGTH`] px are painted over in the tab's own background colour. egui has no text mask,
+   so a fade is a mesh from transparent to opaque *over* the glyphs — which is also why a
+   translucent tab background fades approximately rather than exactly.
+2. **The bar's own edge fades** when it cannot show every tab, instead of the `…` mark. The mark
+   cost 20 px of the bar and had to be reserved for; the fade is painted over the last few pixels
+   and costs nothing.
+3. **`MIN_SQUEEZED_TEXT` drops 40 → 28 px.** The ellipsis was eating about ten of those forty; a
+   fade eats none, so the floor buys more letters at a smaller number.
+4. **The active tab is held wider** (`MIN_SQUEEZED_TEXT_ACTIVE`, twice the rest) and **squeezed
+   tabs give up their close button** unless they are active or under the pointer — both Chrome's,
+   both asked for by Стас.
+
+### The trap in "the active tab keeps its ✕"
+
+Holding the active tab to a wider floor is not enough, and the first version got this backwards.
+Under a *gentle* squeeze every tab gets the same width — but only the active one still draws a
+close button, so out of that equal width it has 24 px less for its name. Measured on a bar of
+twelve: **56 px of name for the active tab against 79 for its neighbours.** The tab you are
+reading was the hardest one to read.
+
+The fix is that furniture a tab keeps while its neighbours drop theirs is charged to the *bar*:
+`fit_tab_widths` takes it off the top as `reserved` and hands it straight back after the share.
+Gentle squeeze, and the active tab now shows exactly as much name as the others; hard squeeze, and
+its floor makes it show twice as much.
+
+### What the fade is judged by
+
+A fade is a mesh whose vertices run from fully transparent to fully opaque, so the oracles select
+it by *vertex colour* — an ordinary filled shape can never be mistaken for one. "This name was
+cut" likewise stopped being a search for `…` in the glyphs and became `rect` against `clip`: the
+name is laid out whole, and the clip is what says how much of it was shown.
+
+Both readings have to happen **inside** the pass. `end_pass` empties the shape lists, and the
+first version of the fade oracle read them afterwards — "no fade was painted" and "the feature
+does not work" look identical from there.
+
 ## What this does not do
 
 * **No overflow menu behind the mark.** Clicking it could reasonably list the tabs that are off
   the edge, but that is a second capability ("show me a list") which the bar does not have today,
   and nobody has asked for it.
-* **No hiding of close buttons on squeezed tabs.** A squeezed tab keeps its ✕, which is part of
-  why its floor is as wide as it is. Dropping the button under pressure is a separate rule with
-  its own question — *whose* button disappears — and it can wait until someone minds.
+* ~~**No hiding of close buttons on squeezed tabs.**~~ Done in the revision above: a squeezed tab
+  drops its ✕ unless it is active or under the pointer.
 * **No tooltip with the full name of a cut tab.** `show_tab_name_on_hover` already exists as an
   opt-in and now has a second reason to be switched on; making it automatic for cut names only is
   a change to a public option's meaning.
@@ -76,7 +132,14 @@ the screen, in `tests/a_tab_bar_squeezes_its_tabs.rs`:
 * `a_bar_with_room_to_spare_cuts_nothing` — one short name in half a screen comes out whole and
   alone.
 
-Mutation-checked, six mutations:
+The revision added three more scenes — the active tab under a hard squeeze and under a gentle
+one, and the close button disappearing — and moved the fade assertions onto meshes. Seven
+mutations were run against the revised code and **all seven were killed**: no fade on a cut name;
+no clip on a name; no fade at the bar's edge; the active tab's kept button charged to its own
+name; the active tab floored like the rest; the close button never hidden; and no fade on a cut
+name in a *strip* (the same `strip_text` serves both).
+
+The list below is from the first version, before the ellipsis was replaced:
 
 | Mutation | Killed by |
 |---|---|

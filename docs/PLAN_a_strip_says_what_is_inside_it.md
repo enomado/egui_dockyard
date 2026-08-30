@@ -167,6 +167,24 @@ to bring back, and it is drawn in `tab.inactive.text_color` rather than in a col
 offer something it does not have. It runs *along* the strip like a name, so it reads as the list
 carrying on.
 
+### Revised the same day: a cut name fades, the mark stays
+
+The ellipsis *inside* a name went the way it went in the tab bar — see
+[«a tab bar squeezes its tabs»](PLAN_a_tab_bar_squeezes_its_tabs.md), which carries the reasoning
+and the browser precedent. A name in a strip is now laid out whole, clipped to its slot, and faded
+into the slot's own background at the far end, so `STRIP_MIN_NAME_LENGTH` came down with
+`MIN_SQUEEZED_TEXT` (40 → 28 px of text).
+
+**The mark at the end of the strip stayed**, and the difference is worth stating: a fade says
+"there is more of *this name*", while the mark says "there are more *names*". A strip drops names
+it cannot fit at all, and a dropped name leaves nothing behind to fade — so it needs a mark of its
+own, where the tab bar (which drops nothing, because it scrolls) does not.
+
+The fade runs *up* the slot, not right: the text is turned a quarter turn anticlockwise, so a name
+reads bottom to top and runs out of room at the **top** of its slot. A name that does not fit is
+pinned to the bottom of its slot rather than centred in it, so its first letters — the half that
+tells the panels apart — are the ones that survive.
+
 ### Oracles
 
 Six on the arithmetic (`fit_strip_names` is a pure function, so these are unit tests next to it)

@@ -55,7 +55,7 @@ impl Sim {
         let mut sim = Self {
             ctx: Context::default(),
             state,
-            viewer: Viewer::default(),
+            viewer: Viewer,
             frame: 0,
         };
         // Gestures are aimed with geometry, and there is no geometry until a pass has run.

@@ -287,6 +287,40 @@ pub(super) struct DragDropState {
     pub locked: Option<f64>,
 }
 
+/// One frame's aim: where the carried tab is pointed, what is in the hand, and what the dock
+/// will let it do there.
+///
+/// The two resolvers — [`resolve_traditional`](DragDropState::resolve_traditional) and
+/// [`resolve_icon_based`](DragDropState::resolve_icon_based) — differ in what they *draw*, not in
+/// what they need to know, and they took the same eight arguments in the same order at the same
+/// two call sites. That is one thing with a name, so it has one: the caller settles what a drop
+/// would mean this frame, and the overlay the style asked for is handed it.
+///
+/// `Copy`, so each resolver destructures it once at the top and reads the same names it always
+/// did.
+#[derive(Clone, Copy)]
+pub(super) struct DropAim<'a> {
+    /// Where the pointer settled, as `State::set_drag_and_drop` wrote it this frame.
+    pub hover: &'a HoverData,
+    /// What the hand holds, by identity — the source half of the drag.
+    pub source: DragSource,
+    /// The `Ui` the overlay is painted through.
+    pub ui: &'a Ui,
+    /// The dock's own foreground layer, named once per pass so its rank among the other
+    /// foreground areas is taken before the application opens anything later.
+    pub overlay: LayerId,
+    /// The style the overlay is drawn in — the faded one while a window is fading.
+    pub style: &'a Style,
+    /// Which splits *this* destination can house: the dock's own setting, narrowed by what the
+    /// hovered node allows (a surface and a leaf being deserted can house none).
+    pub allowed_splits: AllowedSplits,
+    /// Whether the carried tab is allowed to become a window at all — the consumer's answer,
+    /// asked of the tab itself.
+    pub windows_allowed: bool,
+    /// The area a window preview is kept inside.
+    pub window_bounds: Rect,
+}
+
 impl DragDropState {
     /// Drops a stale destination without touching `.drag`.
     ///
@@ -303,17 +337,17 @@ impl DragDropState {
         self.locked = None;
     }
 
-    pub(super) fn resolve_icon_based(
-        &mut self,
-        hover: &HoverData,
-        source: DragSource,
-        ui: &Ui,
-        overlay: LayerId,
-        style: &Style,
-        allowed_splits: AllowedSplits,
-        windows_allowed: bool,
-        window_bounds: Rect,
-    ) -> Option<TabDestination> {
+    pub(super) fn resolve_icon_based(&mut self, aim: DropAim<'_>) -> Option<TabDestination> {
+        let DropAim {
+            hover,
+            source,
+            ui,
+            overlay,
+            style,
+            allowed_splits,
+            windows_allowed,
+            window_bounds,
+        } = aim;
         assert!(hover.tab.is_none());
 
         draw_highlight_rect(hover.rect, ui, overlay, style);
@@ -395,17 +429,17 @@ impl DragDropState {
         destination
     }
 
-    pub(super) fn resolve_traditional(
-        &mut self,
-        hover: &HoverData,
-        source: DragSource,
-        ui: &Ui,
-        overlay: LayerId,
-        style: &Style,
-        allowed_splits: AllowedSplits,
-        windows_allowed: bool,
-        window_bounds: Rect,
-    ) -> Option<TabDestination> {
+    pub(super) fn resolve_traditional(&mut self, aim: DropAim<'_>) -> Option<TabDestination> {
+        let DropAim {
+            hover,
+            source,
+            ui,
+            overlay,
+            style,
+            allowed_splits,
+            windows_allowed,
+            window_bounds,
+        } = aim;
         // If windows are not allowed, any hover over a window is immediately disallowed.
         if !windows_allowed && hover.dst.surface_address() != SurfaceIndex::main() {
             return None;

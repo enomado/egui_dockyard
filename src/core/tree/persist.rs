@@ -90,7 +90,7 @@ enum NodeOut<'a, Tab> {
         /// A stowed subtree is a decision the user made, not a number derived from the leaves,
         /// so unlike the collapsing counts it is read back. See `RowNode::stowed`.
         stowed: bool,
-        children: Vec<Box<NodeOut<'a, Tab>>>,
+        children: Vec<NodeOut<'a, Tab>>,
     },
 }
 
@@ -121,7 +121,7 @@ fn node_out<Tab>(tree: &Tree<Tab>, id: NodeId) -> NodeOut<'_, Tab> {
             children: row
                 .children()
                 .iter()
-                .map(|&child| Box::new(node_out(tree, child)))
+                .map(|&child| node_out(tree, child))
                 .collect(),
         },
     }
@@ -258,7 +258,7 @@ enum NodeIn<Tab> {
         /// Genuine state, so unlike the collapsing counts it is read rather than recomputed.
         #[serde(default)]
         stowed: bool,
-        children: Vec<Box<NodeIn<Tab>>>,
+        children: Vec<NodeIn<Tab>>,
     },
 
     // The pair form, **tombstones**: written by every build before rows, and on everyone's disk.
@@ -476,11 +476,14 @@ impl<Tab> Tree<Tab> {
             } => {
                 // A tombstone read as what it always meant: two children and one boundary
                 // between them are a row of two.
+                // The two are boxed on the way in — an array of children needs the indirection
+                // where a `Vec` provides it — and unboxed here, because a row's children are a
+                // `Vec`.
                 let [left, right] = children;
                 self.build_row(
                     horizontal,
                     Self::pair_shares(fraction),
-                    vec![left, right],
+                    vec![*left, *right],
                     stowed,
                 )
             }
@@ -504,7 +507,7 @@ impl<Tab> Tree<Tab> {
         &mut self,
         horizontal: bool,
         shares: Vec<f32>,
-        children: Vec<Box<NodeIn<Tab>>>,
+        children: Vec<NodeIn<Tab>>,
         stowed: bool,
     ) -> Option<NodeId> {
         let mut built = Vec::with_capacity(children.len());
@@ -513,7 +516,7 @@ impl<Tab> Tree<Tab> {
         // well name three children and two weights. A missing weight is the one a row of equals
         // would have given; a surplus one is dropped with nothing to attach it to.
         for (index, child) in children.into_iter().enumerate() {
-            if let Some(id) = self.build(*child) {
+            if let Some(id) = self.build(child) {
                 built.push(id);
                 kept.push(shares.get(index).copied().unwrap_or(1.0));
             }

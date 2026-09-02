@@ -507,6 +507,26 @@ struct StripName {
     title: SizedTitle,
 }
 
+/// The strip a naming pass is for: which node it stands for, which way it runs, the room the
+/// arrow left it, and what a click on a name asks the dock for.
+///
+/// The four travel together and only together — a strip is named for one node, in one place, on
+/// behalf of one expansion — and they were four of `strip_names`'s eight arguments, which is a
+/// group that had not been named yet.
+struct StripNaming {
+    /// The collapsed leaf, or the row stowed as a unit, that the strip stands for.
+    path: NodePath,
+    /// `Some` for a side strip, which runs down the screen; `None` for a collapsed tab bar,
+    /// which runs across it. Everything the naming does is written in terms of *along* and
+    /// *across*, and this is which is which.
+    side: Option<SideStrip>,
+    /// What is left of the strip once the arrow has taken its square.
+    rect: Rect,
+    /// What the arrow queues — "come back as you were". A click on a name asks for that *and*
+    /// for the tab it names, so the panel returns showing what was clicked.
+    expand: DockMutation,
+}
+
 impl<Tab> DockArea<'_, Tab> {
     pub(super) fn show_leaf(
         &mut self,
@@ -1429,7 +1449,15 @@ impl<Tab> DockArea<'_, Tab> {
             )
         };
         self.strip_names(
-            ui, path, tab_viewer, fade_style, side, names_rect, on_toggle,
+            ui,
+            tab_viewer,
+            fade_style,
+            StripNaming {
+                path,
+                side,
+                rect: names_rect,
+                expand: on_toggle,
+            },
         );
     }
 
@@ -1450,13 +1478,16 @@ impl<Tab> DockArea<'_, Tab> {
     fn strip_names(
         &mut self,
         ui: &mut Ui,
-        path: NodePath,
         tab_viewer: &mut impl TabViewer<Tab = Tab>,
         fade_style: Option<&Style>,
-        side: Option<SideStrip>,
-        rect: Rect,
-        expand: DockMutation,
+        naming: StripNaming,
     ) {
+        let StripNaming {
+            path,
+            side,
+            rect,
+            expand,
+        } = naming;
         // A strip runs down the screen and a bar runs across it. Everything below is written in
         // terms of *along* and *across* so that the two share one set of arithmetic, and the axis
         // is read from the layout's answer rather than guessed from which side is longer.
@@ -2209,10 +2240,8 @@ impl<Tab> DockArea<'_, Tab> {
         // layout. The tab bar owns its scroll position, but deliberately has no visual
         // scroll widget: wheel input above the tabs is all of the interaction.
         let mut scroll = current;
-        if overflow > 1.0 {
-            if tabbar_response.hovered() || tab_hovered {
-                scroll += ui.input(|i| i.smooth_scroll_delta.y + i.smooth_scroll_delta.x);
-            }
+        if overflow > 1.0 && (tabbar_response.hovered() || tab_hovered) {
+            scroll += ui.input(|i| i.smooth_scroll_delta.y + i.smooth_scroll_delta.x);
         }
 
         // The clamp runs on every frame, not only on a scrolled one: the overflow it clamps

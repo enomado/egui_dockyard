@@ -1100,10 +1100,10 @@ impl<Tab> DockArea<'_, Tab> {
                         pass,
                     );
                 }
-                if response.drag_stopped() {
-                    if state.end_drag(handle_id).is_some_and(|drag| drag.moved) {
-                        self.events.push(DockEvent::LayoutCommitted);
-                    }
+                if response.drag_stopped()
+                    && state.end_drag(handle_id).is_some_and(|drag| drag.moved)
+                {
+                    self.events.push(DockEvent::LayoutCommitted);
                 }
                 if response.dragged() {
                     // Alive this frame, so a stale entry can be told from a live one.

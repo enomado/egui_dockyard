@@ -462,10 +462,12 @@ impl RowNode {
             .0
             .checked_sub(1)
             .map_or(0.0, |before| self.boundary(GapIndex(before)));
-        let hi = self
-            .has_gap(GapIndex(gap.0 + 1))
-            .then(|| self.boundary(GapIndex(gap.0 + 1)))
-            .unwrap_or(1.0);
+        let after = GapIndex(gap.0 + 1);
+        let hi = if self.has_gap(after) {
+            self.boundary(after)
+        } else {
+            1.0
+        };
         (lo, hi)
     }
 

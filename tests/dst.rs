@@ -2922,9 +2922,7 @@ impl Sim {
             Step::MoveWhileHeld { to } => {
                 // Nothing in the hand: a move is then an ordinary hover, which is not what this
                 // step means, so it is skipped like any step that finds nothing to act on.
-                let Some(at) = self.hold.as_ref().map(|hold| hold.at) else {
-                    return None;
-                };
+                let at = self.hold.as_ref().map(|hold| hold.at)?;
                 let target = leaves[to % leaves.len()];
                 let Some(rect) = self.layout().get(target).map(|geometry| geometry.rect) else {
                     self.refused[refused_index(Refused::NoGeometry)] += 1;
@@ -2948,9 +2946,7 @@ impl Sim {
             }
 
             Step::Settle { to } => {
-                let Some(at) = self.hold.as_ref().map(|hold| hold.at) else {
-                    return None;
-                };
+                let at = self.hold.as_ref().map(|hold| hold.at)?;
                 let target = leaves[to % leaves.len()];
                 let Some(rect) = self.layout().get(target).map(|geometry| geometry.rect) else {
                     self.refused[refused_index(Refused::NoGeometry)] += 1;
@@ -2966,9 +2962,7 @@ impl Sim {
             }
 
             Step::Release { aim } => {
-                let Some(hold) = self.hold.clone() else {
-                    return None;
-                };
+                let hold = self.hold.clone()?;
                 let leaf = match self.leaf_under(hold.at) {
                     Ok(leaf) => leaf,
                     Err(refused) => {
@@ -3644,9 +3638,7 @@ impl Sim {
             Step::MoveJunction { by } => {
                 // Nothing in the hand: a move is then an ordinary hover, which is not what this
                 // step means, so it is skipped like any step that finds nothing to act on.
-                let Some(hold) = self.junction_hold.clone() else {
-                    return None;
-                };
+                let hold = self.junction_hold.clone()?;
                 let was = self.boundaries_of(&hold.moves);
                 let focus_before = self.focus_trace();
                 let at = self.carry(hold.at, Vec2::new(f32::from(by[0]), f32::from(by[1])));
@@ -3662,9 +3654,7 @@ impl Sim {
             }
 
             Step::ReleaseJunction => {
-                let Some(hold) = self.junction_hold.take() else {
-                    return None;
-                };
+                let hold = self.junction_hold.take()?;
                 // Read before the release: a handle that is no longer *offered* was not drawn
                 // this frame either, so there is nothing left to see the button come up.
                 //

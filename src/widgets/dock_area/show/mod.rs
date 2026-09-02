@@ -7,7 +7,7 @@ use egui::{
 
 use super::{
     DockAreaResponse, DockMutation,
-    drag_and_drop::{DragSource, HoverData, overlay_layer, register_overlay_layer},
+    drag_and_drop::{DragSource, DropAim, HoverData, overlay_layer, register_overlay_layer},
     events::DockEvent,
     state::{DragSubject, State},
     tab_removal::TabRemoval,
@@ -430,7 +430,7 @@ impl<Tab> DockArea<'_, Tab> {
                         self.events.push(DockEvent::LayoutCommitted);
                     } else {
                         let leaf = &mut self.dock_state.leaf_mut(path.node_path()).unwrap();
-                        match tab_viewer.on_close(&mut leaf[path.tab]) {
+                        match tab_viewer.on_close(&leaf[path.tab]) {
                             OnCloseResponse::Close => {
                                 self.dock_state.remove_tab_choosing(path, successor);
                                 self.events.push(DockEvent::LayoutCommitted);
@@ -596,27 +596,21 @@ impl<Tab> DockArea<'_, Tab> {
         // the other foreground areas is taken before any menu the application opens later. See
         // `register_overlay_layer`.
         let overlay = overlay_layer(self.id);
+        // What a drop would mean this frame, settled once: the two overlays differ in what they
+        // draw, not in what they are told.
+        let aim = DropAim {
+            hover: &hover,
+            source: carried,
+            ui,
+            overlay,
+            style,
+            allowed_splits,
+            windows_allowed: allowed_in_window,
+            window_bounds,
+        };
         match (style.overlay.overlay_type, hover.tab.is_some()) {
-            (OverlayType::HighlightedAreas, _) | (_, true) => drag_state.resolve_traditional(
-                &hover,
-                carried,
-                ui,
-                overlay,
-                style,
-                allowed_splits,
-                allowed_in_window,
-                window_bounds,
-            ),
-            (OverlayType::Widgets, false) => drag_state.resolve_icon_based(
-                &hover,
-                carried,
-                ui,
-                overlay,
-                style,
-                allowed_splits,
-                allowed_in_window,
-                window_bounds,
-            ),
+            (OverlayType::HighlightedAreas, _) | (_, true) => drag_state.resolve_traditional(aim),
+            (OverlayType::Widgets, false) => drag_state.resolve_icon_based(aim),
         }
     }
 

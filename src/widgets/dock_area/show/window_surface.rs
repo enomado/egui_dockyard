@@ -154,7 +154,7 @@ impl<Tab> DockArea<'_, Tab> {
             .get_window_state(surf_index)
             .unwrap()
             .is_minimized();
-        if minimized {
+        let shown = if minimized {
             egui_window
                 .resizable([true, false])
                 .max_height(minimized_height)
@@ -184,12 +184,13 @@ impl<Tab> DockArea<'_, Tab> {
             } else {
                 self.render_nodes(ui, tab_viewer, state, surf_index, fade_style);
             }
-        })
+        });
+
         // `None` only for a window that is closed; this one has no `open` flag to close it with.
-        .map(|inner| {
+        if let Some(inner) = shown {
             self.follow_window_move(&inner.response, surf_index, state);
             self.follow_window_resize(ui.ctx(), id, surf_index, state);
-        });
+        }
 
         if !open {
             self.mutations

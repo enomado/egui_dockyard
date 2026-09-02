@@ -1,11 +1,9 @@
 use std::collections::VecDeque;
 
-use duplicate::duplicate;
 use egui::{
     Context, CornerRadius, CursorIcon, EventFilter, Key, Pos2, Rect, Sense, StrokeKind, Ui, Vec2,
     epaint::MarginF32,
 };
-use paste::paste;
 
 use super::{
     DockAreaResponse, DockMutation,
@@ -1028,8 +1026,9 @@ impl<Tab> DockArea<'_, Tab> {
             .expect("a parent node must have been laid out before its children");
         let rect = split_rect(parent_rect, pixels_per_point);
 
-        // The row's axis as *functions*, not as the tokens `duplicate!` needs in `show_divider`:
-        // nothing below names a method by its axis, so one body serves both.
+        // The row's axis as a *value*, read once: nothing below names a method by its axis, so
+        // one body serves both — the same shape `show_divider` was rewritten into once the axis
+        // stopped being the variant of the node.
         let (lo, hi, size) = if horizontal {
             (rect.min.x, rect.max.x, rect.width())
         } else {
@@ -1350,172 +1349,186 @@ impl<Tab> DockArea<'_, Tab> {
         // see `DragInFlight::pass`.
         let pass = ui.ctx().cumulative_pass_nr();
 
-        duplicate! {
-            [
-                orientation   is_orientation   dim_point;
-                [Horizontal]  [is_horizontal]  [x];
-                [Vertical]    [is_vertical]    [y];
-            ]
-            if let Node::Row(row) = &self.dock_state[path.surface][path.node]
-                && row.is_orientation()
-            {
-                // Which axis this row divides, and nothing else is read off the node: the
-                // borrow of the tree ends here, because every write below goes through
-                // `nudge_boundary`, which takes `&mut self`. What the gesture answers to — the
-                // band this frame's geometry can honour — lives there too, so the divider drawn,
-                // the rectangle it is grabbed by and the ratio a drag writes all name one line
-                // (see `SeparatorBand`).
-                let separator = drawn;
+        if let Node::Row(row) = &self.dock_state[path.surface][path.node] {
+            // Which axis this row divides, and nothing else is read off the node: the
+            // borrow of the tree ends here, because every write below goes through
+            // `nudge_boundary`, which takes `&mut self`. What the gesture answers to — the
+            // band this frame's geometry can honour — lives there too, so the divider drawn,
+            // the rectangle it is grabbed by and the ratio a drag writes all name one line
+            // (see `SeparatorBand`).
+            //
+            // One body, both axes. This was a `duplicate!` block compiling the whole of it
+            // twice — once per axis — from the days when the axis was the *variant* of the node
+            // and could only be matched on. It is a field of the row since 30.08 (see
+            // `RowNode::horizontal`), so it is read here like any other value, and the two
+            // things that genuinely differ say so where they are used: the cursor, and which
+            // component of a `Vec2` runs along the row.
+            let horizontal = row.is_horizontal();
+            // The component of an offset that runs along the row — `x` where the children sit
+            // side by side, `y` where they are stacked. Indexed rather than named, which is
+            // what lets one body serve both.
+            let along = if horizontal { 0 } else { 1 };
 
-                let mut expand = Vec2::ZERO;
-                expand.dim_point += separator_style.extra_interact_width / 2.0;
-                let interact_rect = separator.expand2(expand);
+            let separator = drawn;
 
-                // The gap is part of the id: a row of three has two of these widgets, and a
-                // press has to know which of them it holds.
-                let resize_id = ui.id().with((path.node, gap.gap, "separator"));
-                let response = ui.interact(interact_rect, resize_id, Sense::click_and_drag())
-                    .on_hover_and_drag_cursor(paste!{ CursorIcon::[<Resize orientation>]});
+            let mut expand = Vec2::ZERO;
+            expand[along] += separator_style.extra_interact_width / 2.0;
+            let interact_rect = separator.expand2(expand);
 
-                let should_respond_to_arrow_keys = ui.input(|i| i.modifiers.command || i.modifiers.shift);
+            // The gap is part of the id: a row of three has two of these widgets, and a
+            // press has to know which of them it holds.
+            let resize_id = ui.id().with((path.node, gap.gap, "separator"));
+            let response = ui
+                .interact(interact_rect, resize_id, Sense::click_and_drag())
+                .on_hover_and_drag_cursor(if horizontal {
+                    CursorIcon::ResizeHorizontal
+                } else {
+                    CursorIcon::ResizeVertical
+                });
 
-                if response.has_focus() {
-                    // Prevent the default behaviour of removing focus from the separators when the
-                    // arrow keys are pressed
-                    ui.memory_mut(|m| m.set_focus_lock_filter(response.id, EventFilter {
-                        horizontal_arrows: should_respond_to_arrow_keys,
-                        vertical_arrows: should_respond_to_arrow_keys,
-                        tab: false,
-                        escape: false
-                    }));
-                }
+            let should_respond_to_arrow_keys = ui.input(|i| i.modifiers.command || i.modifiers.shift);
 
-                let arrow_key_offset = if response.has_focus() && should_respond_to_arrow_keys {
-                    if ui.input(|i| i.key_pressed(Key::ArrowUp)) {
-                        Some(egui::vec2(0., -16.))
-                    } else if ui.input(|i| i.key_pressed(Key::ArrowDown)) {
-                        Some(egui::vec2(0., 16.))
-                    } else if ui.input(|i| i.key_pressed(Key::ArrowLeft)) {
-                        Some(egui::vec2(-16., 0.))
-                    } else if ui.input(|i| i.key_pressed(Key::ArrowRight)) {
-                        Some(egui::vec2(16., 0.))
-                    } else {
-                        None
-                    }
+            if response.has_focus() {
+                // Prevent the default behaviour of removing focus from the separators when the
+                // arrow keys are pressed
+                ui.memory_mut(|m| {
+                    m.set_focus_lock_filter(
+                        response.id,
+                        EventFilter {
+                            horizontal_arrows: should_respond_to_arrow_keys,
+                            vertical_arrows: should_respond_to_arrow_keys,
+                            tab: false,
+                            escape: false,
+                        },
+                    )
+                });
+            }
+
+            let arrow_key_offset = if response.has_focus() && should_respond_to_arrow_keys {
+                if ui.input(|i| i.key_pressed(Key::ArrowUp)) {
+                    Some(egui::vec2(0., -16.))
+                } else if ui.input(|i| i.key_pressed(Key::ArrowDown)) {
+                    Some(egui::vec2(0., 16.))
+                } else if ui.input(|i| i.key_pressed(Key::ArrowLeft)) {
+                    Some(egui::vec2(-16., 0.))
+                } else if ui.input(|i| i.key_pressed(Key::ArrowRight)) {
+                    Some(egui::vec2(16., 0.))
                 } else {
                     None
-                };
-
-                let color = if response.dragged() {
-                    separator_style.color_dragged
-                } else if response.hovered() || response.has_focus() {
-                    separator_style.color_hovered
-                } else {
-                    separator_style.color_idle
-                };
-
-                ui.painter().rect_filled(separator, CornerRadius::ZERO, color);
-
-                // Update 'fraction' interaction after drawing separator,
-                // otherwise it may overlap on other separator / bodies when
-                // shrunk fast.
-                //
-                // Mouse drag is *continuous*: `drag_delta()` is non-zero on
-                // every frame the user holds and moves the separator, and
-                // `split.fraction` updates live so the UI tracks the cursor.
-                // Emitting `LayoutCommitted` per frame here would force
-                // consumers to dedupe an "interaction in progress" stream
-                // themselves; we emit `SeparatorDragging` instead and let
-                // `drag_stopped()` below produce a single `LayoutCommitted`
-                // per completed drag.
-                //
-                // Arrow-key nudges (`arrow_key_offset.is_some()`) are atomic
-                // per keypress, so each one is a finalised event right away.
-                //
-                // What the hand holds is named once, in the one place that
-                // remembers it (`State::begin_drag`), and the commit gate below
-                // reads that gesture's `moved` — see `DragInFlight::moved` for
-                // what it is for and why it is a flag rather than the starting
-                // ratio.
-                if response.drag_started() {
-                    state.begin_drag(
-                        response.id,
-                        DragSubject::Separator { gap },
-                        // egui reports where the press landed on the frame it decides a drag —
-                        // it is what `drag_started()` is derived from.
-                        response
-                            .interact_pointer_pos()
-                            .expect("a drag that started was pressed somewhere"),
-                        pass,
-                    );
                 }
+            } else {
+                None
+            };
 
-                // `drag_delta()` is zero on any frame the separator is not being dragged, so a
-                // non-zero delta *is* the gesture; arrow nudges are never zero either. What the
-                // delta is allowed to do to the stored ratio — and when it is allowed to do
-                // nothing at all — is `nudge_boundary`'s business, shared with the junction
-                // handles, which move two or three of these at once.
-                let is_arrow = arrow_key_offset.is_some();
-                let delta = arrow_key_offset.unwrap_or(response.drag_delta()).dim_point;
-                // What the hand is holding says who pays for this drag — the divider row of
-                // `docs/MODIFIERS.md`. A keyboard nudge is `Pair` whatever is held, and not by
-                // taste: taking focus at all costs a modifier (`should_respond_to_arrow_keys`
-                // above), so Ctrl+arrow has already spent its Ctrl on steering this divider.
-                let behavior = if is_arrow {
-                    SepBehavior::Pair
-                } else {
-                    SepBehavior::from_modifiers(ui.input(|i| i.modifiers))
-                };
-                if self.drag_boundary(gap, pixels_per_point, separator_style.extra, delta, &behavior) {
-                    if is_arrow {
-                        self.events.push(DockEvent::LayoutCommitted);
-                    } else {
-                        // The drag wrote something, so the gesture holding this divider is the
-                        // one that owes a commit on release. A keyboard nudge is not a gesture
-                        // and holds nothing — it commits on the spot, above.
-                        state.mark_drag_moved();
-                        self.events.push(DockEvent::SeparatorDragging);
-                    }
-                }
+            let color = if response.dragged() {
+                separator_style.color_dragged
+            } else if response.hovered() || response.has_focus() {
+                separator_style.color_hovered
+            } else {
+                separator_style.color_idle
+            };
 
-                if response.dragged() {
-                    // Alive this frame, so a stale entry can be told from a live one — the same
-                    // reporting a junction handle does, for the same reason.
-                    state.keep_drag_alive(response.id, pass);
-                }
+            ui.painter().rect_filled(separator, CornerRadius::ZERO, color);
 
-                // egui only flips `drag_stopped` after `drag_started`, so a
-                // simple click without motion does not reach this branch. What
-                // decides the commit is whether the gesture ever moved
-                // anything: a grab-and-release with no effective motion would
-                // otherwise emit a commit event with no mutation behind it,
-                // which breaks snapshot-diffing consumers.
-                if response.drag_stopped()
-                    && state.end_drag(response.id).is_some_and(|drag| drag.moved)
-                {
+            // Update 'fraction' interaction after drawing separator,
+            // otherwise it may overlap on other separator / bodies when
+            // shrunk fast.
+            //
+            // Mouse drag is *continuous*: `drag_delta()` is non-zero on
+            // every frame the user holds and moves the separator, and
+            // `split.fraction` updates live so the UI tracks the cursor.
+            // Emitting `LayoutCommitted` per frame here would force
+            // consumers to dedupe an "interaction in progress" stream
+            // themselves; we emit `SeparatorDragging` instead and let
+            // `drag_stopped()` below produce a single `LayoutCommitted`
+            // per completed drag.
+            //
+            // Arrow-key nudges (`arrow_key_offset.is_some()`) are atomic
+            // per keypress, so each one is a finalised event right away.
+            //
+            // What the hand holds is named once, in the one place that
+            // remembers it (`State::begin_drag`), and the commit gate below
+            // reads that gesture's `moved` — see `DragInFlight::moved` for
+            // what it is for and why it is a flag rather than the starting
+            // ratio.
+            if response.drag_started() {
+                state.begin_drag(
+                    response.id,
+                    DragSubject::Separator { gap },
+                    // egui reports where the press landed on the frame it decides a drag —
+                    // it is what `drag_started()` is derived from.
+                    response
+                        .interact_pointer_pos()
+                        .expect("a drag that started was pressed somewhere"),
+                    pass,
+                );
+            }
+
+            // `drag_delta()` is zero on any frame the separator is not being dragged, so a
+            // non-zero delta *is* the gesture; arrow nudges are never zero either. What the
+            // delta is allowed to do to the stored ratio — and when it is allowed to do
+            // nothing at all — is `nudge_boundary`'s business, shared with the junction
+            // handles, which move two or three of these at once.
+            let is_arrow = arrow_key_offset.is_some();
+            let delta = arrow_key_offset.unwrap_or(response.drag_delta())[along];
+            // What the hand is holding says who pays for this drag — the divider row of
+            // `docs/MODIFIERS.md`. A keyboard nudge is `Pair` whatever is held, and not by
+            // taste: taking focus at all costs a modifier (`should_respond_to_arrow_keys`
+            // above), so Ctrl+arrow has already spent its Ctrl on steering this divider.
+            let behavior = if is_arrow {
+                SepBehavior::Pair
+            } else {
+                SepBehavior::from_modifiers(ui.input(|i| i.modifiers))
+            };
+            if self.drag_boundary(gap, pixels_per_point, separator_style.extra, delta, &behavior) {
+                if is_arrow {
                     self.events.push(DockEvent::LayoutCommitted);
+                } else {
+                    // The drag wrote something, so the gesture holding this divider is the
+                    // one that owes a commit on release. A keyboard nudge is not a gesture
+                    // and holds nothing — it commits on the spot, above.
+                    state.mark_drag_moved();
+                    self.events.push(DockEvent::SeparatorDragging);
                 }
+            }
 
-                // The middle of the room *this divider* has, which is `0.5` on a pair and is not
-                // on anything longer. Written as `0.5` flat until stage 4 of
-                // `docs/PLAN_a_drag_chooses_who_pays_for_it.md`, where the sweep — once it could
-                // build a row of three — caught a double-click writing a boundary clean past its
-                // neighbour: the divider between the second and third panels was sent to the
-                // middle of the whole row, which is behind the first one.
-                //
-                // A line drawn beside a strip is left out: the middle of *its* room is the
-                // middle between two boundaries that both lie on the same strip, and writing it
-                // moves nothing on screen while editing the width the hidden panel is keeping.
-                // What a double-click there should mean — the middle of the two open children's
-                // shared room, presumably — is a decision and not a derivation, so it waits for
-                // one instead of being guessed at here.
-                if response.double_clicked() && !spans_a_strip {
-                    let centre = self.gap_centre(gap);
-                    if self.boundary_at(gap) != centre {
-                        self.mutations
-                            .push(DockMutation::SetBoundary { gap, at: centre });
-                        self.events.push(DockEvent::LayoutCommitted);
-                    }
+            if response.dragged() {
+                // Alive this frame, so a stale entry can be told from a live one — the same
+                // reporting a junction handle does, for the same reason.
+                state.keep_drag_alive(response.id, pass);
+            }
+
+            // egui only flips `drag_stopped` after `drag_started`, so a
+            // simple click without motion does not reach this branch. What
+            // decides the commit is whether the gesture ever moved
+            // anything: a grab-and-release with no effective motion would
+            // otherwise emit a commit event with no mutation behind it,
+            // which breaks snapshot-diffing consumers.
+            if response.drag_stopped()
+                && state.end_drag(response.id).is_some_and(|drag| drag.moved)
+            {
+                self.events.push(DockEvent::LayoutCommitted);
+            }
+
+            // The middle of the room *this divider* has, which is `0.5` on a pair and is not
+            // on anything longer. Written as `0.5` flat until stage 4 of
+            // `docs/PLAN_a_drag_chooses_who_pays_for_it.md`, where the sweep — once it could
+            // build a row of three — caught a double-click writing a boundary clean past its
+            // neighbour: the divider between the second and third panels was sent to the
+            // middle of the whole row, which is behind the first one.
+            //
+            // A line drawn beside a strip is left out: the middle of *its* room is the
+            // middle between two boundaries that both lie on the same strip, and writing it
+            // moves nothing on screen while editing the width the hidden panel is keeping.
+            // What a double-click there should mean — the middle of the two open children's
+            // shared room, presumably — is a decision and not a derivation, so it waits for
+            // one instead of being guessed at here.
+            if response.double_clicked() && !spans_a_strip {
+                let centre = self.gap_centre(gap);
+                if self.boundary_at(gap) != centre {
+                    self.mutations
+                        .push(DockMutation::SetBoundary { gap, at: centre });
+                    self.events.push(DockEvent::LayoutCommitted);
                 }
             }
         }

@@ -30,8 +30,6 @@ serde = { version = "1", optional = true, features = ["derive"] }
 # Only for `core::testkit`: a foreign trait cannot be derived on `Op` from the fuzzer crate.
 arbitrary = { version = "1", optional = true, features = ["derive"] }
 
-duplicate = "2.0"
-paste = "1.0"
 thiserror = "2.0.20"
 
 [dev-dependencies]

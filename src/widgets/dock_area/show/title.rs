@@ -14,8 +14,8 @@ use std::f32::consts::FRAC_PI_2;
 use std::sync::Arc;
 
 use egui::{
-    Align2, Atoms, Color32, Galley, Mesh, Painter, Rect, Response, Shape, SizedAtom, SizedAtomKind,
-    TextStyle, TextWrapMode, Ui, UiBuilder, epaint::TextShape, pos2, vec2,
+    Align2, AtomKind, Atoms, Color32, Galley, Mesh, Painter, Rect, Response, Shape, SizedAtom,
+    SizedAtomKind, TextStyle, TextWrapMode, Ui, UiBuilder, epaint::TextShape, pos2, vec2,
 };
 
 use crate::core::fit::STRIP_NAME_PADDING;
@@ -85,18 +85,43 @@ fn atom_breadth(atom: &SizedAtom<'_>, vertical: bool) -> f32 {
 /// *seen* is [`crate::core::fit::fit_strip_names`]'s or [`crate::core::fit::fit_tab_widths`]'s
 /// answer, not the text layout's.
 ///
-/// An image is held to the height of the text beside it, so that a title of a name and an icon is
-/// one line tall whatever the icon's own resolution happens to be. It is a default and not a
-/// rule: an atom given a size of its own ([`egui::AtomExt::atom_size`]) keeps it.
+/// An image is held to the **type size** of the text beside it — the em, not the line box — so
+/// that an icon reads as one of the letters rather than as something standing behind them. It is a
+/// default and not a rule: an atom given a size of its own ([`egui::AtomExt::atom_size`]) keeps it.
+///
+/// # Why not the line height, which is what a button does
+///
+/// [`egui::Button`] limits an icon to `atom_max_height_font_size`, and that helper — the name
+/// notwithstanding — hands back the *row height*. It is the right answer there and the wrong one
+/// here, and the difference is that a button grows to fit its contents while **a tab bar is a
+/// fixed [`crate::TabBarStyle::height`]**. At the typography this crate is used with (a 14 pt
+/// button face laying out a ~19 pt line inside a 24 pt bar) an icon given the whole line box
+/// leaves two and a half points of tab above and below it, against the seven the letters leave:
+/// the icon swells to nearly the height of its own tab and reads as bursting out of it, while the
+/// name beside it sits calmly. An em — the size the letters were asked for — puts the two on the
+/// same optical footing whatever the tab bar is styled to.
+///
+/// Only pictures are measured this way. Text is laid out against the width alone (the height of
+/// the room it is offered does not enter into a galley), and a nested [`egui::AtomLayout`] is a
+/// widget of its own that was never promised a particular height.
 pub(super) fn measure_title(ui: &Ui, title: Atoms<'static>) -> SizedTitle {
     let line = ui.text_style_height(&TextStyle::Button);
+    let em = TextStyle::Button.resolve(ui.style()).size;
     SizedTitle {
         atoms: title
             .into_iter()
             .map(|atom| {
+                // A picture that was given no size of its own is the one thing here that grows to
+                // whatever room it is offered, so it is the one thing the em is offered to. An
+                // atom that carries its own size ignores the offer anyway; the match says so
+                // rather than leaving it to be re-derived from egui's sizing rules.
+                let room = match (&atom.kind, atom.size) {
+                    (AtomKind::Image(_), None) => em,
+                    _ => line,
+                };
                 atom.into_sized(
                     ui,
-                    vec2(f32::INFINITY, line),
+                    vec2(f32::INFINITY, room),
                     Some(TextWrapMode::Extend),
                     TextStyle::Button.into(),
                 )

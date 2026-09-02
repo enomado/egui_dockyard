@@ -62,6 +62,11 @@ fn long_name(index: usize) -> String {
     format!("Panel number {index} with a name of some length")
 }
 
+/// The natural size of an icon that has none of its own — a square the size an icon set is usually
+/// drawn at, and taller than either the line or the em, so that the room it is offered is what
+/// decides how big it lands.
+const DRAWN_AT: Vec2 = Vec2::splat(24.0);
+
 /// Names its tabs, with an icon in front of each one or without, so that the same scene can be
 /// asked both questions and the difference between the answers is the icon itself.
 #[derive(Clone)]
@@ -69,6 +74,14 @@ struct Viewer {
     icons: bool,
     /// A colour the consumer asked for, rather than the default the dock is free to replace.
     tint: Option<Color32>,
+    /// An icon that takes the room it is offered, the way a *loaded* one does.
+    ///
+    /// [`Image::from_texture`] is [`egui::ImageFit::Exact`] — egui assumes a consumer handing over
+    /// a sized texture means that size — so the icons above are the one kind that never asks how
+    /// much room it has. A set loaded from bytes or a uri (which is every real icon set, ours
+    /// included) is `Fraction` and scales to the offer, and that is the kind whose size the dock
+    /// decides. `fit_to_fraction` puts a texture on those terms without needing a loader.
+    fitting: bool,
 }
 
 impl TabViewer for Viewer {
@@ -76,9 +89,15 @@ impl TabViewer for Viewer {
 
     fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> {
         if self.icons {
+            let base = if self.fitting {
+                Image::from_texture(SizedTexture::new(ICON, DRAWN_AT))
+                    .fit_to_fraction(Vec2::splat(1.0))
+            } else {
+                icon()
+            };
             let icon = match self.tint {
-                Some(tint) => icon().tint(tint),
-                None => icon(),
+                Some(tint) => base.tint(tint),
+                None => base,
             };
             Atoms::new((icon, tab.clone()))
         } else {
@@ -189,7 +208,16 @@ fn painted_icons(ctx: &Context) -> Vec<PaintedIcon> {
 /// A few quiet frames, answering with what the last one painted: the geometry map has to settle
 /// before the bar is sharing out a width it will keep.
 fn frames(ctx: &Context, state: &mut DockState<String>, style: &Style, icons: bool) -> Frame {
-    frames_with(ctx, state, style, &Viewer { icons, tint: None })
+    frames_with(
+        ctx,
+        state,
+        style,
+        &Viewer {
+            icons,
+            tint: None,
+            fitting: false,
+        },
+    )
 }
 
 /// The same scene, driven by a viewer the caller built — used where what is being asked about is
@@ -458,6 +486,68 @@ fn an_icon_takes_the_colour_of_its_name() {
     );
 }
 
+/// An icon that has no size of its own is held to the **em** — the type size of the name beside
+/// it — and not to the line box that name is laid out in.
+///
+/// # Why this one needs an icon of a different kind
+///
+/// Every scene above hands the dock an [`Image::from_texture`], which egui reads as
+/// [`egui::ImageFit::Exact`]: it is the one kind of image that never asks how much room it has, so
+/// the six tests written before this one could not see the sizing rule at all — they would go on
+/// passing whatever the dock offered. Real icon sets are loaded from bytes or a uri, which is
+/// `Fraction`, and *that* kind takes the room it is given. This scene puts a texture on those
+/// terms so the property can be stated without a loader.
+///
+/// The em rather than the line is what keeps an icon from swelling to the height of its own tab: a
+/// tab bar is a fixed height while the line box is most of it, so an icon given the line lands
+/// with a couple of points of tab above and below it while the letters beside it have seven.
+#[test]
+fn an_icon_of_its_own_size_is_held_to_the_em() {
+    let style = style();
+    let (mut state, leaf) = a_leaf_of(2);
+
+    let ctx = Context::default();
+    let painted = frames_with(
+        &ctx,
+        &mut state,
+        &style,
+        &Viewer {
+            icons: true,
+            tint: None,
+            fitting: true,
+        },
+    );
+    let bar = bar_of(&ctx, leaf, &style);
+
+    let font = egui::TextStyle::Button.resolve(&egui::Style::default());
+    let em = font.size;
+    let line = ctx.fonts_mut(|fonts| fonts.row_height(&font));
+
+    let icons = icons_in(&painted.icons, bar);
+    assert_eq!(icons.len(), 2, "two tabs, two icons: {icons:?}");
+    for icon in &icons {
+        assert!(
+            (icon.rect.height() - em).abs() <= TOLERANCE,
+            "an icon drawn at {DRAWN_AT:?} should come down to the em ({em}), not to the line \
+             ({line}) and not to its own size: got {:?}",
+            icon.rect.size()
+        );
+        // Square in, square out: an icon held by its height must not be stretched by the width it
+        // was offered, which is the whole bar.
+        assert!(
+            (icon.rect.width() - icon.rect.height()).abs() <= TOLERANCE,
+            "a square icon should stay square, got {:?}",
+            icon.rect.size()
+        );
+    }
+
+    assert!(
+        line > em + 1.0,
+        "this scene is only worth running while the line box ({line}) is taller than the em \
+         ({em}) — otherwise the rule it states and the one it replaced are the same number"
+    );
+}
+
 /// A tint the consumer asked for is left alone.
 ///
 /// The rule above replaces the *default* tint, which is what "this icon has no colour of its own"
@@ -478,6 +568,7 @@ fn an_explicit_tint_is_left_alone() {
         &Viewer {
             icons: true,
             tint: Some(asked_for),
+            fitting: false,
         },
     );
     let bar = bar_of(&ctx, leaf, &style);

@@ -14,6 +14,7 @@ Replace `<example_name>` with the name of the example file without the `.rs` ext
 
 - [`hello`](hello.rs): A comprehensive demo of `egui_dockyard` features, including a style editor and various dock configurations.
 - [`simple`](simple.rs): A minimal example showing how to set up a basic dock with a few tabs.
+- [`tab_icons`](tab_icons.rs): Titles that carry an icon next to (or instead of) the name, and what a squeezed tab bar keeps.
 - [`tab_add`](tab_add.rs): Shows how to implement a custom "add tab" button and handle it in the `update` loop.
 - [`tab_add_popup`](tab_add_popup.rs): Demonstrates how to use a popup menu for adding different types of tabs.
 - [`save_load_dock_state`](save_load_dock_state.rs): Shows how to persist the dock layout to a JSON file and load it back.

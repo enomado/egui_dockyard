@@ -68,6 +68,12 @@ the cursor with a `match`.
 **DoD.** `duplicate` and `paste` are gone from `[dependencies]` — two of the crate's four non-egui
 dependencies. `cargo clippy --lib` has no new warnings. No test file is edited.
 
+**Done, `818efe9`.** The axis is read off the row into a `bool`; the cursor is chosen with an `if`
+(a `match` on a `bool` is what `clippy::match_bool` exists to refuse), and the `Vec2` component
+along the row is indexed. Warning count unchanged — 11 under `--all-features`, which is the 8 the
+table above records plus the three `serde`-only ones in `persist.rs` that a featureless run never
+compiles.
+
 ### 2. Clippy at zero
 
 Two halves, because they are two different jobs.
@@ -89,6 +95,13 @@ function.
 warning is removed here; if one is genuinely wrong, it gets an `#[allow]` **with a comment saying
 why**, and the plan records which.
 
+**Done, `5744c44`.** Seventeen warnings, none of them wrong, so no `#[allow]` was added — the nine
+already in the crate (eight of them `too_many_arguments` in the drawing) are untouched. The two
+clumps got names: `DropAim` (what a drop would mean this frame — the eight arguments both overlay
+resolvers took in the same order at the same two call sites, now built once by the caller) and
+`StripNaming` (which strip is being named, where, and what a click on a name asks for). Both are
+destructured at the top of the function, so every body reads the names it always read.
+
 ### 3. The junction's tests move to where the crate keeps tests
 
 `junction.rs` is 71% test code, in a repository whose convention is one file per claim in
@@ -105,6 +118,32 @@ The split is not "move it all": the inline tests reach into `Junctions`, `Band`,
 **DoD.** `junction.rs` is under 2000 lines. Every moved test keeps its name and its body. `ls
 tests/ | wc -l` grows by what moved. No test is edited beyond its `use` lines.
 
+**Blocked, and the reason is worth more than the stage.** The split above assumes the two kinds of
+test differ in what they *assert*. They do not — they differ in nothing, because **aiming at a
+junction is itself private**. Every behavioural test finds the handle it is about to click through
+one of four helpers — `junctions_on`, `toggle_centers`, `toggle_center`, `press_toggle` — and all
+four build a `DockArea`, write its `layout` field, and call `detect_junctions`, which is a private
+method returning the private `Junctions`. Counted: of the 31 tests in the file, **one**
+(`dragging_one_inner_separator_does_not_move_the_other`) aims by leaf rectangles alone and could
+leave today; the other 30 cannot be moved without editing how they aim, which this stage's own DoD
+forbids. `junction.rs` would lose about 35 lines of its 4223.
+
+So the tests are not inline out of habit. They are inline because the crate has no way to say
+"where is the handle" from outside, and three ways out — none of them a tidy-up, all three Стас's
+call:
+
+1. **Leave them.** The file stays large and the stage becomes "there is nothing here to move",
+   which is at least true and now written down.
+2. **Move the module, not the tests** — `#[cfg(test)] mod tests;` beside `junction.rs`, its 2997
+   lines in `junction/tests.rs`. Nothing is edited, private access is kept, the file falls to
+   ~1230 lines. It satisfies the *measurement* in the DoD and none of its intent: the tests are no
+   closer to `tests/`, they are one file over.
+3. **Publish the aiming.** The crate already has a `testkit` feature for exactly this shape of
+   problem ("the vocabulary of dock operations the property tests drive the model with", for
+   harnesses outside this crate). A junction locator behind it would let ~20 claims move out as
+   the stage wanted — and would make "where the dock offers a handle" part of the crate's
+   published surface, which is a design decision and not a refactor.
+
 ### 4. Every exported name has one path
 
 [`lib.rs`](../src/lib.rs) re-exports four modules with a glob (`pub use crate::core::*`,
@@ -120,6 +159,15 @@ what changes is that adding a public type no longer exports it by accident.
 **DoD.** No `pub use ...::*` in `lib.rs`. `cargo doc` builds. The application's workspace checks
 green with no import edited.
 
+**Done, `302b545`** — with the last of those three **owed**, and not for lack of trying: the
+application depends on this crate **by git**, not by path
+(`egui_dock = { git = "…/egui_dockyard", package = "egui_dockyard" }`), so its workspace cannot see
+an unpushed commit at all. What was checked instead: every name the application imports, gathered
+from its tree, is in the list; `cargo doc` builds with exactly the 27 warnings it built with
+before (measured both ways round, by reverting the change and rebuilding); the crate's own 30
+integration tests, its doctests and its examples import through the same front door and compile.
+The real check is a push away and belongs to whoever makes it.
+
 ### 5. The deprecated method goes, and `utils` stops being public
 
 * `TabViewer::closeable` has been deprecated since 0.19 in favour of `is_closeable`; nothing in
@@ -131,6 +179,12 @@ green with no import edited.
 
 **DoD.** `cargo check --all-targets` green here and in the application. `CHANGELOG` gains a
 breaking-change line for the removal.
+
+**Done, `3304ada`**, with the application's half owed for the reason stage 4 gives. Six functions
+went `pub(crate)`, not the four named above: `clip_to` and `rect_stroke_box` are the same case —
+`pub` in a private module — and leaving them would have left the heading untrue of the file. They
+are missing from the list because it was written from what `missing_docs` would have caught, and
+those two carry doc comments.
 
 ### 6. The arithmetic under the drawing moves to where it can be judged without a `Ui`
 
@@ -192,8 +246,8 @@ entry. `git log --since=2026-08-01 --format=%s` has no feature-level commit with
 
 * [`ORIGIN.md`](../ORIGIN.md), lines 3–4, still call the project `egui_dock`.
 * `docs/PLAN_a_side_can_be_stowed.md:147` and
-  `docs/PLAN_a_collapsed_leaf_can_hide_sideways.md:114` carry a hard-coded local path
-  (`/home/sc/t/egui_dock`) into a public repository.
+  `docs/PLAN_a_collapsed_leaf_can_hide_sideways.md:114` carry a hard-coded path from the author's
+  machine into a public repository.
 * README and `examples/README.md` — **done, `4ec3783`**: the README now describes the crate this
   is rather than the one it forked from, the crates.io and docs.rs badges are gone (the name is
   not published — the API answers "crate does not exist", so the quick start names the git
@@ -202,6 +256,13 @@ entry. `git log --since=2026-08-01 --format=%s` has no feature-level commit with
 **DoD.** No occurrence of a local absolute path in `docs/` or the repository root. No occurrence
 of `egui_dock` outside the two sentences in `ORIGIN.md` and `README.md` that are *about* the
 fork's origin.
+
+**Done.** The `cd` line went rather than being made relative — both blocks are commands to run in
+the repository the document lives in. `ORIGIN.md`'s first sentence names the crate; its second
+still says what it grew out of, which is the sentence the DoD spares. One occurrence is left on
+purpose, in decision 2 above: `egui_dock::DockState` there is the **alias the application imports
+under** (`egui_dock = { package = "egui_dockyard" }` in its manifest), a fact about the consumer
+rather than a name for this crate.
 
 ## Verification
 

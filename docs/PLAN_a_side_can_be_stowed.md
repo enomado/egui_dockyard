@@ -144,7 +144,6 @@ now says "collapsed but *not stowed*" and explains which half it is.
 ## Verification
 
 ```
-cd /home/sc/t/egui_dock
 cargo test --all-features        # 25 binaries, 244 tests
 ```
 

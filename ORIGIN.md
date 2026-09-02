@@ -1,6 +1,6 @@
 # Project origin and goals
 
-`egui_dock` is an independent repository providing a docking system for `egui`.
+`egui_dockyard` is an independent repository providing a docking system for `egui`.
 It grew out of the `egui_dock` library originally created by `lain-dono` and
 developed by the community. It preserves compatibility with the `egui`
 ecosystem while maintaining its own implementation, tests, and documentation.

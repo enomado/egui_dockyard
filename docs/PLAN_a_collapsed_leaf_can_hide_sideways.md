@@ -111,7 +111,6 @@ change: the counter bookkeeping does not move.
 ## Verification
 
 ```
-cd /home/sc/t/egui_dock
 cargo test --test a_collapsed_leaf_can_hide_sideways
 cargo test --test a_collapsed_leaf_is_one_row        # the old decision, intact
 cargo test --lib                                     # the counter proptests

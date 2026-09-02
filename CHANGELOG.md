@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Breaking changes
+
+- **`TabViewer::closeable` is gone.** It was deprecated in 0.19.0 in favour of
+  `TabViewer::is_closeable`, which takes `&Self::Tab` rather than `&mut Self::Tab` and is what the
+  dock has asked ever since. A viewer that still overrides `closeable` has been having its answer
+  ignored for two releases; rename the method to `is_closeable` and take the tab by shared
+  reference.
+
 ### Added
 
 - **A tab title can carry an icon.** `TabViewer::title` now returns `egui::Atoms` — a row of text,

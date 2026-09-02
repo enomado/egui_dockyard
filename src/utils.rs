@@ -5,22 +5,25 @@ use crate::{
     ButtonsStyle, SeparatorStyle, Style, TabBarStyle, TabBodyStyle, TabInteractionStyle, TabStyle,
 };
 
+// Crate-visible, all of them: `utils` is a private module, so `pub` here never meant public API —
+// nothing outside could name these, `#![warn(missing_docs)]` never looked at them, and `cargo doc`
+// never showed them. `pub(crate)` says what was already true.
 #[inline(always)]
-pub fn expand_to_pixel(mut rect: Rect, ppi: f32) -> Rect {
+pub(crate) fn expand_to_pixel(mut rect: Rect, ppi: f32) -> Rect {
     rect.min = map_to_pixel_pos(rect.min, ppi, f32::floor);
     rect.max = map_to_pixel_pos(rect.max, ppi, f32::ceil);
     rect
 }
 
 #[inline(always)]
-pub fn map_to_pixel_pos(mut pos: Pos2, ppi: f32, map: fn(f32) -> f32) -> Pos2 {
+pub(crate) fn map_to_pixel_pos(mut pos: Pos2, ppi: f32, map: fn(f32) -> f32) -> Pos2 {
     pos.x = map_to_pixel(pos.x, ppi, map);
     pos.y = map_to_pixel(pos.y, ppi, map);
     pos
 }
 
 #[inline(always)]
-pub fn map_to_pixel(point: f32, ppi: f32, map: fn(f32) -> f32) -> f32 {
+pub(crate) fn map_to_pixel(point: f32, ppi: f32, map: fn(f32) -> f32) -> f32 {
     map(point * ppi) / ppi
 }
 
@@ -37,11 +40,11 @@ pub fn map_to_pixel(point: f32, ppi: f32, map: fn(f32) -> f32) -> f32 {
 /// Narrowing is the only thing any caller in this crate has ever wanted. Where the argument is
 /// already inside the parent's clip this is a no-op; where it is not, it is the difference
 /// between a widget that is cut off and one that escapes.
-pub fn clip_to(ui: &mut egui::Ui, rect: Rect) {
+pub(crate) fn clip_to(ui: &mut egui::Ui, rect: Rect) {
     ui.set_clip_rect(rect.intersect(ui.clip_rect()));
 }
 
-pub fn rect_set_size_centered(rect: &mut Rect, size: Vec2) {
+pub(crate) fn rect_set_size_centered(rect: &mut Rect, size: Vec2) {
     let center = rect.center();
     rect.set_width(size.x);
     rect.set_height(size.y);
@@ -50,7 +53,7 @@ pub fn rect_set_size_centered(rect: &mut Rect, size: Vec2) {
 
 /// Shrink a rectangle so that the stroke is fully contained inside
 /// the original rectangle.
-pub fn rect_stroke_box(rect: Rect, width: f32) -> Rect {
+pub(crate) fn rect_stroke_box(rect: Rect, width: f32) -> Rect {
     rect.expand(-f32::ceil(width / 2.0))
 }
 

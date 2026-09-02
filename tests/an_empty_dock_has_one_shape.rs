@@ -29,7 +29,7 @@
 //! ([`DockLayout::is_empty`]) and paints the same shapes — the assertion that the empty tab bar
 //! strip is gone, stated without a screen.
 
-use egui::{CentralPanel, Context, Id, LayerId, Pos2, RawInput, Rect, Ui, Vec2, WidgetText};
+use egui::{Atoms, CentralPanel, Context, Id, LayerId, Pos2, RawInput, Rect, Ui, Vec2};
 use egui_dockyard::{DockArea, DockLayout, DockState, Style, TabViewer};
 
 const SCREEN: Vec2 = Vec2::new(800.0, 600.0);
@@ -39,8 +39,8 @@ struct Viewer;
 impl TabViewer for Viewer {
     type Tab = String;
 
-    fn title(&mut self, tab: &Self::Tab) -> WidgetText {
-        tab.clone().into()
+    fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> {
+        Atoms::new(tab.clone())
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {

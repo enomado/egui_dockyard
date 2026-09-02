@@ -19,7 +19,7 @@
 //! The scenes are one leaf filling the screen, because what is being measured is the bar's own
 //! width against its own tabs; how the dock got to that leaf is the other files' business.
 
-use egui::{CentralPanel, Context, Id, LayerId, Pos2, RawInput, Rect, Shape, Ui, Vec2, WidgetText};
+use egui::{Atoms, CentralPanel, Context, Id, LayerId, Pos2, RawInput, Rect, Shape, Ui, Vec2};
 use egui_dockyard::{
     DockArea, DockLayout, DockState, Node, NodeId, NodePath, Split, Style, SurfaceIndex, TabIndex,
     TabViewer,
@@ -44,8 +44,8 @@ struct Viewer;
 impl TabViewer for Viewer {
     type Tab = String;
 
-    fn title(&mut self, tab: &Self::Tab) -> WidgetText {
-        tab.clone().into()
+    fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> {
+        Atoms::new(tab.clone())
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {

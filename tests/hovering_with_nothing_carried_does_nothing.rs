@@ -18,7 +18,7 @@
 //! **downstream** gate the deleted condition duplicated. If a future change ever lets `show/mod.rs`
 //! read `hover_data` without requiring a carried tab, this is what goes red.
 
-use egui::{CentralPanel, Context, Event, Id, Pos2, RawInput, Rect, Ui, Vec2, WidgetText};
+use egui::{Atoms, CentralPanel, Context, Event, Id, Pos2, RawInput, Rect, Ui, Vec2};
 use egui_dockyard::{
     DockArea, DockState, NodePath, Style, SurfaceIndex, TabIndex, TabViewer, tab_widget_id,
 };
@@ -32,8 +32,8 @@ struct Viewer;
 impl TabViewer for Viewer {
     type Tab = String;
 
-    fn title(&mut self, tab: &Self::Tab) -> WidgetText {
-        tab.clone().into()
+    fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> {
+        Atoms::new(tab.clone())
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {

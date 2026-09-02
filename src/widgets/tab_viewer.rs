@@ -1,4 +1,4 @@
-use egui::{Id, Ui, WidgetText};
+use egui::{Atoms, Id, Ui};
 
 use crate::{LeafNode, NodePath, TabId, TabIndex, TabStyle};
 
@@ -8,7 +8,22 @@ pub trait TabViewer {
     type Tab;
 
     /// The title to be displayed in the tab bar.
-    fn title(&mut self, tab: &Self::Tab) -> WidgetText;
+    ///
+    /// A title is a row of [`Atoms`]: text, an image, or both — `Atoms::new("Name")` for a plain
+    /// name, `Atoms::new((icon, "Name"))` for a name behind an icon. The dock lays them out left
+    /// to right, and the order is what decides what a squeezed tab keeps: an icon put first is
+    /// the last thing to go, which is the behaviour a browser's favicon has.
+    ///
+    /// # Lifetime
+    ///
+    /// `'static`, because a title outlives the call that produced it: the dock collects every
+    /// title in a bar (or in a side strip, which names the tabs of a whole subtree) *before* it
+    /// draws any of them — the widths have to be shared out before the first tab is placed — and
+    /// a title borrowing the viewer could not survive the call that asks the next tab for its
+    /// own. An image referring to a file or a texture is `'static` already
+    /// ([`egui::include_image!`], [`egui::Image::from_texture`]); a URI held in a field is
+    /// carried across by cloning the string.
+    fn title(&mut self, tab: &Self::Tab) -> Atoms<'static>;
 
     /// Actual tab content.
     ///
@@ -24,7 +39,10 @@ pub trait TabViewer {
 
     /// Unique ID for this tab.
     ///
-    /// If not implemented, uses tab title text as an ID source.
+    /// If not implemented, uses tab title text as an ID source — the text of the title's atoms,
+    /// or the `alt_text` of its first image when it carries no text at all. A title made of an
+    /// icon with neither is the one case this default cannot tell apart from another like it, so
+    /// implement this yourself when your tabs are icons alone.
     fn id(&mut self, tab: &Self::Tab) -> Id {
         Id::new(self.title(tab).text())
     }

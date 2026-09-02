@@ -30,8 +30,8 @@
 //! means the body really was scrolled sideways and really did stay inside its leaf.
 
 use egui::{
-    CentralPanel, Color32, Context, CornerRadius, Event, Id, LayerId, Modifiers, MouseWheelUnit,
-    Pos2, RawInput, Rect, Sense, Shape, TouchPhase, Ui, Vec2, WidgetText, epaint::ClippedShape,
+    Atoms, CentralPanel, Color32, Context, CornerRadius, Event, Id, LayerId, Modifiers,
+    MouseWheelUnit, Pos2, RawInput, Rect, Sense, Shape, TouchPhase, Ui, Vec2, epaint::ClippedShape,
 };
 use egui_dockyard::{
     DockArea, DockLayout, DockState, Node, NodePath, Split, Style, SurfaceIndex, TabViewer,
@@ -68,8 +68,8 @@ struct Viewer;
 impl TabViewer for Viewer {
     type Tab = String;
 
-    fn title(&mut self, tab: &Self::Tab) -> WidgetText {
-        tab.clone().into()
+    fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> {
+        Atoms::new(tab.clone())
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {

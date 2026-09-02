@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use eframe::NativeOptions;
 use egui::{
-    ComboBox, CornerRadius, Panel, Slider, Ui, ViewportBuilder, WidgetText,
+    Atoms, ComboBox, CornerRadius, Panel, Slider, Ui, ViewportBuilder,
     color_picker::{Alpha, color_edit_button_srgba},
     vec2,
 };
@@ -91,8 +91,8 @@ struct MyApp {
 impl TabViewer for MyContext {
     type Tab = String;
 
-    fn title(&mut self, tab: &Self::Tab) -> WidgetText {
-        tab.as_str().into()
+    fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> {
+        Atoms::new(tab.clone())
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {

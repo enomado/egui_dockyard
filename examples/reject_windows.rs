@@ -26,8 +26,8 @@ struct OpinionatedTab {
 impl egui_dockyard::TabViewer for TabViewer {
     type Tab = OpinionatedTab;
 
-    fn title(&mut self, tab: &Self::Tab) -> egui::WidgetText {
-        (&tab.title).into()
+    fn title(&mut self, tab: &Self::Tab) -> egui::Atoms<'static> {
+        egui::Atoms::new(tab.title.clone())
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &Self::Tab) {

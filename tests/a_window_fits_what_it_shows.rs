@@ -24,8 +24,8 @@
 //! found, the numbers can keep.
 
 use egui::{
-    CentralPanel, Context, CornerRadius, Frame, Id, LayerId, Pos2, RawInput, Rect, Shape, Stroke,
-    Ui, Vec2, WidgetText, epaint::ClippedShape,
+    Atoms, CentralPanel, Context, CornerRadius, Frame, Id, LayerId, Pos2, RawInput, Rect, Shape,
+    Stroke, Ui, Vec2, epaint::ClippedShape,
 };
 use egui_dockyard::{
     DockArea, DockLayout, DockState, Node, NodePath, Split, Style, SurfaceIndex, TabViewer,
@@ -44,8 +44,8 @@ struct Viewer;
 impl TabViewer for Viewer {
     type Tab = String;
 
-    fn title(&mut self, tab: &Self::Tab) -> WidgetText {
-        tab.clone().into()
+    fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> {
+        Atoms::new(tab.clone())
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {

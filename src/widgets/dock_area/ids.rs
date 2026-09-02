@@ -76,8 +76,7 @@ pub fn tab_widget_id(dock_area_id: Id, path: NodePath, tab: TabId) -> Id {
 ///
 /// ```rust
 /// # use egui::{
-/// #     CentralPanel, Context, Event, Id, PointerButton, Pos2, RawInput, Rect, Ui, Vec2,
-/// #     WidgetText,
+/// #     Atoms, CentralPanel, Context, Event, Id, PointerButton, Pos2, RawInput, Rect, Ui, Vec2,
 /// # };
 /// # use egui_dockyard::{
 /// #     DockArea, DockState, NodePath, Style, SurfaceIndex, TabIndex, TabPath, TabViewer,
@@ -87,8 +86,8 @@ pub fn tab_widget_id(dock_area_id: Id, path: NodePath, tab: TabId) -> Id {
 /// # struct Viewer;
 /// # impl TabViewer for Viewer {
 /// #     type Tab = String;
-/// #     fn title(&mut self, tab: &String) -> WidgetText {
-/// #         tab.as_str().into()
+/// #     fn title(&mut self, tab: &String) -> Atoms<'static> {
+/// #         Atoms::new(tab.clone())
 /// #     }
 /// #     fn ui(&mut self, ui: &mut Ui, tab: &String) {
 /// #         ui.label(tab.as_str());
@@ -236,8 +235,7 @@ pub fn dragged_tab<Tab>(
 ///
 /// ```rust
 /// # use egui::{
-/// #     CentralPanel, Context, Event, Id, PointerButton, Pos2, RawInput, Rect, Ui, Vec2,
-/// #     WidgetText,
+/// #     Atoms, CentralPanel, Context, Event, Id, PointerButton, Pos2, RawInput, Rect, Ui, Vec2,
 /// # };
 /// # use egui_dockyard::{
 /// #     DockArea, DockLayout, DockState, NodePath, Style, SurfaceIndex, TabIndex, TabViewer,
@@ -247,8 +245,8 @@ pub fn dragged_tab<Tab>(
 /// # struct Viewer;
 /// # impl TabViewer for Viewer {
 /// #     type Tab = String;
-/// #     fn title(&mut self, tab: &String) -> WidgetText {
-/// #         tab.as_str().into()
+/// #     fn title(&mut self, tab: &String) -> Atoms<'static> {
+/// #         Atoms::new(tab.clone())
 /// #     }
 /// #     fn ui(&mut self, ui: &mut Ui, tab: &String) {
 /// #         ui.label(tab.as_str());

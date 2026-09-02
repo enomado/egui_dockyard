@@ -1,6 +1,6 @@
 use egui::{
-    Align, Color32, Context, CornerRadius, CursorIcon, Frame, Id, LayerId, Layout, Order, Rect,
-    Response, RichText, Sense, Shape, Stroke, Ui, UiBuilder, Vec2, WidgetText, vec2,
+    Align, AtomLayout, Atoms, Color32, Context, CornerRadius, CursorIcon, Frame, Id, LayerId,
+    Layout, Order, Rect, Response, RichText, Sense, Shape, Stroke, Ui, UiBuilder, Vec2, vec2,
 };
 
 use crate::{
@@ -98,9 +98,13 @@ impl<Tab> DockArea<'_, Tab> {
             let active = leaf
                 .active_focused()
                 .expect("a window surface should never hold an empty leaf");
-            tab_viewer
-                .title(active)
-                .color(ui.visuals().widgets.noninteractive.fg_stroke.color)
+            let mut title = tab_viewer.title(active);
+            // The window paints its own title rather than letting the tab style speak, so the
+            // colour is applied to whatever text the title carries; an icon beside it is left
+            // alone, being already the colour it was given.
+            let color = ui.visuals().widgets.noninteractive.fg_stroke.color;
+            title.map_texts(|text| text.color(color));
+            title
         };
 
         // Iterate through every node in dock_state[surf_index], and sum up the number of tabs in them
@@ -322,13 +326,16 @@ impl<Tab> DockArea<'_, Tab> {
         ui: &mut Ui,
         surface_index: SurfaceIndex,
         fade_style: Option<&Style>,
-        title: WidgetText,
+        title: Atoms<'static>,
         tab_count: usize,
     ) {
         ui.horizontal(|ui| {
             let style = fade_style.unwrap_or_else(|| self.style.as_ref().unwrap());
+            // Read out before the expand button is drawn: that borrows `self` mutably, and the
+            // row's height is wanted again below, for the title.
+            let bar_height = style.tab_bar.height;
             let (tabbar_outer_rect, _) = ui.allocate_exact_size(
-                vec2(Style::TAB_EXPAND_BUTTON_SIZE, style.tab_bar.height),
+                vec2(Style::TAB_EXPAND_BUTTON_SIZE, bar_height),
                 Sense::hover(),
             );
             ui.painter().rect_filled(
@@ -337,7 +344,9 @@ impl<Tab> DockArea<'_, Tab> {
                 style.tab_bar.bg_fill,
             );
             self.window_expand(ui, surface_index, tabbar_outer_rect, fade_style);
-            ui.label(title);
+            // One line high, so that a title carrying an icon reads as a row in this bar rather
+            // than growing it to the icon's own resolution.
+            ui.add(AtomLayout::new(title).max_height(bar_height));
             if tab_count > 1 {
                 ui.label(
                     RichText::new(format!("+{}", tab_count - 1))

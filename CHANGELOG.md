@@ -4,6 +4,21 @@
 
 ### Added
 
+- **A tab title can carry an icon.** `TabViewer::title` now returns `egui::Atoms` — a row of text,
+  images, or both — so `Atoms::new((egui::include_image!("wave.svg"), name))` gives a tab an icon
+  in front of its name. The icon goes through the same three places the name does: the tab bar,
+  the strip a collapsed leaf or a stowed side draws, and a floating window's own title.
+
+  The icon is measured, not merely painted: a tab asks for the width of everything in its title,
+  so a name is never laid out under an icon. Order is what decides what a squeezed bar keeps —
+  an icon put first is the last thing to go, which is what a browser does with its favicon and
+  what `MIN_SQUEEZED_TEXT` used to say the crate could not do. In a side strip the name still
+  turns a quarter turn and the icon stays upright beside it.
+
+  An image is held to the height of the text next to it, so an icon of any resolution is one line
+  tall; `AtomExt::atom_size` overrides that for an atom that wants its own size. See
+  `examples/tab_icons.rs`.
+
 - **A collapsed leaf can hide sideways** — `DockArea::collapse_sideways`, off by default and
   experimental. Collapsing spends *height*: a collapsed leaf is a tab bar and nothing else. Under
   a horizontal split there was nobody to spend it on — the sibling is a column beside it — so a
@@ -38,6 +53,14 @@
   and four for the crossing's pinwheel.
 
 ### Changed
+
+- **`TabViewer::title` returns `egui::Atoms<'static>` instead of `WidgetText`.** A title that is
+  only a name migrates by wrapping it: `tab.clone().into()` becomes `Atoms::new(tab.clone())`.
+  `'static` is what lets the dock collect every title in a bar before it shares the width out;
+  an image referring to a file or a texture is `'static` already, and a URI held in a field is
+  carried across by cloning the string. `TabViewer::id`'s default still reads the title's text
+  (`Atoms::text`), which for a title of an icon alone is the image's `alt_text` — a tab whose
+  title carries neither should implement `id` itself.
 
 - **The cross-split toggle is a ctrl+click, and its handle appears with the modifier.** A plain
   click on the "+" used to transpose the grouping; it now takes ctrl, so that a press meant for

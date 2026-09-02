@@ -27,7 +27,7 @@
 //! sides are strips — the whole row collapsed, nobody left to take anything — is there space
 //! left over, which is then empty by decision rather than by accident.
 
-use egui::{CentralPanel, Context, Id, Pos2, RawInput, Rect, Ui, Vec2, WidgetText};
+use egui::{Atoms, CentralPanel, Context, Id, Pos2, RawInput, Rect, Ui, Vec2};
 use egui_dockyard::{
     DockArea, DockLayout, DockState, Node, NodeId, NodePath, SideStrip, Split, Style, SurfaceIndex,
     TabViewer,
@@ -45,8 +45,8 @@ struct Viewer;
 impl TabViewer for Viewer {
     type Tab = String;
 
-    fn title(&mut self, tab: &Self::Tab) -> WidgetText {
-        tab.clone().into()
+    fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> {
+        Atoms::new(tab.clone())
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {

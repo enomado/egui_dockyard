@@ -2328,7 +2328,7 @@ impl SeparatorBand {
 
 #[cfg(test)]
 mod tests {
-    use egui::{CentralPanel, Context, Id, Pos2, RawInput, Rect, Ui, Vec2, WidgetText};
+    use egui::{Atoms, CentralPanel, Context, Id, Pos2, RawInput, Rect, Ui, Vec2};
 
     use super::{
         Extent, Run, SeparatorBand, collapsed_strip_height, collapsed_strip_width, cut_runs,
@@ -2351,8 +2351,8 @@ mod tests {
     impl TabViewer for Viewer {
         type Tab = u32;
 
-        fn title(&mut self, tab: &Self::Tab) -> WidgetText {
-            tab.to_string().into()
+        fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> {
+            Atoms::new(tab.to_string())
         }
 
         fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {

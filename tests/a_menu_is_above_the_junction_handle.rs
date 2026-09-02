@@ -25,8 +25,8 @@
 //! about layers.
 
 use egui::{
-    Area, Color32, Context, Event, Frame, Id, Modifiers, Order, PointerButton, Pos2, RawInput,
-    Rect, Sense, Ui, Vec2, WidgetText,
+    Area, Atoms, Color32, Context, Event, Frame, Id, Modifiers, Order, PointerButton, Pos2,
+    RawInput, Rect, Sense, Ui, Vec2,
 };
 use egui_dockyard::{
     DockArea, DockLayout, DockState, DragInFlight, DragSubject, NodeId, NodePath, Style,
@@ -52,8 +52,8 @@ struct Viewer;
 impl TabViewer for Viewer {
     type Tab = String;
 
-    fn title(&mut self, tab: &Self::Tab) -> WidgetText {
-        tab.clone().into()
+    fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> {
+        Atoms::new(tab.clone())
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {

@@ -38,11 +38,11 @@ pub enum TabAddAlign {
 ///
 /// ```rust
 /// # use egui_dockyard::{DockArea, DockState, OverlayType, Style, TabAddAlign, TabViewer};
-/// # use egui::{Ui, WidgetText};
+/// # use egui::{Atoms, Ui};
 /// # struct MyTabViewer;
 /// # impl TabViewer for MyTabViewer {
 /// #     type Tab = ();
-/// #     fn title(&mut self, tab: &Self::Tab) -> WidgetText { WidgetText::default() }
+/// #     fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> { Atoms::default() }
 /// #     fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {}
 /// # }
 /// # egui::__run_test_ui(|ui| {

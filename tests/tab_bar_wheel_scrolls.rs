@@ -1,8 +1,8 @@
 //! An overflowing tab bar scrolls under the wheel without growing its own scroll widget.
 
 use egui::{
-    CentralPanel, Context, Event, Id, Modifiers, MouseWheelUnit, Pos2, RawInput, Rect, TouchPhase,
-    Ui, Vec2, WidgetText,
+    Atoms, CentralPanel, Context, Event, Id, Modifiers, MouseWheelUnit, Pos2, RawInput, Rect,
+    TouchPhase, Ui, Vec2,
 };
 use egui_dockyard::{DockArea, DockState, NodePath, Style, SurfaceIndex, TabViewer};
 
@@ -14,8 +14,8 @@ struct Viewer;
 impl TabViewer for Viewer {
     type Tab = String;
 
-    fn title(&mut self, tab: &Self::Tab) -> WidgetText {
-        tab.clone().into()
+    fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> {
+        Atoms::new(tab.clone())
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {

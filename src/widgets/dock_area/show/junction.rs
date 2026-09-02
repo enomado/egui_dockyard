@@ -1226,7 +1226,7 @@ impl<Tab> DockArea<'_, Tab> {
 
 #[cfg(test)]
 mod tests {
-    use egui::{CentralPanel, Context, Id, Pos2, RawInput, Ui, Vec2, WidgetText};
+    use egui::{Atoms, CentralPanel, Context, Id, Pos2, RawInput, Ui, Vec2};
     use proptest::prelude::*;
 
     use super::*;
@@ -1252,8 +1252,8 @@ mod tests {
     impl TabViewer for Viewer {
         type Tab = u32;
 
-        fn title(&mut self, tab: &Self::Tab) -> WidgetText {
-            tab.to_string().into()
+        fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> {
+            Atoms::new(tab.to_string())
         }
 
         fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {

@@ -24,8 +24,8 @@ struct Buffers {
 impl TabViewer for Buffers {
     type Tab = Title;
 
-    fn title(&mut self, title: &Title) -> egui::WidgetText {
-        egui::WidgetText::from(&*title)
+    fn title(&mut self, title: &Title) -> egui::Atoms<'static> {
+        egui::Atoms::new(title.clone())
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, title: &Title) {

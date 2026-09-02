@@ -54,7 +54,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use egui_dockyard::egui::{CentralPanel, Context, Id, Pos2, RawInput, Rect, Ui, Vec2, WidgetText};
+use egui_dockyard::egui::{Atoms, CentralPanel, Context, Id, Pos2, RawInput, Rect, Ui, Vec2};
 use egui_dockyard::{DockArea, DockLayout, DockState, GapPath, NodePath, Style};
 
 /// How a corpus layout is prepared before it is laid out — see the module docs.
@@ -116,10 +116,10 @@ struct Viewer;
 impl egui_dockyard::TabViewer for Viewer {
     type Tab = Tab;
 
-    fn title(&mut self, tab: &Self::Tab) -> WidgetText {
+    fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> {
         // Tabs are scrubbed to `"t0"`, `"t1"` … by `corpus_tool`, so `Debug` of the opaque
         // value is both stable and short enough to leave the tab bar its ordinary behaviour.
-        format!("{tab:?}").into()
+        Atoms::new(format!("{tab:?}"))
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {

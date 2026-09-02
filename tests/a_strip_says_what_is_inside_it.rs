@@ -22,8 +22,8 @@
 //! `a_side_can_be_stowed.rs` is: with two, a rule that only reached one leaf would look right.
 
 use egui::{
-    CentralPanel, Context, Event, Id, LayerId, Modifiers, PointerButton, Pos2, RawInput, Rect,
-    Shape, Ui, Vec2, WidgetText,
+    Atoms, CentralPanel, Context, Event, Id, LayerId, Modifiers, PointerButton, Pos2, RawInput,
+    Rect, Shape, Ui, Vec2,
 };
 use egui_dockyard::{
     DockArea, DockLayout, DockState, Node, NodeId, NodePath, Split, Style, SurfaceIndex, TabIndex,
@@ -46,8 +46,8 @@ struct Viewer;
 impl TabViewer for Viewer {
     type Tab = String;
 
-    fn title(&mut self, tab: &Self::Tab) -> WidgetText {
-        tab.clone().into()
+    fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> {
+        Atoms::new(tab.clone())
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {

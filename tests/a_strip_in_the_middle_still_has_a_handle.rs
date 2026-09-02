@@ -32,8 +32,8 @@
 //! — which is the defect this feature was fixed for once already, from the other side.
 
 use egui::{
-    CentralPanel, Context, Event, Id, Modifiers, PointerButton, Pos2, RawInput, Rect, Ui, Vec2,
-    WidgetText,
+    Atoms, CentralPanel, Context, Event, Id, Modifiers, PointerButton, Pos2, RawInput, Rect, Ui,
+    Vec2,
 };
 use egui_dockyard::{
     DockArea, DockLayout, DockState, GapIndex, GapPath, Node, NodeId, NodePath, Split, Style,
@@ -56,8 +56,8 @@ struct Viewer;
 impl TabViewer for Viewer {
     type Tab = String;
 
-    fn title(&mut self, tab: &Self::Tab) -> WidgetText {
-        tab.clone().into()
+    fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> {
+        Atoms::new(tab.clone())
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {

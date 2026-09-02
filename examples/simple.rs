@@ -18,8 +18,8 @@ struct TabViewer {}
 impl egui_dockyard::TabViewer for TabViewer {
     type Tab = String;
 
-    fn title(&mut self, tab: &Self::Tab) -> egui::WidgetText {
-        (&*tab).into()
+    fn title(&mut self, tab: &Self::Tab) -> egui::Atoms<'static> {
+        egui::Atoms::new(tab.clone())
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &Self::Tab) {

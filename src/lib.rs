@@ -17,7 +17,7 @@
 //!
 //! ```rust
 //! use egui_dockyard::{DockArea, DockState, Style, TabViewer};
-//! use egui::{Ui, WidgetText};
+//! use egui::{Atoms, Ui};
 //!
 //! // First, let's pick a type that we'll use to attach some data to each tab.
 //! // It can be any type.
@@ -32,9 +32,10 @@
 //!     // This associated type is used to attach some data to each tab.
 //!     type Tab = Tab;
 //!
-//!     // Returns the current `tab`'s title.
-//!     fn title(&mut self, tab: &Self::Tab) -> WidgetText {
-//!         tab.as_str().into()
+//!     // Returns the current `tab`'s title: a name here, but `Atoms` also carry an image, so
+//!     // `Atoms::new((egui::include_image!("icon.svg"), tab.clone()))` would give it an icon.
+//!     fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> {
+//!         Atoms::new(tab.clone())
 //!     }
 //!
 //!     // Defines the contents of a given `tab`.
@@ -88,11 +89,11 @@
 //!
 //! ```rust
 //! # use egui_dockyard::{DockArea, DockState, OverlayType, Style, TabAddAlign, TabViewer};
-//! # use egui::{Ui, WidgetText};
+//! # use egui::{Atoms, Ui};
 //! # struct MyTabViewer;
 //! # impl TabViewer for MyTabViewer {
 //! #     type Tab = ();
-//! #     fn title(&mut self, tab: &Self::Tab) -> WidgetText { WidgetText::default() }
+//! #     fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> { Atoms::default() }
 //! #     fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {}
 //! # }
 //! # egui::__run_test_ui(|ui| {

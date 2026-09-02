@@ -38,8 +38,8 @@
 //! where the *destination* is, not where the hand is.
 
 use egui::{
-    Area, CentralPanel, Context, Event, Frame, Id, Order, PointerButton, Pos2, RawInput, Rect,
-    Sense, Ui, Vec2, WidgetText,
+    Area, Atoms, CentralPanel, Context, Event, Frame, Id, Order, PointerButton, Pos2, RawInput,
+    Rect, Sense, Ui, Vec2,
 };
 use egui_dockyard::{
     DockArea, DockLayout, DockState, DragSubject, NodePath, Style, SurfaceIndex, TabIndex,
@@ -62,8 +62,8 @@ struct Viewer;
 impl TabViewer for Viewer {
     type Tab = String;
 
-    fn title(&mut self, tab: &Self::Tab) -> WidgetText {
-        tab.clone().into()
+    fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> {
+        Atoms::new(tab.clone())
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {

@@ -1,10 +1,10 @@
 use std::{f32::consts::FRAC_PI_2, ops::RangeInclusive, sync::Arc};
 
 use egui::{
-    Align, Align2, Button, Color32, CornerRadius, CursorIcon, Frame, Galley, Id, Key, LayerId,
-    Layout, Mesh, NumExt, Order, Popup, PopupCloseBehavior, Rect, Response, ScrollArea, Sense,
-    Shape, Stroke, StrokeKind, TextStyle, Ui, UiBuilder, Vec2, WidgetText, emath::TSTransform,
-    epaint::TextShape, pos2, vec2,
+    Align, Align2, AtomLayout, Atoms, Button, Color32, CornerRadius, CursorIcon, Frame, Galley, Id,
+    Key, LayerId, Layout, Mesh, NumExt, Order, Painter, Popup, PopupCloseBehavior, Rect, Response,
+    ScrollArea, Sense, Shape, SizedAtom, SizedAtomKind, Stroke, StrokeKind, TextStyle,
+    TextWrapMode, Ui, UiBuilder, Vec2, emath::TSTransform, epaint::TextShape, pos2, vec2,
 };
 
 use crate::NodePath;
@@ -69,13 +69,80 @@ const TAB_TEXT_PADDING: f32 = 8.0;
 /// unlike a cut name, this one needs a mark of its own.
 const OVERFLOW_MARK: &str = "…";
 
-/// Lays a strip's name out in full, however long it is.
+/// A title measured into its atoms: what each one takes, and what stands between them.
 ///
-/// Nothing is cut at layout time any more: what does not fit is clipped to the slot and faded
-/// into the background there, so the galley has to carry every glyph the name has. How much of
-/// it will be *seen* is [`fit_strip_names`]'s answer, not the text layout's.
-fn strip_galley(ui: &Ui, title: WidgetText) -> Arc<Galley> {
-    title.into_galley(ui, None, f32::INFINITY, TextStyle::Button)
+/// A title is a row of [`Atoms`] — a name, an icon, or both — and the same row is drawn in two
+/// places that run along different axes: a tab bar across the screen and a side strip down it.
+/// So everything here is written in terms of *along* and *across*, and which axis is which is the
+/// caller's `vertical`.
+struct SizedTitle {
+    /// The atoms in the order they are drawn: the first sits at the start of the slot, which is
+    /// the left of a bar and the bottom of a strip (the end a turned name is read from).
+    atoms: Vec<SizedAtom<'static>>,
+
+    /// What stands between two atoms, along the axis.
+    gap: f32,
+}
+
+impl SizedTitle {
+    /// The room the whole title wants along the axis, gaps included.
+    fn length(&self, vertical: bool) -> f32 {
+        let atoms: f32 = self
+            .atoms
+            .iter()
+            .map(|atom| atom_length(atom, vertical))
+            .sum();
+        atoms + self.gap * self.atoms.len().saturating_sub(1) as f32
+    }
+}
+
+/// The room one atom takes *along* the axis.
+///
+/// Text turns with the strip — a name in a side strip reads bottom to top — so what it takes
+/// along the axis is its width either way. Nothing else turns: an icon stays upright, which is
+/// what makes it legible in a strip at all, so it takes its height along a vertical axis.
+fn atom_length(atom: &SizedAtom<'_>, vertical: bool) -> f32 {
+    match atom.kind {
+        SizedAtomKind::Text(_) => atom.size.x,
+        _ if vertical => atom.size.y,
+        _ => atom.size.x,
+    }
+}
+
+/// The room one atom takes *across* the axis — the other half of [`atom_length`], same rule.
+fn atom_breadth(atom: &SizedAtom<'_>, vertical: bool) -> f32 {
+    match atom.kind {
+        SizedAtomKind::Text(_) => atom.size.y,
+        _ if vertical => atom.size.x,
+        _ => atom.size.y,
+    }
+}
+
+/// Lays a title out in full, however long it is.
+///
+/// Nothing is cut at layout time: what does not fit is clipped to the slot and faded into the
+/// background there, so the galley has to carry every glyph the name has. How much of it will be
+/// *seen* is [`fit_strip_names`]'s or [`fit_tab_widths`]'s answer, not the text layout's.
+///
+/// An image is held to the height of the text beside it, so that a title of a name and an icon is
+/// one line tall whatever the icon's own resolution happens to be. It is a default and not a
+/// rule: an atom given a size of its own ([`egui::AtomExt::atom_size`]) keeps it.
+fn measure_title(ui: &Ui, title: Atoms<'static>) -> SizedTitle {
+    let line = ui.text_style_height(&TextStyle::Button);
+    SizedTitle {
+        atoms: title
+            .into_iter()
+            .map(|atom| {
+                atom.into_sized(
+                    ui,
+                    vec2(f32::INFINITY, line),
+                    Some(TextWrapMode::Extend),
+                    TextStyle::Button.into(),
+                )
+            })
+            .collect(),
+        gap: ui.spacing().icon_spacing,
+    }
 }
 
 /// Fades whatever is under `rect` into `into` — clear at the start of the rectangle, solid at its
@@ -112,9 +179,9 @@ fn fade_out(ui: &Ui, rect: Rect, into: Color32, vertical: bool) {
     ui.painter().add(Shape::mesh(mesh));
 }
 
-/// The room a laid-out name takes along the strip: its glyphs, plus padding at each end.
-fn strip_length(galley: &Galley) -> f32 {
-    galley.size().x + 2.0 * STRIP_NAME_PADDING
+/// The room a laid-out name takes along the strip: the title itself, plus padding at each end.
+fn strip_length(title: &SizedTitle, vertical: bool) -> f32 {
+    title.length(vertical) + 2.0 * STRIP_NAME_PADDING
 }
 
 /// The rectangle a run of `length` along the strip takes, starting `cursor` along it.
@@ -129,22 +196,43 @@ fn strip_slot(rect: Rect, vertical: bool, cursor: f32, length: f32) -> Rect {
     }
 }
 
-/// Draws `galley` in `slot`, turned a quarter turn when the strip is vertical, fading out into
-/// `background` where the name runs past the room it was given.
+/// Draws `galley` centred in `cell`, turned a quarter turn when the strip is vertical.
 ///
 /// Anchored at the middle of the galley, so the turn happens about the text's own centre.
 /// Anticlockwise (`angle` counts clockwise), which is what makes the glyphs run bottom-to-top —
 /// the direction a side bar is read in, and therefore the direction a name that does not fit runs
 /// *out* of: its first letter is at the bottom of the slot and its last is past the top.
-fn strip_text(
-    ui: &Ui,
-    slot: Rect,
+fn paint_galley(
+    painter: &Painter,
+    cell: Rect,
     galley: Arc<Galley>,
+    color: Color32,
+    vertical: bool,
+) {
+    let mut text = TextShape::new(cell.center() - galley.size() / 2.0, galley, color);
+    if vertical {
+        text = text.with_angle_and_anchor(-FRAC_PI_2, Align2::CENTER_CENTER);
+    }
+    painter.add(text);
+}
+
+/// Draws `title` in `slot`, fading out into `background` where it runs past the room it was given.
+///
+/// The atoms are laid along the axis in the order the consumer gave them, each one centred across
+/// it. `interact` is what a nested [`egui::AtomLayout`] is painted against — an atom that is a
+/// widget in its own right needs a [`Response`] to interact with, and every title the consumer
+/// gives has one (the tab, or the name in a strip). A title the dock makes up itself has no such
+/// atom and passes `None`.
+fn paint_title(
+    ui: &mut Ui,
+    slot: Rect,
+    title: SizedTitle,
     color: Color32,
     background: Color32,
     vertical: bool,
+    interact: Option<&Response>,
 ) {
-    let length = galley.size().x;
+    let length = title.length(vertical);
     let room = if vertical {
         slot.height()
     } else {
@@ -155,25 +243,64 @@ fn strip_text(
     // pixel of a name that fits would be a smudge with nothing behind it.
     let cut = length > room + 1.0;
 
-    // A name that fits sits in the middle of its slot. One that does not starts at the slot's
-    // beginning instead and runs out of the far end — centring it would hide the first letters
-    // as well as the last, and the first are the half that tells the panels apart.
-    let centre = match (cut, vertical) {
-        (false, _) => slot.center(),
-        (true, true) => pos2(slot.center().x, slot.bottom() - length / 2.0),
-        (true, false) => pos2(slot.left() + length / 2.0, slot.center().y),
+    // A title that fits sits in the middle of its slot. One that does not starts at the slot's
+    // beginning instead and runs out of the far end — centring it would hide the first atoms as
+    // well as the last, and the first are the half that tells the panels apart. It is also what
+    // keeps an icon: put first, it is the last thing a squeeze takes away, which is what a
+    // browser's favicon does with the room a squeezed tab has left.
+    let mut cursor = match (cut, vertical) {
+        // A strip reads bottom to top, so its cursor starts at the bottom and walks *up*.
+        (false, true) => slot.center().y + length / 2.0,
+        (true, true) => slot.bottom(),
+        (false, false) => slot.center().x - length / 2.0,
+        (true, false) => slot.left(),
     };
 
-    let mut text = TextShape::new(centre - galley.size() / 2.0, galley, color);
-    if vertical {
-        text = text.with_angle_and_anchor(-FRAC_PI_2, Align2::CENTER_CENTER);
+    // Clipped to the slot, and never wider than what this `Ui` was already clipped to — the
+    // bar's own edge has to keep cutting the last tab off (see `nothing_widens_its_clip`).
+    let inner = &mut ui.new_child(UiBuilder::new().max_rect(slot));
+    clip_to(inner, slot);
+
+    let gap = title.gap;
+    for atom in title.atoms {
+        let run = atom_length(&atom, vertical);
+        let breadth = atom_breadth(&atom, vertical);
+        let cell = if vertical {
+            Rect::from_min_size(
+                pos2(slot.center().x - breadth / 2.0, cursor - run),
+                vec2(breadth, run),
+            )
+        } else {
+            Rect::from_min_size(
+                pos2(cursor, slot.center().y - breadth / 2.0),
+                vec2(run, breadth),
+            )
+        };
+        cursor += if vertical { -(run + gap) } else { run + gap };
+
+        match atom.kind {
+            SizedAtomKind::Text(galley) => {
+                paint_galley(inner.painter(), cell, galley, color, vertical);
+            }
+            SizedAtomKind::Image { image, size: _ } => image.paint_at(inner, cell),
+            SizedAtomKind::Empty { .. } => {}
+            SizedAtomKind::Layout(layout) => {
+                // Painted only where there is a `Response` to paint it against; see the doc above.
+                debug_assert!(
+                    interact.is_some(),
+                    "a title with a nested AtomLayout has to be drawn against a Response"
+                );
+                if let Some(response) = interact {
+                    layout.paint_at(inner, cell, response.clone());
+                }
+            }
+        }
     }
-    // Clipped to the slot, and never wider than what this `Ui` was already clipped to.
-    ui.painter()
-        .with_clip_rect(slot.intersect(ui.clip_rect()))
-        .add(text);
 
     if cut {
+        // Where the title runs out of room it fades into the background rather than stopping
+        // dead; that fade *is* the statement "there is more of this than is written", the one an
+        // ellipsis used to make at the cost of a third of what a squeezed tab has left.
         let fade = if vertical {
             Rect::from_min_max(slot.min, pos2(slot.right(), slot.top() + FADE_LENGTH))
         } else {
@@ -358,7 +485,9 @@ struct StripName {
     /// panel is away.
     active: bool,
     style: TabStyle,
-    title: WidgetText,
+    /// Measured once, when the list is collected: the room every name wants has to be known
+    /// before any of them is placed, and the same measurement is what gets drawn afterwards.
+    title: SizedTitle,
 }
 
 impl<Tab> DockArea<'_, Tab> {
@@ -685,13 +814,9 @@ impl<Tab> DockArea<'_, Tab> {
                 0.0
             };
             let furniture = close + 2.0 * TAB_TEXT_PADDING;
-            let text = tab_viewer
-                .title(tab)
-                .into_galley(ui, None, f32::INFINITY, TextStyle::Button)
-                .size()
-                .x;
+            let title = measure_title(ui, tab_viewer.title(tab)).length(false);
 
-            let want = (text + furniture).at_least(tab_style.minimum_width.unwrap_or(0.0));
+            let want = (title + furniture).at_least(tab_style.minimum_width.unwrap_or(0.0));
             wants.push(want);
             // Under pressure only the active tab keeps its close button, so only its floor has to
             // make room for one; the rest are floored on padding and a name alone.
@@ -869,7 +994,10 @@ impl<Tab> DockArea<'_, Tab> {
                         .tab_at(tab_index)
                         .expect("this tab was just drawn");
                     response = response.on_hover_ui(|ui| {
-                        ui.label(tab_viewer.title(tab));
+                        // The same title the tab shows, icon included, held to one line high so
+                        // that an icon of any resolution stays an icon here too.
+                        let line = ui.text_style_height(&TextStyle::Body);
+                        ui.add(AtomLayout::new(tab_viewer.title(tab)).max_height(line));
                     });
                 }
 
@@ -1323,7 +1451,7 @@ impl<Tab> DockArea<'_, Tab> {
         };
         // Gathered before anything is drawn: the titles come from the consumer, which wants
         // `&mut tab_viewer` while the tree is borrowed, and painting wants `&mut self` back.
-        let names = self.strip_name_list(tab_viewer, path, fade_style);
+        let names = self.strip_name_list(ui, tab_viewer, path, fade_style);
         if names.is_empty() {
             return;
         }
@@ -1353,10 +1481,15 @@ impl<Tab> DockArea<'_, Tab> {
         // what happens to be left when the list reaches it.
         let naturals: Vec<f32> = names
             .iter()
-            .map(|name| strip_length(&strip_galley(ui, name.title.clone())))
+            .map(|name| strip_length(&name.title, vertical))
             .collect();
-        let overflow = strip_galley(ui, OVERFLOW_MARK.into());
-        let fit = fit_strip_names(&naturals, &gaps, end - start, strip_length(&overflow));
+        let overflow = measure_title(ui, Atoms::new(OVERFLOW_MARK));
+        let fit = fit_strip_names(
+            &naturals,
+            &gaps,
+            end - start,
+            strip_length(&overflow, vertical),
+        );
 
         let mut cursor = start;
         for (index, name) in names.into_iter().take(fit.lengths.len()).enumerate() {
@@ -1368,8 +1501,7 @@ impl<Tab> DockArea<'_, Tab> {
 
             // The name is laid out whole and shown for as far as it was given — the slot is the
             // shorter of the two, and what runs past it is clipped and faded rather than cut.
-            let galley = strip_galley(ui, name.title);
-            let length = strip_length(&galley).min(fit.lengths[index]);
+            let length = strip_length(&name.title, vertical).min(fit.lengths[index]);
             let name_rect = strip_slot(rect, vertical, cursor, length);
             cursor += length;
 
@@ -1390,13 +1522,14 @@ impl<Tab> DockArea<'_, Tab> {
             ui.painter()
                 .rect_filled(name_rect, tab_style.corner_radius, tab_style.bg_fill);
 
-            strip_text(
+            paint_title(
                 ui,
                 name_rect,
-                galley,
+                name.title,
                 tab_style.text_color,
                 tab_style.bg_fill,
                 vertical,
+                Some(&response),
             );
 
             if response.clicked() {
@@ -1414,8 +1547,16 @@ impl<Tab> DockArea<'_, Tab> {
             // name so that it reads as the list carrying on. It says the one thing a strip that
             // simply stopped could not: that there is more here than is written. It is a mark and
             // not a name — there is no single tab behind it for a click to bring back.
-            let slot = strip_slot(rect, vertical, cursor, strip_length(&overflow));
-            strip_text(ui, slot, overflow, overflow_color, style_bg_fill, vertical);
+            let slot = strip_slot(rect, vertical, cursor, strip_length(&overflow, vertical));
+            paint_title(
+                ui,
+                slot,
+                overflow,
+                overflow_color,
+                style_bg_fill,
+                vertical,
+                None,
+            );
         }
     }
 
@@ -1425,6 +1566,7 @@ impl<Tab> DockArea<'_, Tab> {
     /// first child first, which is top-to-bottom and left-to-right on screen.
     fn strip_name_list(
         &mut self,
+        ui: &Ui,
         tab_viewer: &mut impl TabViewer<Tab = Tab>,
         path: NodePath,
         fade_style: Option<&Style>,
@@ -1466,7 +1608,7 @@ impl<Tab> DockArea<'_, Tab> {
                     style: tab_viewer
                         .tab_style_override(&leaf[tab_index], &style.tab)
                         .unwrap_or_else(|| style.tab.clone()),
-                    title: tab_viewer.title(&leaf[tab_index]),
+                    title: measure_title(ui, tab_viewer.title(&leaf[tab_index])),
                 });
             }
         }
@@ -1885,7 +2027,7 @@ impl<Tab> DockArea<'_, Tab> {
         ui: &mut Ui,
         tab_style: &TabStyle,
         id: Id,
-        label: WidgetText,
+        label: Atoms<'static>,
         focused: bool,
         active: bool,
         is_being_dragged: bool,
@@ -1899,7 +2041,7 @@ impl<Tab> DockArea<'_, Tab> {
         // Laid out in full, however long it is. The width was decided for the bar as a whole
         // (`tab_widths`), and what does not fit inside it is clipped and faded rather than cut:
         // the ellipsis a cut would need costs about ten pixels of a name that has thirty.
-        let galley = label.into_galley(ui, None, f32::INFINITY, TextStyle::Button);
+        let title = measure_title(ui, label);
 
         let (_, tab_rect) = ui.allocate_space(vec2(room.width, ui.available_height()));
         let mut response = ui.interact(tab_rect, id, Sense::click_and_drag());
@@ -1966,34 +2108,19 @@ impl<Tab> DockArea<'_, Tab> {
         text_rect.set_width(text_rect.width() - close_button_size);
         let inner = text_rect.shrink2(vec2(x_spacing, 0.0));
 
-        // A name that fits is centred, as it always was. One that does not is pinned to the left
-        // instead — centring it would hide its beginning as well as its end, and the beginning is
-        // the half that tells the tabs apart.
-        //
-        // A whole pixel of slack, because a tab is exactly as wide as its own name plus its
-        // furniture and the two come back a hair apart once the tab has been snapped to the pixel
-        // grid — fading the last half pixel of a name that fits would be a smudge for nothing.
-        let cut = galley.size().x > inner.width() + 1.0;
-        let text_pos = if cut {
-            pos2(inner.left(), inner.center().y - galley.size().y / 2.0)
-        } else {
-            Align2::CENTER_CENTER.pos_in_rect(&inner) - galley.size() / 2.0
-        };
-
-        // Clipped to the tab, and never wider than what this `Ui` was already clipped to — the
-        // bar's own edge has to keep cutting the last tab off (see `nothing_widens_its_clip`).
-        ui.painter()
-            .with_clip_rect(inner.intersect(ui.clip_rect()))
-            .add(TextShape::new(text_pos, galley, tab_style.text_color));
-
-        if cut {
-            // Where the name runs out of tab it fades into the tab rather than stopping dead;
-            // that fade *is* the statement "there is more of this name", the one an ellipsis
-            // used to make at the cost of a third of what a squeezed tab has left.
-            let fade =
-                Rect::from_min_max(pos2(inner.right() - FADE_LENGTH, inner.top()), inner.max);
-            fade_out(ui, fade, tab_style.bg_fill, false);
-        }
+        // A title that fits is centred, as it always was; one that does not is pinned to the left
+        // and faded where it runs out of tab. Both rules live in `paint_title`, which a side
+        // strip's names go through as well — the two differ in which way they run, not in how
+        // they treat a title too long for its slot.
+        paint_title(
+            ui,
+            inner,
+            title,
+            tab_style.text_color,
+            tab_style.bg_fill,
+            false,
+            Some(&response),
+        );
 
         let close_response = show_close_button.then(|| {
             let mut close_button_rect = tab_rect;

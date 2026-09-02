@@ -10,6 +10,18 @@
   ignored for two releases; rename the method to `is_closeable` and take the tab by shared
   reference.
 
+- **Eight `TabViewer` hooks take `&Self::Tab` where they took `&mut Self::Tab`:** `title`, `id`,
+  `context_menu`, `on_tab_button`, `on_close`, `force_close`, `allowed_in_windows` and
+  `on_rect_changed`. None of them ever had a reason to write through the tab, and the draw pass no
+  longer lets them (see *The draw pass does not mutate the tree* below). A hook that edited its tab
+  in place has to say so through the application's own state instead.
+
+- **Upgraded to egui 0.36** (from 0.35).
+
+- **The package is `egui_dockyard`.** A dependency on it under the old name is written
+  `egui_dock = { git = "…", package = "egui_dockyard" }`, which keeps every `egui_dock::` path in
+  a consumer's source working unchanged.
+
 ### Added
 
 - **A tab title can carry an icon.** `TabViewer::title` now returns `egui::Atoms` — a row of text,
@@ -59,6 +71,51 @@
   junction of every line; painted cold they would be a grid of squares over the panels. The icon
   says which junction it is: three arms for a tee, drawn along the separators that meet there,
   and four for the crossing's pinwheel.
+
+- **A drag chooses who pays for it.** Dragging a divider moves the boundary; *which* panels give up
+  the pixels is now a mode, and the hand picks it with a modifier — `Chain` with nothing held (the
+  near neighbour pays down to its minimum, then the one behind it), `Pair` with Shift (exactly the
+  two children beside the gap), `Proportional` with Ctrl (every child pays in proportion). A row of
+  two behaves as it always did, because all three modes agree there.
+
+  The arithmetic is `core::resize`, away from `egui` and public: `SepBehavior`, `apply_drag`, and
+  the share helpers underneath them, so an application can drive a resize itself. Every gesture in
+  the crate that reads a held key is tabulated in [`docs/MODIFIERS.md`](docs/MODIFIERS.md).
+
+- **A whole side can be stowed.** Shift on a leaf's collapse arrow puts away the *entire side* it
+  belongs to, not the leaf: the subtree is laid out as one strip, its insides are not laid out at
+  all, and a single arrow brings it back exactly as it was — a leaf collapsed inside it days ago
+  comes back collapsed. Stowing is the row's own state (`RowNode::stowed`, `#[serde(default)]`), so
+  layouts written before it load as "not stowed", which is what they were.
+
+- **A strip says what is inside it.** A collapsed leaf or a stowed side is no longer a blank bar: it
+  names the tabs of the subtree behind it, turned a quarter turn, with a hairline between leaves so
+  three panels do not read as one list. A click on a name brings the panel back *showing that tab*.
+  The names are squeezed and truncated to whatever room the strip has, and what is still left over
+  is stood for by one ellipsis at the end.
+
+- **A tab bar squeezes its tabs, then says what it cannot show.** Tabs share out the width they
+  have instead of the first ones taking it all; a name fades where it runs out of room, the way a
+  browser does it; what will not fit at all is stood for by an ellipsis. Overflowing tabs scroll
+  with the wheel.
+
+- **`DockLayout` — where the dock cut, readable from outside a frame.** The layout pass records one
+  rectangle per node and per side strip, keyed by `(surface, node)`, and publishes it in `egui`
+  memory: `DockLayout::load(ctx, id)`, with `NodeGeometry` and `SideStrip`. Geometry is *derived*
+  every frame and is not state in the tree, which is why nothing in `core` carries a `Rect` any
+  more; anything that used to read one off a node reads it here.
+
+- `DockArea::show_inside_with_response` returns a `DockAreaResponse` describing
+  what changed during the render pass, exposing a `Vec<DockEvent>` plus
+  `layout_changed()` / `layout_committed()` helpers. `DockEvent` distinguishes
+  a continuous `SeparatorDragging` (one per frame while the user drags a
+  separator) from a finalised `LayoutCommitted` (tab close/move/detach,
+  leaf collapse, window minimise, separator drag end / arrow nudge /
+  double-click reset, focus change). Consumers can now record one undo
+  entry per completed user action instead of one per frame. `DockEvent`
+  and `DockAreaResponse` are `#[non_exhaustive]` so future fine-grained
+  variants can be added without breaking downstream consumers that go
+  through the helpers.
 
 ### Changed
 
@@ -118,6 +175,29 @@
   earlier versions are still read (both forms are accepted; only the new one is written),
   and they no longer carry the `Empty` slots that made deeply nested layouts explode.
 
+- **A split is a row of as many panels as it has.** `Node::Horizontal(SplitNode)` and
+  `Node::Vertical(SplitNode)` — two variants carrying identical data — are one `Node::Row(RowNode)`
+  whose axis is a field (`RowNode::is_horizontal` / `is_vertical`). A row holds `n` children with
+  one weight each (`Share`) instead of two and a fraction, and splitting a panel whose row already
+  runs along that axis **joins** that row rather than nesting a second pair inside it.
+
+  What follows from it, and is the point of it: dragging one boundary no longer moves panels that
+  are not beside it, a row collapses panel by panel rather than taking its whole subtree, and the
+  layout cuts one rectangle per child and draws one divider per gap. A boundary is therefore
+  addressed by the gap it sits in — `GapIndex`, `GapPath`, `RowGap` — rather than by the node that
+  draws it; `RowNode::fraction()` still answers for a row of two, and panics on a longer one rather
+  than inventing a number.
+
+  On disk nothing changed for the reader: a file that spells a row as a chain of nested pairs is
+  collapsed back into one row on the way in, and the pair variants are still read.
+
+- **The draw pass does not mutate the tree.** Rendering reads the dock read-only and *queues* what
+  it wants changed; the mutations are applied after the pass, in one batch. An application that
+  watches its `DockState` for edits sees one batch per frame instead of writes interleaved with
+  drawing, and a `TabViewer` hook is handed `&Self::Tab` (see *Breaking changes*) because there is
+  nothing for it to write during a pass that is only reading. Transposing a crossing became an
+  operation on the tree for the same reason, rather than something drawing did to it in place.
+
 ### Fixed
 
 - Closing a tab while it is being dragged no longer panics, and no longer hands the drag to
@@ -149,6 +229,14 @@
   actually looking at. Tracked via a new `LeafNode::prev_active` field
   (`#[serde(default)]`, so existing serialized layouts load unchanged).
 
+- A collapsed half no longer has a boundary to drag. The divider beside a strip was still there to
+  be grabbed, and moving it edited the width the hidden panel was keeping — nothing moved on
+  screen, and the panel came back the wrong size.
+
+- A strip in the middle of a row no longer takes the row's junction handle away. The line beside a
+  collapsed panel is cut at the strip's edge rather than at its ratio, and the handles on that line
+  went missing with it.
+
 ## egui_dockyard 0.20.1 - 2026/06/28
 
 ### Fixed
@@ -161,21 +249,6 @@
 ### Breaking changes
 
 - Upgraded to egui 0.35. (#326)
-## Unreleased
-
-### Added
-
-- `DockArea::show_inside_with_response` returns a `DockAreaResponse` describing
-  what changed during the render pass, exposing a `Vec<DockEvent>` plus
-  `layout_changed()` / `layout_committed()` helpers. `DockEvent` distinguishes
-  a continuous `SeparatorDragging` (one per frame while the user drags a
-  separator) from a finalised `LayoutCommitted` (tab close/move/detach,
-  leaf collapse, window minimise, separator drag end / arrow nudge /
-  double-click reset, focus change). Consumers can now record one undo
-  entry per completed user action instead of one per frame. `DockEvent`
-  and `DockAreaResponse` are `#[non_exhaustive]` so future fine-grained
-  variants can be added without breaking downstream consumers that go
-  through the helpers.
 
 ## egui_dockyard 0.19.1 - 2026/03/31
 

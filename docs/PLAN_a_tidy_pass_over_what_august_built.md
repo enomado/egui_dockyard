@@ -118,7 +118,7 @@ The split is not "move it all": the inline tests reach into `Junctions`, `Band`,
 **DoD.** `junction.rs` is under 2000 lines. Every moved test keeps its name and its body. `ls
 tests/ | wc -l` grows by what moved. No test is edited beyond its `use` lines.
 
-**Done as (2) below, `<this commit>`** — Стас's call, 2026-09-02, on the finding that follows.
+**Done as (2) below, `ac1568c`** — Стас's call, 2026-09-02, on the finding that follows.
 `junction.rs` is 1228 lines and its 2997 lines of tests are `junction/tests.rs`, reached by
 `#[cfg(test)] mod tests;`. The move was byte-exact and says so: the body of the module, one indent
 level shallower, and nothing else — checked by re-deriving the new file from the committed one and
@@ -249,6 +249,16 @@ has to do about it.
 
 **DoD.** No two `## Unreleased` headings. Every feature named in the README's *What's new* has an
 entry. `git log --since=2026-08-01 --format=%s` has no feature-level commit without one.
+
+**Done.** The stranded section's one entry moved into the live `### Added` verbatim and the heading
+went. Nine entries were written from the commits: the row of `n` panels and what follows from it,
+the resize modes and their modifiers, stowing a side, the strip that names its contents, the
+squeezed tab bar and its wheel, `DockLayout`, the read-only draw pass, and two fixes — the hidden
+half's ungrabbable boundary and the strip that swallowed a row's handle. Four of them are breaking
+and say so where a consumer will look: egui 0.36, the eight `TabViewer` hooks narrowed to
+`&Self::Tab`, the package rename, and stage 5's removal. The only commits since 01.08 left without
+an entry are a test-only gate (`425f14e`) and a one-line dependency bump (`9369ffa`) covered by the
+egui line.
 
 ### 9. The small documentation debts
 

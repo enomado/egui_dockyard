@@ -241,14 +241,50 @@
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
-#[allow(deprecated)]
-pub use crate::core::*;
+// The front door: every name the crate answers to without a module path, written down.
+//
+// This was four glob re-exports — `core::*`, `style::*`, `tree::*`, `widgets::*` — beside the
+// `pub mod` declarations below, so every public type was reachable by two paths and `docs.rs`
+// listed it twice. The list is the same set of names, and the module paths still work, which is
+// the point: `egui_dockyard::DockState` and `egui_dockyard::core::DockState` are both live, and
+// no import anywhere has to change. What a glob did that a list does not is export the *next*
+// public type by accident.
 pub use egui;
-pub use layout::{DockLayout, NodeGeometry, SideStrip};
-pub use style::*;
-pub use translations::*;
-pub use tree::*;
-pub use widgets::*;
+
+pub use crate::core::{
+    DockState, Error, Result, SurfaceIndex, SurfaceMut, SurfaceRef, WindowIndex, WindowState,
+};
+// The modules the globs carried up to the root along with the names in them. Kept because they
+// are as much part of the front door as the types: `egui_dockyard::resize::SepBehavior` and
+// `egui_dockyard::core::resize::SepBehavior` are the same item by two paths, and consumers use
+// both.
+pub use crate::core::{
+    geom, resize, shape, surface, surface_index, translations, tree, window_state,
+};
+#[cfg(any(test, feature = "testkit"))]
+pub use crate::core::testkit;
+pub use crate::core::translations::{
+    LeafTranslations, TabContextMenuTranslations, Translations,
+};
+pub use crate::core::tree::{
+    ChildIndex, DockViolation, GapIndex, GapPath, LeafNode, Node, NodeId, NodePath, RowGap,
+    RowNode, Share, Split, SurfaceViolation, TabDestination, TabId, TabIndex, TabInsert, TabIter,
+    TabPath, Tree, TreeViolation,
+};
+pub use crate::core::tree::{node, node_id, persist, tab_index, tab_iter, validate};
+pub use crate::layout::{DockLayout, NodeGeometry, SideStrip};
+pub use crate::style::{
+    ButtonsStyle, CrossSplitToggleStyle, LeafHighlighting, OverlayFeel, OverlayStyle, OverlayType,
+    SeparatorStyle, Style, TabAddAlign, TabBarStyle, TabBodyStyle, TabInteractionStyle, TabStyle,
+};
+pub use crate::widgets::dock_area::ids::{
+    drag_hover_node, drag_in_flight, dragged_tab, tab_widget_id,
+};
+pub use crate::widgets::dock_area::{
+    AllowedSplits, DockArea, DragInFlight, DragSource, DragSubject, JunctionArms, WindowEdge,
+};
+pub use crate::widgets::tab_viewer::TabViewer;
+pub use crate::widgets::{dock_area, tab_viewer};
 
 /// The model: dock state, trees, nodes and the operations over them.
 ///

@@ -271,7 +271,12 @@ pub use crate::core::tree::{
     RowNode, Share, Split, SurfaceViolation, TabDestination, TabId, TabIndex, TabInsert, TabIter,
     TabPath, Tree, TreeViolation,
 };
-pub use crate::core::tree::{node, node_id, persist, tab_index, tab_iter, validate};
+pub use crate::core::tree::{node, node_id, tab_index, tab_iter, validate};
+// The glob carried this one only when the feature that declares it was on; a list has to say so
+// itself, and the featureless build is where that shows — `cargo clippy --all-features` compiles
+// the module and never asks.
+#[cfg(feature = "serde")]
+pub use crate::core::tree::persist;
 pub use crate::layout::{DockLayout, NodeGeometry, SideStrip};
 pub use crate::style::{
     ButtonsStyle, CrossSplitToggleStyle, LeafHighlighting, OverlayFeel, OverlayStyle, OverlayType,

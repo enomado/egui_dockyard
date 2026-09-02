@@ -29,6 +29,14 @@ pub mod shape;
 /// until now.
 pub mod resize;
 
+/// Where a row's children are cut along its axis, and how far a boundary between two of them
+/// may move.
+///
+/// The drawing pass turns the answers into rectangles; the answers themselves are `f32`
+/// arithmetic and are judged here, without a `Ui`. Internal to the crate — it is how the dock
+/// lays a row out, not something a caller states.
+pub(crate) mod cut;
+
 /// Vocabulary of dock operations shared by the property tests and the fuzzer.
 ///
 /// Available to this crate's own tests always, and to outside harnesses (the `fuzz/` crate)

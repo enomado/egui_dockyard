@@ -217,6 +217,36 @@ egui-free gate already cover.
 `show/mod.rs` is under 2000 lines. The moved tests run unchanged apart from imports. The DST
 sweep (`cargo test --test dst`) passes at the same seeds.
 
+**Done, with the line count owed and the reason measured.** Both pieces are
+[`core::cut`](../src/core/cut.rs) — one module and not two, because they answer the same question
+(*where along the axis*) and the second is the first one's boundary: `cut_runs` says where the
+children are cut, `SeparatorBand` says how far the cut between two of them may move. Everything
+moved is `pub(crate)` in a `pub(crate) mod`, so stage 4's list of exported names is untouched and
+nothing new is public. The bodies are byte-exact — checked by diffing the new file against the
+committed one, which leaves exactly the visibility keywords and the doc links that had to stop
+pointing at `DockArea` — and the ten moved tests are byte-exact including their banner. 353 tests
+pass, clippy is silent, the DST sweep passes at its seeds, `cargo doc` keeps its 27 warnings.
+
+Three of the four DoD clauses hold. The line count does not, and the estimate above is where it
+went wrong: it read the tests below `cut_runs` as ~780 lines of arithmetic, and they are not.
+Counted, the module's 800 lines of test are **285 pure** and **515 on screen** — the latter build
+a `DockState`, run four headless frames and read `DockLayout` back, which is the job of `show/`
+and cannot be judged without a `Ui`. So `show/mod.rs` is **2481**: 1967 lines of code — already
+under the number the DoD asked for — and 514 of frame tests. They cannot go to `tests/` either,
+for stage 3's reason one file over: they measure against `collapsed_strip_height` /
+`collapsed_strip_width`, which are `pub(super)`. The two ways to close it are the two stage 3
+already wrote down — leave them, or move the module (`#[cfg(test)] mod tests;` beside `mod.rs`,
+which puts the file at 1969 lines and the tests no closer to `tests/`) — and it is the same call,
+so it is left to Стас rather than taken twice.
+
+**A stage-4 hole the featureless build was hiding.** `cargo test` did not compile:
+`pub use crate::core::tree::{… persist …}` names a module that only exists under the `serde`
+feature, and the glob it replaced had carried it *conditionally* by construction. Every check
+stage 4 ran was `--all-features`, which compiles `persist` and never asks. Fixed here with the
+`#[cfg(feature = "serde")]` the list has to state for itself; nothing was released in between, so
+the CHANGELOG has nothing to say about it. Worth keeping in mind for stage 7: `--all-features` is
+not the build a consumer gets.
+
 ### 7. Titles measure in one place, glyphs draw in another
 
 `show/leaf.rs` is the same shape as stage 6 and splits the same way:

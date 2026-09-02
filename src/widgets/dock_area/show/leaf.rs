@@ -282,7 +282,24 @@ fn paint_title(
             SizedAtomKind::Text(galley) => {
                 paint_galley(inner.painter(), cell, galley, color, vertical);
             }
-            SizedAtomKind::Image { image, size: _ } => image.paint_at(inner, cell),
+            SizedAtomKind::Image { image, size: _ } => {
+                // An icon takes the colour the *name* beside it was given, so a monochrome icon
+                // follows the tab through active/inactive/hovered and through a theme change the
+                // same way its text does. Without this it would be painted in whatever the image
+                // itself is, and a set drawn for a dark theme would vanish on a light one.
+                //
+                // Only a *default* tint is replaced: a consumer that asked for a colour asked for
+                // that colour — a multi-coloured logo, or an icon deliberately off the text's hue —
+                // and this must not silently repaint it. `Color32::WHITE` is `ImageOptions`' own
+                // default and is the identity of the multiply, so "untinted" and "tinted white"
+                // are the same request and are answered the same way.
+                let image = if image.image_options().tint == Color32::WHITE {
+                    image.tint(color)
+                } else {
+                    image
+                };
+                image.paint_at(inner, cell);
+            }
             SizedAtomKind::Empty { .. } => {}
             SizedAtomKind::Layout(layout) => {
                 // Painted only where there is a `Response` to paint it against; see the doc above.

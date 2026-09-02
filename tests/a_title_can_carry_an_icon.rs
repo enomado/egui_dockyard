@@ -24,8 +24,8 @@
 
 use egui::load::SizedTexture;
 use egui::{
-    Atoms, CentralPanel, Context, Id, Image, LayerId, Pos2, RawInput, Rect, Shape, TextureId, Ui,
-    Vec2,
+    Atoms, CentralPanel, Color32, Context, Id, Image, LayerId, Pos2, RawInput, Rect, Shape,
+    TextureId, Ui, Vec2,
 };
 use egui_dockyard::{
     DockArea, DockLayout, DockState, NodeId, NodePath, Style, SurfaceIndex, TabViewer,
@@ -64,8 +64,11 @@ fn long_name(index: usize) -> String {
 
 /// Names its tabs, with an icon in front of each one or without, so that the same scene can be
 /// asked both questions and the difference between the answers is the icon itself.
+#[derive(Clone)]
 struct Viewer {
     icons: bool,
+    /// A colour the consumer asked for, rather than the default the dock is free to replace.
+    tint: Option<Color32>,
 }
 
 impl TabViewer for Viewer {
@@ -73,7 +76,11 @@ impl TabViewer for Viewer {
 
     fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> {
         if self.icons {
-            Atoms::new((icon(), tab.clone()))
+            let icon = match self.tint {
+                Some(tint) => icon().tint(tint),
+                None => icon(),
+            };
+            Atoms::new((icon, tab.clone()))
         } else {
             Atoms::new(tab.clone())
         }
@@ -100,13 +107,26 @@ struct Painted {
     /// What the painter lets through — the slot the title was given, which is what says which tab
     /// this piece belongs to and how much room that tab had.
     clip: Rect,
+    /// The colour the dock handed the name — [`egui::epaint::TextShape::fallback_color`], which is
+    /// the `color` argument `paint_title` was called with.
+    color: Color32,
+}
+
+/// One icon the frame painted, and the colour it was painted in.
+///
+/// The colour is the rectangle's own fill, which is what a textured rectangle multiplies its
+/// texture by — i.e. the image's tint.
+#[derive(Clone, Copy, Debug)]
+struct PaintedIcon {
+    rect: Rect,
+    tint: Color32,
 }
 
 /// What one frame painted: the names, and the icons beside them.
 #[derive(Clone, Debug, Default)]
 struct Frame {
     names: Vec<Painted>,
-    icons: Vec<Rect>,
+    icons: Vec<PaintedIcon>,
 }
 
 /// Every piece of text the dock's own layer painted this frame.
@@ -129,6 +149,7 @@ fn painted_text(ctx: &Context) -> Vec<Painted> {
                                 .collect(),
                             rect: entry.shape.visual_bounding_rect(),
                             clip: entry.clip_rect,
+                            color: text.fallback_color,
                         }),
                         _ => None,
                     })
@@ -142,7 +163,7 @@ fn painted_text(ctx: &Context) -> Vec<Painted> {
 ///
 /// Selected by the *texture it is filled from*, so the tab's own background — a filled rectangle
 /// in the same layer — is never mistaken for one.
-fn painted_icons(ctx: &Context) -> Vec<Rect> {
+fn painted_icons(ctx: &Context) -> Vec<PaintedIcon> {
     ctx.graphics(|graphics| {
         graphics
             .get(LayerId::background())
@@ -153,7 +174,10 @@ fn painted_icons(ctx: &Context) -> Vec<Rect> {
                             .brush
                             .as_ref()
                             .is_some_and(|brush| brush.fill_texture_id == ICON)
-                            .then_some(rect.rect),
+                            .then_some(PaintedIcon {
+                                rect: rect.rect,
+                                tint: rect.fill,
+                            }),
                         _ => None,
                     })
                     .collect()
@@ -165,6 +189,17 @@ fn painted_icons(ctx: &Context) -> Vec<Rect> {
 /// A few quiet frames, answering with what the last one painted: the geometry map has to settle
 /// before the bar is sharing out a width it will keep.
 fn frames(ctx: &Context, state: &mut DockState<String>, style: &Style, icons: bool) -> Frame {
+    frames_with(ctx, state, style, &Viewer { icons, tint: None })
+}
+
+/// The same scene, driven by a viewer the caller built — used where what is being asked about is
+/// the viewer's own request rather than the presence of an icon.
+fn frames_with(
+    ctx: &Context,
+    state: &mut DockState<String>,
+    style: &Style,
+    viewer: &Viewer,
+) -> Frame {
     let mut painted = Frame::default();
     for _ in 0..4 {
         let input = RawInput {
@@ -179,7 +214,7 @@ fn frames(ctx: &Context, state: &mut DockState<String>, style: &Style, icons: bo
                     .show_leaf_close_all_buttons(false)
                     .show_leaf_collapse_buttons(true)
                     .collapse_sideways(true)
-                    .show_inside(ui, &mut Viewer { icons });
+                    .show_inside(ui, &mut viewer.clone());
             });
             painted = Frame {
                 names: painted_text(ui.ctx()),
@@ -217,10 +252,10 @@ fn names_in(painted: &[Painted], area: Rect) -> Vec<Painted> {
         .collect()
 }
 
-fn icons_in(painted: &[Rect], area: Rect) -> Vec<Rect> {
+fn icons_in(painted: &[PaintedIcon], area: Rect) -> Vec<PaintedIcon> {
     painted
         .iter()
-        .filter(|icon| area.expand(TOLERANCE).contains_rect(**icon))
+        .filter(|icon| area.expand(TOLERANCE).contains_rect(icon.rect))
         .copied()
         .collect()
 }
@@ -249,7 +284,7 @@ fn an_icon_is_drawn_before_the_name() {
         1,
         "one tab carrying one icon should paint exactly one, got {icons:?}"
     );
-    let icon = icons[0];
+    let icon = icons[0].rect;
     assert!(
         (icon.size() - ICON_SIZE).length() <= TOLERANCE,
         "the icon should keep the size it was given, got {:?}",
@@ -362,7 +397,7 @@ fn a_strip_carries_the_icon_upright() {
         1,
         "the strip names one tab, so it draws one icon, got {icons:?}"
     );
-    let icon = icons[0];
+    let icon = icons[0].rect;
     assert!(
         (icon.size() - ICON_SIZE).length() <= TOLERANCE,
         "an icon stays upright while the name turns — turned, this one would come back {:?}",
@@ -376,4 +411,83 @@ fn a_strip_carries_the_icon_upright() {
         "a strip reads bottom to top, so the first atom is the lowest: icon {icon:?}, name {:?}",
         names[0].rect
     );
+}
+
+/// An icon is painted in the colour its own tab gave the name beside it.
+///
+/// A monochrome icon that kept the colour it was drawn in would be a set that works on one theme
+/// and disappears on the other, and would not follow a tab from inactive to active. The scene has
+/// two tabs *because* one of them is the active one: the dock hands those two different text
+/// colours, so an implementation that painted every icon in one constant — including the right
+/// constant for the active tab — passes half of this and fails the other half.
+#[test]
+fn an_icon_takes_the_colour_of_its_name() {
+    // The two states have to be *told apart* for the scene to be worth running: `Style::from_egui`
+    // gives an active tab and an inactive one the same text colour, and against that a constant
+    // would satisfy every comparison below. The final assertion holds this honest.
+    let mut style = style();
+    style.tab.active.text_color = Color32::from_rgb(240, 240, 240);
+    style.tab.inactive.text_color = Color32::from_rgb(120, 90, 60);
+    let (mut state, leaf) = a_leaf_of(2);
+
+    let ctx = Context::default();
+    let painted = frames(&ctx, &mut state, &style, true);
+    let bar = bar_of(&ctx, leaf, &style);
+
+    let mut icons = icons_in(&painted.icons, bar);
+    let mut names = names_in(&painted.names, bar);
+    assert_eq!(icons.len(), 2, "two tabs, two icons: {icons:?}");
+    assert_eq!(names.len(), 2, "two tabs, two names: {names:?}");
+
+    // Along the bar, so each icon is read against the name of the same tab.
+    icons.sort_by(|a, b| a.rect.left().total_cmp(&b.rect.left()));
+    names.sort_by(|a, b| a.rect.left().total_cmp(&b.rect.left()));
+
+    for (icon, name) in icons.iter().zip(&names) {
+        assert_eq!(
+            icon.tint, name.color,
+            "the icon of {:?} should be painted in the colour of its own name, got {:?} against {:?}",
+            name.text, icon.tint, name.color
+        );
+    }
+
+    assert_ne!(
+        names[0].color, names[1].color,
+        "this scene is only worth running while the active tab and the inactive one are named in \
+         different colours — otherwise a constant would satisfy the loop above"
+    );
+}
+
+/// A tint the consumer asked for is left alone.
+///
+/// The rule above replaces the *default* tint, which is what "this icon has no colour of its own"
+/// looks like. An icon handed an explicit colour — a multi-coloured logo, a status dot that is
+/// meant to stay red — has one, and repainting it in the tab's text colour would be the dock
+/// overruling its consumer.
+#[test]
+fn an_explicit_tint_is_left_alone() {
+    let style = style();
+    let (mut state, leaf) = a_leaf_of(2);
+
+    let asked_for = Color32::from_rgb(200, 30, 90);
+    let ctx = Context::default();
+    let painted = frames_with(
+        &ctx,
+        &mut state,
+        &style,
+        &Viewer {
+            icons: true,
+            tint: Some(asked_for),
+        },
+    );
+    let bar = bar_of(&ctx, leaf, &style);
+
+    let icons = icons_in(&painted.icons, bar);
+    assert_eq!(icons.len(), 2, "two tabs, two icons: {icons:?}");
+    for icon in &icons {
+        assert_eq!(
+            icon.tint, asked_for,
+            "the consumer asked for {asked_for:?}, so that is what should be painted"
+        );
+    }
 }

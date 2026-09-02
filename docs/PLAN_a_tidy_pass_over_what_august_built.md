@@ -118,7 +118,15 @@ The split is not "move it all": the inline tests reach into `Junctions`, `Band`,
 **DoD.** `junction.rs` is under 2000 lines. Every moved test keeps its name and its body. `ls
 tests/ | wc -l` grows by what moved. No test is edited beyond its `use` lines.
 
-**Blocked, and the reason is worth more than the stage.** The split above assumes the two kinds of
+**Done as (2) below, `<this commit>`** — Стас's call, 2026-09-02, on the finding that follows.
+`junction.rs` is 1228 lines and its 2997 lines of tests are `junction/tests.rs`, reached by
+`#[cfg(test)] mod tests;`. The move was byte-exact and says so: the body of the module, one indent
+level shallower, and nothing else — checked by re-deriving the new file from the committed one and
+diffing, not by reading it. 353 tests pass, clippy stays silent. What the stage wanted and did not
+get is that the claims are no closer to `tests/`; what it gets instead is that the file which is
+*not* the crate's largest piece of logic has stopped being the crate's largest file.
+
+**The finding, which is worth more than the stage.** The split above assumes the two kinds of
 test differ in what they *assert*. They do not — they differ in nothing, because **aiming at a
 junction is itself private**. Every behavioural test finds the handle it is about to click through
 one of four helpers — `junctions_on`, `toggle_centers`, `toggle_center`, `press_toggle` — and all

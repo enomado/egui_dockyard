@@ -315,10 +315,11 @@ were: written down rather than taken.
   showed `src/core/cut.rs` is not clean under that config, so this is the crate's habit and not an
   accident. And per the usual trap, `rustfmt src/core/mod.rs` follows the `mod` tree and
   reformats every file under it.
-* **Say which build a test count came from.** `cargo test` passes 329 tests here and
-  `--all-features` passes more; stage 6's note and this stage's second commit both name "353"
-  without saying which, and 353 is not the featureless number — which is the build stage 6 itself
-  found broken. `cargo doc` is the same trap in a different coat: stage 6 recorded 27 warnings,
+* **Say which build a test count came from.** Measured after this stage: `cargo test` passes
+  **329**, `cargo test --all-features` passes **357**, both with nothing failing. Stage 6's "353"
+  was the second of those, and this stage's second commit repeats it — by then it was already the
+  wrong number by exactly the four tests that commit added. Neither note says which build it
+  counted, and the featureless one is the build stage 6 itself found broken. `cargo doc` is the same trap in a different coat: stage 6 recorded 27 warnings,
   today's run prints "30 warnings (2 duplicates)", and the checkable claim is not the total but
   that none of them names `core::fit`, `show::glyph` or `show::title`.
 

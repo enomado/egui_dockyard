@@ -85,43 +85,59 @@ fn atom_breadth(atom: &SizedAtom<'_>, vertical: bool) -> f32 {
 /// *seen* is [`crate::core::fit::fit_strip_names`]'s or [`crate::core::fit::fit_tab_widths`]'s
 /// answer, not the text layout's.
 ///
-/// An image is held to the **type size** of the text beside it — the em, not the line box — so
+/// An image is capped at the **type size** of the text beside it — the em, not the line box — so
 /// that an icon reads as one of the letters rather than as something standing behind them. It is a
-/// default and not a rule: an atom given a size of its own ([`egui::AtomExt::atom_size`]) keeps it.
+/// ceiling and not a resize: a smaller icon stays smaller, and an atom given a size of its own
+/// ([`egui::AtomExt::atom_size`]) keeps it.
 ///
-/// # Why not the line height, which is what a button does
+/// # Why a ceiling and not an offer of room
+///
+/// Only one of egui's three [`egui::ImageFit`]s asks how much room it has. `Fraction` — the
+/// default for an image loaded from bytes or a uri — takes what it is offered; `Exact` and
+/// `Original` do not, and `Original` is exactly what an icon *registry* hands over (rerun's
+/// `Icon::as_image` is `fit_to_original_size`, and so is every set that follows it). An icon set
+/// drawn on a 24 px grid therefore landed 24 px tall no matter what room the title offered it —
+/// which, in a 24 px tab bar, is the whole tab from edge to edge. `max_size` is the one lever all
+/// three fits obey.
+///
+/// # Why the em and not the line height, which is what a button does
 ///
 /// [`egui::Button`] limits an icon to `atom_max_height_font_size`, and that helper — the name
 /// notwithstanding — hands back the *row height*. It is the right answer there and the wrong one
-/// here, and the difference is that a button grows to fit its contents while **a tab bar is a
-/// fixed [`crate::TabBarStyle::height`]**. At the typography this crate is used with (a 14 pt
-/// button face laying out a ~19 pt line inside a 24 pt bar) an icon given the whole line box
-/// leaves two and a half points of tab above and below it, against the seven the letters leave:
-/// the icon swells to nearly the height of its own tab and reads as bursting out of it, while the
-/// name beside it sits calmly. An em — the size the letters were asked for — puts the two on the
-/// same optical footing whatever the tab bar is styled to.
+/// here: a button grows to fit its contents, while **a tab bar is a fixed
+/// [`crate::TabBarStyle::height`]**. Measured at the typography this crate is used with — a 14 pt
+/// button face, a 16.4 pt line, a 24 pt bar — the line box leaves 3.8 pt of tab above and below
+/// the icon against the 7 the letters leave, so even a correctly *offered* icon still reads as
+/// crowding its tab. The em is the size the letters themselves were asked for, which puts the two
+/// on the same optical footing whatever the bar is styled to.
 ///
-/// Only pictures are measured this way. Text is laid out against the width alone (the height of
-/// the room it is offered does not enter into a galley), and a nested [`egui::AtomLayout`] is a
-/// widget of its own that was never promised a particular height.
+/// Only pictures are capped. Text is laid out against the width alone (the height of the room it
+/// is offered does not enter into a galley), and a nested [`egui::AtomLayout`] is a widget of its
+/// own that was never promised a particular height.
 pub(super) fn measure_title(ui: &Ui, title: Atoms<'static>) -> SizedTitle {
     let line = ui.text_style_height(&TextStyle::Button);
     let em = TextStyle::Button.resolve(ui.style()).size;
     SizedTitle {
         atoms: title
             .into_iter()
-            .map(|atom| {
-                // A picture that was given no size of its own is the one thing here that grows to
-                // whatever room it is offered, so it is the one thing the em is offered to. An
-                // atom that carries its own size ignores the offer anyway; the match says so
-                // rather than leaving it to be re-derived from egui's sizing rules.
-                let room = match (&atom.kind, atom.size) {
-                    (AtomKind::Image(_), None) => em,
-                    _ => line,
-                };
+            .map(|mut atom| {
+                // An atom carrying its own size is answering this question itself, so it is left
+                // alone — a ceiling here would silently overrule it, and `atom_size` is the
+                // documented way to say "this icon is different".
+                //
+                // The ceiling goes on the *image*, not on the atom: `Atom::max_size` only bounds
+                // the room offered, and it is precisely the fits that ignore the room which need
+                // holding down. `Image::max_height` is what `calc_size` consults in all three.
+                if atom.size.is_none()
+                    && matches!(atom.kind, AtomKind::Image(_))
+                    && let AtomKind::Image(image) =
+                        std::mem::replace(&mut atom.kind, AtomKind::Empty)
+                {
+                    atom.kind = AtomKind::Image(image.max_height(em));
+                }
                 atom.into_sized(
                     ui,
-                    vec2(f32::INFINITY, room),
+                    vec2(f32::INFINITY, line),
                     Some(TextWrapMode::Extend),
                     TextStyle::Button.into(),
                 )

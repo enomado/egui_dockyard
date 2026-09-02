@@ -62,10 +62,26 @@ fn long_name(index: usize) -> String {
     format!("Panel number {index} with a name of some length")
 }
 
-/// The natural size of an icon that has none of its own — a square the size an icon set is usually
-/// drawn at, and taller than either the line or the em, so that the room it is offered is what
-/// decides how big it lands.
+/// The grid an icon set is usually drawn on — and taller than either the line or the em, so that
+/// an icon left at this size would be as tall as a whole tab.
 const DRAWN_AT: Vec2 = Vec2::splat(24.0);
+
+/// How an icon answers the question "how big are you" — egui's three [`egui::ImageFit`]s, of which
+/// only one asks how much room it was given.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Sizing {
+    /// [`Image::from_texture`], which egui reads as `Exact`: a consumer handing over a sized
+    /// texture is taken to mean that size. Every scene in this file but one is on these terms —
+    /// which is why they could not see the rule about size at all.
+    Exact,
+    /// `Fraction` — the default for an image loaded from bytes or a uri, and the only fit that
+    /// takes the room it is offered.
+    Fraction,
+    /// `Original` — its own natural size, room be damned. This is what an icon *registry* hands
+    /// over (rerun's `Icon::as_image` is `fit_to_original_size`, and ours follows it), so it is
+    /// the case a real set actually runs into.
+    Original,
+}
 
 /// Names its tabs, with an icon in front of each one or without, so that the same scene can be
 /// asked both questions and the difference between the answers is the icon itself.
@@ -74,14 +90,9 @@ struct Viewer {
     icons: bool,
     /// A colour the consumer asked for, rather than the default the dock is free to replace.
     tint: Option<Color32>,
-    /// An icon that takes the room it is offered, the way a *loaded* one does.
-    ///
-    /// [`Image::from_texture`] is [`egui::ImageFit::Exact`] — egui assumes a consumer handing over
-    /// a sized texture means that size — so the icons above are the one kind that never asks how
-    /// much room it has. A set loaded from bytes or a uri (which is every real icon set, ours
-    /// included) is `Fraction` and scales to the offer, and that is the kind whose size the dock
-    /// decides. `fit_to_fraction` puts a texture on those terms without needing a loader.
-    fitting: bool,
+    /// On what terms the icon answers "how big are you" — see [`Sizing`]. A texture is put on any
+    /// of the three by `fit_to_*`, so the whole question can be asked without a loader.
+    sizing: Sizing,
 }
 
 impl TabViewer for Viewer {
@@ -89,11 +100,11 @@ impl TabViewer for Viewer {
 
     fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> {
         if self.icons {
-            let base = if self.fitting {
-                Image::from_texture(SizedTexture::new(ICON, DRAWN_AT))
-                    .fit_to_fraction(Vec2::splat(1.0))
-            } else {
-                icon()
+            let drawn_at = || Image::from_texture(SizedTexture::new(ICON, DRAWN_AT));
+            let base = match self.sizing {
+                Sizing::Exact => icon(),
+                Sizing::Fraction => drawn_at().fit_to_fraction(Vec2::splat(1.0)),
+                Sizing::Original => drawn_at().fit_to_original_size(1.0),
             };
             let icon = match self.tint {
                 Some(tint) => base.tint(tint),
@@ -215,7 +226,7 @@ fn frames(ctx: &Context, state: &mut DockState<String>, style: &Style, icons: bo
         &Viewer {
             icons,
             tint: None,
-            fitting: false,
+            sizing: Sizing::Exact,
         },
     )
 }
@@ -486,65 +497,104 @@ fn an_icon_takes_the_colour_of_its_name() {
     );
 }
 
-/// An icon that has no size of its own is held to the **em** — the type size of the name beside
-/// it — and not to the line box that name is laid out in.
+/// An icon drawn bigger than the type is brought down to the **em** — the size of the name beside
+/// it — however it answers the question of its own size.
 ///
-/// # Why this one needs an icon of a different kind
+/// # Why this one needs icons of a different kind
 ///
 /// Every scene above hands the dock an [`Image::from_texture`], which egui reads as
 /// [`egui::ImageFit::Exact`]: it is the one kind of image that never asks how much room it has, so
 /// the six tests written before this one could not see the sizing rule at all — they would go on
-/// passing whatever the dock offered. Real icon sets are loaded from bytes or a uri, which is
-/// `Fraction`, and *that* kind takes the room it is given. This scene puts a texture on those
-/// terms so the property can be stated without a loader.
+/// passing whatever the dock did. And the fit a real icon set is on is not `Exact` but
+/// [`Sizing::Original`]: a registry (rerun's, and ours after it) hands over
+/// `fit_to_original_size`, which ignores the room offered just as thoroughly. That is why the rule
+/// has to be a **ceiling** rather than an offer of room — and why this scene runs both fits, since
+/// a ceiling that only reached the one that asks would leave every real set at 24 px.
 ///
-/// The em rather than the line is what keeps an icon from swelling to the height of its own tab: a
-/// tab bar is a fixed height while the line box is most of it, so an icon given the line lands
-/// with a couple of points of tab above and below it while the letters beside it have seven.
+/// The em rather than the line box is what keeps an icon from crowding its own tab: a tab bar is a
+/// fixed height while the line is most of it.
 #[test]
-fn an_icon_of_its_own_size_is_held_to_the_em() {
-    let style = style();
-    let (mut state, leaf) = a_leaf_of(2);
-
-    let ctx = Context::default();
-    let painted = frames_with(
-        &ctx,
-        &mut state,
-        &style,
-        &Viewer {
-            icons: true,
-            tint: None,
-            fitting: true,
-        },
-    );
-    let bar = bar_of(&ctx, leaf, &style);
-
+fn an_icon_bigger_than_the_type_is_brought_down_to_it() {
     let font = egui::TextStyle::Button.resolve(&egui::Style::default());
     let em = font.size;
-    let line = ctx.fonts_mut(|fonts| fonts.row_height(&font));
 
-    let icons = icons_in(&painted.icons, bar);
-    assert_eq!(icons.len(), 2, "two tabs, two icons: {icons:?}");
-    for icon in &icons {
-        assert!(
-            (icon.rect.height() - em).abs() <= TOLERANCE,
-            "an icon drawn at {DRAWN_AT:?} should come down to the em ({em}), not to the line \
-             ({line}) and not to its own size: got {:?}",
-            icon.rect.size()
+    for sizing in [Sizing::Fraction, Sizing::Original] {
+        let style = style();
+        let (mut state, leaf) = a_leaf_of(2);
+
+        let ctx = Context::default();
+        let painted = frames_with(
+            &ctx,
+            &mut state,
+            &style,
+            &Viewer {
+                icons: true,
+                tint: None,
+                sizing,
+            },
         );
-        // Square in, square out: an icon held by its height must not be stretched by the width it
-        // was offered, which is the whole bar.
+        let bar = bar_of(&ctx, leaf, &style);
+        let line = ctx.fonts_mut(|fonts| fonts.row_height(&font));
+
+        let icons = icons_in(&painted.icons, bar);
+        assert_eq!(
+            icons.len(),
+            2,
+            "two tabs, two icons ({sizing:?}): {icons:?}"
+        );
+        for icon in &icons {
+            assert!(
+                (icon.rect.height() - em).abs() <= TOLERANCE,
+                "an icon drawn at {DRAWN_AT:?} on {sizing:?} terms should come down to the em \
+                 ({em}), not to the line ({line}) and not stay at its own size: got {:?}",
+                icon.rect.size()
+            );
+            // Square in, square out: an icon held by its height must not be stretched by the width
+            // it was offered, which is the whole bar.
+            assert!(
+                (icon.rect.width() - icon.rect.height()).abs() <= TOLERANCE,
+                "a square icon should stay square ({sizing:?}), got {:?}",
+                icon.rect.size()
+            );
+        }
+
         assert!(
-            (icon.rect.width() - icon.rect.height()).abs() <= TOLERANCE,
-            "a square icon should stay square, got {:?}",
-            icon.rect.size()
+            line > em + 1.0,
+            "this scene is only worth running while the line box ({line}) is taller than the em \
+             ({em}) — otherwise the rule it states and the one it replaced are the same number"
         );
     }
+}
 
+/// An icon *smaller* than the type is left alone: the rule is a ceiling, not a resize.
+///
+/// Without this, "hold the icon to the em" would read as "make every icon an em tall", and the
+/// oblong 16×8 icon the rest of this file is built on would come back stretched — along with any
+/// consumer's deliberately small mark.
+#[test]
+fn an_icon_smaller_than_the_type_is_left_alone() {
+    let style = style();
+    let (mut state, leaf) = a_leaf_of(1);
+
+    let ctx = Context::default();
+    let painted = frames(&ctx, &mut state, &style, true);
+    let bar = bar_of(&ctx, leaf, &style);
+
+    let em = egui::TextStyle::Button
+        .resolve(&egui::Style::default())
+        .size;
     assert!(
-        line > em + 1.0,
-        "this scene is only worth running while the line box ({line}) is taller than the em \
-         ({em}) — otherwise the rule it states and the one it replaced are the same number"
+        ICON_SIZE.y < em,
+        "this scene only says anything while the icon ({}) is shorter than the em ({em})",
+        ICON_SIZE.y
+    );
+
+    let icons = icons_in(&painted.icons, bar);
+    assert_eq!(icons.len(), 1, "one tab, one icon: {icons:?}");
+    assert!(
+        (icons[0].rect.size() - ICON_SIZE).length() <= TOLERANCE,
+        "a ceiling does not lift anything: got {:?}",
+        icons[0].rect.size()
     );
 }
 
@@ -568,7 +618,7 @@ fn an_explicit_tint_is_left_alone() {
         &Viewer {
             icons: true,
             tint: Some(asked_for),
-            fitting: false,
+            sizing: Sizing::Exact,
         },
     );
     let bar = bar_of(&ctx, leaf, &style);

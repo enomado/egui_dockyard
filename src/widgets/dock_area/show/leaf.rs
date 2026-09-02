@@ -7,6 +7,7 @@ use egui::{
     TextWrapMode, Ui, UiBuilder, Vec2, emath::TSTransform, epaint::TextShape, pos2, vec2,
 };
 
+use super::glyph::{self, Dir};
 use crate::NodePath;
 use crate::core::fit::{
     MIN_SQUEEZED_TEXT, MIN_SQUEEZED_TEXT_ACTIVE, STRIP_NAME_PADDING, TabBarFit, TabRoom,
@@ -1120,7 +1121,7 @@ impl<Tab> DockArea<'_, Tab> {
                             .as_str(),
                     );
             }
-            Self::draw_close_window_symbol(ui, stroke_color, close_all_rect);
+            glyph::close_window(ui.painter(), close_all_rect, stroke_color);
         } else {
             // Close all tabs in this leaf
             if !disabled {
@@ -1594,14 +1595,27 @@ impl<Tab> DockArea<'_, Tab> {
 
         if on_secondary_button {
             // Collapse the entire window
-            Self::draw_chevron_down(ui, style, color, arrow_rect);
+            glyph::chevron(
+                ui.painter(),
+                arrow_rect,
+                Dir::Down,
+                color,
+                style.buttons.minimize_window_bg_fill,
+            );
         } else if stow_target.is_some() {
-            Self::draw_stow_arrow(ui, color, arrow_rect);
-        } else if let Some(side) = side_strip {
-            Self::draw_side_arrow(side, ui, color, arrow_rect);
+            glyph::stow_arrow(ui.painter(), arrow_rect, color);
         } else {
-            // Draw arrow.
-            Self::draw_arrow(collapsed, ui, color, arrow_rect);
+            // The arrow points at the space this leaf will expand into: away from the edge a
+            // sideways strip is pressed against, rightwards out of a collapsed tab bar, and down
+            // at the body an open one heads. A side strip's answer wins where both could apply,
+            // which is why it is asked first.
+            let towards = match (side_strip, collapsed) {
+                (Some(SideStrip::Left), _) => Dir::Right,
+                (Some(SideStrip::Right), _) => Dir::Left,
+                (None, true) => Dir::Right,
+                (None, false) => Dir::Down,
+            };
+            glyph::triangle(ui.painter(), arrow_rect, towards, color);
         }
 
         // Draw button right border.
@@ -1725,138 +1739,6 @@ impl<Tab> DockArea<'_, Tab> {
         let side = tree.top_level_ancestor(path.node)?;
         (!tree[side].is_leaf() && !tree[side].is_stowed())
             .then(|| NodePath::new(path.surface, side))
-    }
-
-    /// The arrow of "put my whole side away": the ordinary collapse triangle, doubled.
-    ///
-    /// Doubled rather than a glyph of its own, because the gesture is not a different action —
-    /// it is the same fold one level up, and the icon says so: what the plain arrow does to this
-    /// leaf, this one does to everything beside it.
-    fn draw_stow_arrow(ui: &mut Ui, color: Color32, arrow_rect: Rect) {
-        // Two triangles stacked along the arrow's own axis, each half as tall, with a pixel
-        // between them so they read as two at the size this is drawn.
-        let half = arrow_rect.height() * 0.5;
-        for step in 0..2 {
-            let top = arrow_rect.top() + half * step as f32;
-            let cell = Rect::from_min_max(
-                pos2(arrow_rect.left(), top),
-                pos2(arrow_rect.right(), top + half - 1.0),
-            );
-            ui.painter().add(Shape::convex_polygon(
-                vec![cell.left_top(), cell.right_top(), cell.center_bottom()],
-                color,
-                Stroke::NONE,
-            ));
-        }
-    }
-
-    fn draw_close_window_symbol(ui: &mut Ui, stroke_color: Color32, close_all_rect: Rect) {
-        ui.painter().add(Shape::line(
-            vec![
-                close_all_rect
-                    .right_center()
-                    .lerp(close_all_rect.right_bottom(), 0.5),
-                close_all_rect.right_bottom(),
-                close_all_rect.left_bottom(),
-                close_all_rect.left_top(),
-                close_all_rect
-                    .center_top()
-                    .lerp(close_all_rect.left_top(), 0.5),
-            ],
-            Stroke::new(1.0_f32, stroke_color),
-        ));
-        ui.painter().line_segment(
-            [close_all_rect.center_top(), close_all_rect.right_center()],
-            Stroke::new(1.0_f32, stroke_color),
-        );
-        ui.painter().line_segment(
-            [close_all_rect.center(), close_all_rect.right_top()],
-            Stroke::new(1.0_f32, stroke_color),
-        );
-    }
-
-    fn draw_arrow(collapsed: bool, ui: &mut Ui, color: Color32, arrow_rect: Rect) {
-        ui.painter().add(Shape::convex_polygon(
-            if collapsed {
-                // Arrow pointing rightwards.
-                vec![
-                    arrow_rect.left_top(),
-                    arrow_rect.right_center(),
-                    arrow_rect.left_bottom(),
-                ]
-            } else {
-                // Arrow pointing downwards.
-                vec![
-                    arrow_rect.left_top(),
-                    arrow_rect.right_top(),
-                    arrow_rect.center_bottom(),
-                ]
-            },
-            color,
-            Stroke::NONE,
-        ));
-    }
-
-    /// The arrow of a sideways collapsed strip, pointing at the space the leaf will expand
-    /// into — which is away from the edge it is pressed against, and therefore the one thing
-    /// the strip's own side has to be known for.
-    fn draw_side_arrow(side: SideStrip, ui: &mut Ui, color: Color32, arrow_rect: Rect) {
-        ui.painter().add(Shape::convex_polygon(
-            match side {
-                // Against the left edge: expands rightwards.
-                SideStrip::Left => vec![
-                    arrow_rect.left_top(),
-                    arrow_rect.right_center(),
-                    arrow_rect.left_bottom(),
-                ],
-                // Against the right edge: expands leftwards.
-                SideStrip::Right => vec![
-                    arrow_rect.right_top(),
-                    arrow_rect.left_center(),
-                    arrow_rect.right_bottom(),
-                ],
-            },
-            color,
-            Stroke::NONE,
-        ));
-    }
-
-    fn draw_chevron_down(ui: &mut Ui, style: &Style, color: Color32, arrow_rect: Rect) {
-        ui.painter().add(Shape::convex_polygon(
-            // Arrow pointing downwards.
-            vec![
-                arrow_rect.left_top(),
-                arrow_rect.right_top(),
-                arrow_rect.center(),
-            ],
-            color,
-            Stroke::NONE,
-        ));
-
-        // Chevron pointing downwards.
-        ui.painter().add(Shape::convex_polygon(
-            vec![
-                arrow_rect.left_center(),
-                arrow_rect.right_center(),
-                arrow_rect.center_bottom(),
-            ],
-            color,
-            Stroke::NONE,
-        ));
-        let color = style.buttons.minimize_window_bg_fill;
-        ui.painter().add(Shape::convex_polygon(
-            vec![
-                arrow_rect
-                    .left_center()
-                    .lerp(arrow_rect.right_center(), 0.25),
-                arrow_rect
-                    .left_center()
-                    .lerp(arrow_rect.right_center(), 0.75),
-                arrow_rect.center().lerp(arrow_rect.center_bottom(), 0.5),
-            ],
-            color,
-            Stroke::NONE,
-        ));
     }
 
     /// Updates the collapsed state of the node and its parents.

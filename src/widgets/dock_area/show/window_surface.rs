@@ -1,8 +1,9 @@
 use egui::{
-    Align, AtomLayout, Atoms, Color32, Context, CornerRadius, CursorIcon, Frame, Id, LayerId,
-    Layout, Order, Rect, Response, RichText, Sense, Shape, Stroke, Ui, UiBuilder, Vec2, vec2,
+    Align, AtomLayout, Atoms, Context, CornerRadius, CursorIcon, Frame, Id, LayerId, Layout, Order,
+    Rect, Response, RichText, Sense, Stroke, Ui, UiBuilder, Vec2, vec2,
 };
 
+use super::glyph::{self, Dir};
 use crate::{
     DockArea, NodePath, Style, SurfaceIndex, TabViewer, WindowIndex,
     dock_area::{
@@ -395,7 +396,14 @@ impl<Tab> DockArea<'_, Tab> {
 
         rect_set_size_centered(&mut arrow_rect, Vec2::splat(Style::TAB_EXPAND_ARROW_SIZE));
 
-        Self::draw_chevron_right(ui, &mut response, style, color, arrow_rect);
+        // The notch is cut in whatever is behind the button, which is not the same colour once
+        // the pointer is on it.
+        let notch = if response.hovered() || response.has_focus() {
+            style.buttons.minimize_window_bg_fill
+        } else {
+            style.tab_bar.bg_fill
+        };
+        glyph::chevron(ui.painter(), arrow_rect, Dir::Right, color, notch);
 
         // Draw button right border.
         ui.painter().vline(
@@ -410,54 +418,6 @@ impl<Tab> DockArea<'_, Tab> {
         if response.clicked() {
             self.window_request_toggle_minimized(surface_index);
         }
-    }
-
-    fn draw_chevron_right(
-        ui: &mut Ui,
-        response: &mut Response,
-        style: &Style,
-        color: Color32,
-        arrow_rect: Rect,
-    ) {
-        ui.painter().add(Shape::convex_polygon(
-            // Arrow pointing rightwards.
-            vec![
-                arrow_rect.left_top(),
-                arrow_rect.center(),
-                arrow_rect.left_bottom(),
-            ],
-            color,
-            Stroke::NONE,
-        ));
-
-        // Chevron pointing rightwards.
-        ui.painter().add(Shape::convex_polygon(
-            vec![
-                arrow_rect.center_top(),
-                arrow_rect.right_center(),
-                arrow_rect.center_bottom(),
-            ],
-            color,
-            Stroke::NONE,
-        ));
-        let color = if response.hovered() || response.has_focus() {
-            style.buttons.minimize_window_bg_fill
-        } else {
-            style.tab_bar.bg_fill
-        };
-        ui.painter().add(Shape::convex_polygon(
-            vec![
-                arrow_rect
-                    .center_top()
-                    .lerp(arrow_rect.center_bottom(), 0.25),
-                arrow_rect.center().lerp(arrow_rect.right_center(), 0.5),
-                arrow_rect
-                    .center_top()
-                    .lerp(arrow_rect.center_bottom(), 0.75),
-            ],
-            color,
-            Stroke::NONE,
-        ));
     }
 
     /// Ask for a window to be minimized or restored — the click handler's half.

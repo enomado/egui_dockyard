@@ -52,10 +52,11 @@
 //! a crossing is one they both do**. Neither `n` nor `m` appears in it, and neither does depth.
 
 use egui::{
-    CursorIcon, Id, Order, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
+    CursorIcon, Id, Order, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
     epaint::CornerRadius, pos2, vec2,
 };
 
+use super::glyph;
 use crate::dock_area::DockMutation;
 use crate::dock_area::events::DockEvent;
 use crate::dock_area::state::{DragSubject, JunctionArms, State};
@@ -332,16 +333,6 @@ fn icon_arms(kind: JunctionKind, outer_horizontal: bool) -> Vec<Vec2> {
             vec![through[0], through[1], stem]
         }
     }
-}
-
-/// One arrow of a handle's icon: a stem from near the centre outwards, and two barbs at its tip.
-fn draw_arrow(painter: &Painter, center: Pos2, dir: Vec2, arm: f32, stroke: Stroke) {
-    let tip = center + dir * arm;
-    let base = center + dir * (arm * 0.3);
-    painter.line_segment([base, tip], stroke);
-    let perp = vec2(-dir.y, dir.x) * (arm * 0.25);
-    painter.line_segment([tip, tip - dir * (arm * 0.35) + perp], stroke);
-    painter.line_segment([tip, tip - dir * (arm * 0.35) - perp], stroke);
 }
 
 /// One edge of a rectangle along an axis: `x` for a horizontal one, `y` for a vertical one.
@@ -822,7 +813,7 @@ impl<Tab> DockArea<'_, Tab> {
                     JunctionArms::Cross(_) => JunctionKind::Cross([0, 0]),
                 };
                 for dir in icon_arms(held_kind, outer_horizontal) {
-                    draw_arrow(ui.painter(), center, dir, toggle.size * 0.28, stroke);
+                    glyph::barbed_arrow(ui.painter(), center, dir, toggle.size * 0.28, stroke);
                 }
 
                 if response.drag_stopped() {
@@ -1066,7 +1057,7 @@ impl<Tab> DockArea<'_, Tab> {
                     );
                     let stroke = Stroke::new(1.5, icon);
                     for dir in icon_arms(kind, junctions.outer_horizontal) {
-                        draw_arrow(ui.painter(), center, dir, handle_size * 0.28, stroke);
+                        glyph::barbed_arrow(ui.painter(), center, dir, handle_size * 0.28, stroke);
                     }
                 }
 

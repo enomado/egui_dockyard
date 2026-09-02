@@ -24,6 +24,7 @@ use crate::{
 };
 use crate::{GapIndex, GapPath, NodePath, RowGap};
 
+mod glyph;
 mod junction;
 mod leaf;
 mod main_surface;

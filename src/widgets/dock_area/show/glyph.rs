@@ -161,7 +161,7 @@ mod tests {
     }
 
     /// The chevron was two files' worth of corner literals before the glyphs were gathered, and
-    /// is now three [`triangle`](super::triangle) calls over [`part`]. Same points, in the same
+    /// is now three `triangle` calls over [`part`]. Same points, in the same
     /// order — the order matters, because a filled polygon is feathered along its winding, so a
     /// triangle listed the other way round is a different half-pixel at its edge.
     #[test]

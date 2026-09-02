@@ -29,6 +29,7 @@ mod junction;
 mod leaf;
 mod main_surface;
 mod modifiers;
+mod title;
 mod window_surface;
 
 impl<Tab> DockArea<'_, Tab> {

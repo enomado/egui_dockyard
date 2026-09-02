@@ -100,6 +100,11 @@ fn atom_breadth(atom: &SizedAtom<'_>, vertical: bool) -> f32 {
 /// which, in a 24 px tab bar, is the whole tab from edge to edge. `max_size` is the one lever all
 /// three fits obey.
 ///
+/// A picture is nonetheless *offered* the em as well as held to it, because the offer is what a
+/// loaded image's [`egui::SizeHint`] is worked out from: offered the line and capped to the em, a
+/// vector icon would be rasterised at one size and drawn at a smaller one, which is a blurred
+/// icon rather than a smaller one.
+///
 /// # Why the em and not the line height, which is what a button does
 ///
 /// [`egui::Button`] limits an icon to `atom_max_height_font_size`, and that helper — the name
@@ -124,20 +129,25 @@ pub(super) fn measure_title(ui: &Ui, title: Atoms<'static>) -> SizedTitle {
                 // An atom carrying its own size is answering this question itself, so it is left
                 // alone — a ceiling here would silently overrule it, and `atom_size` is the
                 // documented way to say "this icon is different".
-                //
-                // The ceiling goes on the *image*, not on the atom: `Atom::max_size` only bounds
-                // the room offered, and it is precisely the fits that ignore the room which need
-                // holding down. `Image::max_height` is what `calc_size` consults in all three.
+                let mut room = line;
                 if atom.size.is_none()
                     && matches!(atom.kind, AtomKind::Image(_))
                     && let AtomKind::Image(image) =
                         std::mem::replace(&mut atom.kind, AtomKind::Empty)
                 {
+                    // Offered the em *and* held to it, because the two reach different fits and a
+                    // picture needs both. The offer is what a `Fraction` image takes and — more
+                    // to the point — what its `SizeHint` is worked out from, so a vector icon is
+                    // rasterised at the size it will be drawn instead of at its own grid and then
+                    // squeezed. The ceiling goes on the *image* rather than on the atom, because
+                    // `Atom::max_size` only bounds the offer and it is exactly the fits that
+                    // ignore the offer (`Original`, `Exact`) that need holding down.
+                    room = em;
                     atom.kind = AtomKind::Image(image.max_height(em));
                 }
                 atom.into_sized(
                     ui,
-                    vec2(f32::INFINITY, line),
+                    vec2(f32::INFINITY, room),
                     Some(TextWrapMode::Extend),
                     TextStyle::Button.into(),
                 )

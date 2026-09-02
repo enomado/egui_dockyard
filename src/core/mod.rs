@@ -37,6 +37,13 @@ pub mod resize;
 /// lays a row out, not something a caller states.
 pub(crate) mod cut;
 
+/// How a bar's tabs and a strip's names share the length they were given, and what each does
+/// when even a squeeze is not enough.
+///
+/// Measuring a title needs a `Ui` and so does drawing one; deciding who gets how much of the
+/// room does not, and that is what is here. Internal to the crate, like [`cut`].
+pub(crate) mod fit;
+
 /// Vocabulary of dock operations shared by the property tests and the fuzzer.
 ///
 /// Available to this crate's own tests always, and to outside harnesses (the `fuzz/` crate)

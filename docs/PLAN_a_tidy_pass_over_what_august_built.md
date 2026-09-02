@@ -1,0 +1,234 @@
+# Plan: a tidy pass over what August built
+
+**Multi-session, one repository.** Nine stages of debt, none of which changes what the dock does.
+August rebuilt the row, the drag, the corner, the strip and the title, and it left behind the
+things a build-out leaves: a body written twice by a macro, tests living in the file they test,
+a `lib.rs` that exports every name twice, arithmetic sitting in the drawing where nothing can
+test it without a `Ui`, and documentation describing the crate this one was forked from.
+
+## Where it comes from
+
+Стас, 2026-09-02: *«наш egui_dockyard - что можем порефакторить, улучшить?»* — and then, on
+the findings below: *«всё в план»*.
+
+The measurements that answer the question were taken in that session and are recorded here so a
+later stage can tell what it moved:
+
+| File | Lines | Of them tests | What is mixed in it |
+|---|---|---|---|
+| [`show/junction.rs`](../src/widgets/dock_area/show/junction.rs) | 4223 | **2997 (71%)** | detection, drawing, gesture, and its own test suite |
+| [`show/mod.rs`](../src/widgets/dock_area/show/mod.rs) | 3129 | 801 | layout arithmetic, drawing, gestures |
+| [`show/leaf.rs`](../src/widgets/dock_area/show/leaf.rs) | 2624 | 229 | title measurement, glyph drawing, the leaf itself |
+
+Clippy at the time of writing: **8 warnings in the lib**, 5 in `tests/dst.rs`, 1 in
+`tests/hovering_with_nothing_carried_does_nothing.rs`. Three of the lib's are
+`too_many_arguments`.
+
+## Decisions taken up front
+
+So that no stage has to stop and ask:
+
+1. **Nothing here changes behaviour.** The one exception is stage 5, which deletes an API
+   deprecated two releases ago. Everywhere else the test suite is the invariant: if a test has to
+   be *edited* to pass, the stage has found a behaviour change and stops. Moving a test between
+   files, and changing the path it imports, is not editing it.
+2. **The application is the acceptance test.** `egui_dockyard` has one large consumer — the
+   application's tree, 69 files across `main_app`, `welllog`, `accrual_calc`, `bit_tune`,
+   `seating_lab`, `casing_calc`, `pipeline_calc` and the shared GUI crates. It imports names by
+   **both** paths (`egui_dock::DockState` and `egui_dock::core::resize::SepBehavior`), so any
+   stage that touches the exported surface — 4 and 5 — ends with `cargo check --workspace
+   --all-targets` in that tree, and the stages that do not touch it do not go there.
+3. **Order is by risk, not by size.** Stages 1–5 are mechanical and each lands on its own; 6 and
+   7 move code between modules and are worth a session each; 8 and 9 are documentation and can
+   be done by anyone at any point.
+4. **Arithmetic that has no `egui` in it belongs in `core`, not in `layout`.** `layout` is
+   frame-local geometry and holds `egui::Rect` by design; `core` is what
+   [`tests/core_is_egui_free.rs`](../tests/core_is_egui_free.rs) guards. A function taking
+   `&[f32]` and returning `f32` goes to `core`, and its tests come with it — that is the point of
+   moving it, not a side effect.
+5. **Out of scope, named so nobody adds it mid-stage:** re-recording `images/demo.gif` (it is
+   from 12.08 and shows none of August), and publishing to crates.io. Both are Стас's calls.
+
+## Stages
+
+### 1. The divider is written once, not once per axis
+
+[`show_divider`](../src/widgets/dock_area/show/mod.rs) wraps ~180 lines in `duplicate!`, which
+compiles the whole body twice — once per axis — with `paste!` building `CursorIcon::Resize*` out
+of the axis token. The reason it was written that way is gone: the axis is a **field** of
+`RowNode` since 30.08, and the file says so itself thirty lines above, in `cut_row`:
+
+> The row's axis as *functions*, not as the tokens `duplicate!` needs in `show_divider`: nothing
+> below names a method by its axis, so one body serves both.
+
+What to do: read the axis off the row, replace `row.is_horizontal()` / `is_vertical()` with the
+field, index the `Vec2` component instead of naming `.x` / `.y` through a macro token, and choose
+the cursor with a `match`.
+
+**DoD.** `duplicate` and `paste` are gone from `[dependencies]` — two of the crate's four non-egui
+dependencies. `cargo clippy --lib` has no new warnings. No test file is edited.
+
+### 2. Clippy at zero
+
+Two halves, because they are two different jobs.
+
+**2a — mechanical.** `question_mark` (5 in `tests/dst.rs`), `collapsible_if` (2),
+`map(f)`-returning-unit, `unnecessary_map_or`-style chain, the `on_close` that does not need
+`&mut`, and the `Viewer::default()` in the one test. Almost all have a `cargo clippy --fix`
+suggestion; each is read before it is taken.
+
+**2b — the data clump.** `too_many_arguments` at
+[`drag_and_drop.rs:306`](../src/widgets/dock_area/drag_and_drop.rs) (9/7),
+[`drag_and_drop.rs:398`](../src/widgets/dock_area/drag_and_drop.rs) (9/7) and
+[`leaf.rs:1450`](../src/widgets/dock_area/show/leaf.rs) (8/7). These are not formatting: nine
+arguments passed together through two call sites are a struct nobody has named yet. Name it after
+what the group *is* (the drop preview's inputs; the strip's naming context), not after the
+function.
+
+**DoD.** `cargo clippy --all-targets --all-features` prints no warnings. `#[allow]` is not how a
+warning is removed here; if one is genuinely wrong, it gets an `#[allow]` **with a comment saying
+why**, and the plan records which.
+
+### 3. The junction's tests move to where the crate keeps tests
+
+`junction.rs` is 71% test code, in a repository whose convention is one file per claim in
+[`tests/`](../tests) — 30 of them, named `a_closed_tab_ends_its_drag.rs` and the like. The file is
+the crate's largest and it is not the crate's largest piece of logic.
+
+The split is not "move it all": the inline tests reach into `Junctions`, `Band`,
+`detect_junctions` and `parts_can_be_renested`, which are private and should stay so. So:
+
+* tests that drive **frames and clicks** and read the result back through `DockLayout` or
+  `DockState` move out, one file per claim, keeping their names;
+* tests that look **inside** a private function stay inline, next to it.
+
+**DoD.** `junction.rs` is under 2000 lines. Every moved test keeps its name and its body. `ls
+tests/ | wc -l` grows by what moved. No test is edited beyond its `use` lines.
+
+### 4. Every exported name has one path
+
+[`lib.rs`](../src/lib.rs) re-exports four modules with a glob (`pub use crate::core::*`,
+`style::*`, `tree::*`, `widgets::*`) *and* declares `pub mod core`, so every type is reachable
+twice and `docs.rs` lists it twice. The repository policy says it plainly: do not hide where a
+type comes from behind `pub use`.
+
+The middle path, and the reason this is a stage rather than a deletion: the short names are the
+crate's front door and the application uses them in 69 files. So the globs become an **explicit
+list** — the same names, written down — and the module paths stay. Nothing downstream changes;
+what changes is that adding a public type no longer exports it by accident.
+
+**DoD.** No `pub use ...::*` in `lib.rs`. `cargo doc` builds. The application's workspace checks
+green with no import edited.
+
+### 5. The deprecated method goes, and `utils` stops being public
+
+* `TabViewer::closeable` has been deprecated since 0.19 in favour of `is_closeable`; nothing in
+  this crate calls it and neither does the application. An independent fork does not carry a
+  third release of someone else's deprecation.
+* `utils::{map_to_pixel, map_to_pixel_pos, expand_to_pixel, rect_set_size_centered}` are `pub` in
+  a private module — so they are neither public API nor documented, and `#![warn(missing_docs)]`
+  never sees them. They become `pub(crate)`.
+
+**DoD.** `cargo check --all-targets` green here and in the application. `CHANGELOG` gains a
+breaking-change line for the removal.
+
+### 6. The arithmetic under the drawing moves to where it can be judged without a `Ui`
+
+`show/mod.rs` holds three jobs at once: it *computes* a row's cut, it *draws* dividers, and it
+*handles* gestures. Two pieces of the first job have no `egui` in them at all and are already
+written as free functions over `f32`:
+
+* `cut_runs(lo, hi, extents, separator, cut, carry, last_fixed_takes_the_rest) -> RunCut`, with
+  `Extent` and `RunCut` — the rule that turns a row of weights and strips into runs;
+* `SeparatorBand` — `new`, `between`, `midpoint`: the band a boundary may be written into, pure
+  `f32` including its deliberate NaN handling.
+
+They move to `core` with their tests (roughly lines 2354–3129 of the file, ~780 lines of test).
+`cut_row` stays in `show/`, and shrinks to what it actually is: gather the row's extents, call
+`cut_runs`, lay the answer out in `egui::Rect`s.
+
+Why this is worth a session: it is not tidying by line count. It is the difference between
+arithmetic that only a rendered frame can test and arithmetic the property tests and the
+egui-free gate already cover.
+
+**DoD.** `core_is_egui_free` covers the moved code (it is in `core`, so it does, by construction).
+`show/mod.rs` is under 2000 lines. The moved tests run unchanged apart from imports. The DST
+sweep (`cargo test --test dst`) passes at the same seeds.
+
+### 7. Titles measure in one place, glyphs draw in another
+
+`show/leaf.rs` is the same shape as stage 6 and splits the same way:
+
+* **measurement / fit** — `fit_strip_names`, `fit_tab_widths`, `share_room`, `StripFit`,
+  `TabRoom`, `TabBarFit`. They take `&[f32]` and a budget; they are `core` arithmetic with a
+  `Ui`-shaped name. Their tests (from ~2400 on) come along.
+* **glyphs** — `draw_stow_arrow`, `draw_arrow`, `draw_side_arrow`, `draw_chevron_down`,
+  `draw_close_window_symbol`, plus `draw_arrow` in `junction.rs` and `draw_chevron_right` in
+  `window_surface.rs`. Seven little painters in three files, no two of which agree on their
+  argument order. One module, one signature shape (`painter`, `rect`, `stroke`), and the
+  duplicates collapse.
+* what is left is the leaf: the bar, the tabs, the buttons, the body.
+
+**DoD.** `show/leaf.rs` is under 1800 lines. No `draw_*` glyph helper remains in `leaf.rs`,
+`junction.rs` or `window_surface.rs`. `SizedTitle`'s measurement, which needs a `Ui`, stays in
+`widgets` — the stage does not pretend it is pure.
+
+### 8. The CHANGELOG says what August did
+
+It is a release ago behind the code, and the gap is not small: the row that holds many panels,
+stowing a side, the squeezed tab bar, the strip that names its contents, `DockLayout`, and the
+read-only draw pass are all in `main` and in none of the file. On top of that there is a
+**second, stranded `## Unreleased` section at line 156**, sitting inside the release history
+between 0.20.0 and 0.19.1, holding `DockAreaResponse` / `DockEvent` — which shipped.
+
+What to do: fold the stranded section into the live one, and write the missing entries from the
+commits (`git log --since=2026-08-01`) in the file's own voice — what changed and what a caller
+has to do about it.
+
+**DoD.** No two `## Unreleased` headings. Every feature named in the README's *What's new* has an
+entry. `git log --since=2026-08-01 --format=%s` has no feature-level commit without one.
+
+### 9. The small documentation debts
+
+* [`ORIGIN.md`](../ORIGIN.md), lines 3–4, still call the project `egui_dock`.
+* `docs/PLAN_a_side_can_be_stowed.md:147` and
+  `docs/PLAN_a_collapsed_leaf_can_hide_sideways.md:114` carry a hard-coded local path
+  (`/home/sc/t/egui_dock`) into a public repository.
+* README and `examples/README.md` — **done, `4ec3783`**: the README now describes the crate this
+  is rather than the one it forked from, the crates.io and docs.rs badges are gone (the name is
+  not published — the API answers "crate does not exist", so the quick start names the git
+  dependency that actually builds), and the examples index knows about `tab_icons`.
+
+**DoD.** No occurrence of a local absolute path in `docs/` or the repository root. No occurrence
+of `egui_dock` outside the two sentences in `ORIGIN.md` and `README.md` that are *about* the
+fork's origin.
+
+## Verification
+
+Per stage, in this order:
+
+```
+cargo clippy --all-targets --all-features    # stage 2 makes this silent; later stages keep it so
+cargo test                                    # 333 test fns, 30 behavioural files, proptests
+cargo test --test dst                         # the deterministic sweep, at its recorded seeds
+```
+
+And for stages 4 and 5 only, in the application's tree:
+
+```
+cargo check --workspace --all-targets
+```
+
+`cargo fuzz` is not part of a stage's gate — it is a soak, run when the model changes, and none
+of these stages changes the model.
+
+## What is left after all nine
+
+Two things this plan deliberately does not do, both because they need a decision rather than a
+refactor:
+
+* **`images/demo.gif`** shows the dock as it was on 12.08 — before junction handles, stowing,
+  sideways collapse and tab icons. A new recording is a product decision (what to show, in what
+  order) and needs the app run by hand.
+* **crates.io.** The crate is not published under this name. Whether it should be — and therefore
+  whether the README's badges come back — is Стас's call, not a tidy-up.

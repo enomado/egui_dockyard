@@ -265,6 +265,63 @@ not the build a consumer gets.
 `junction.rs` or `window_surface.rs`. `SizedTitle`'s measurement, which needs a `Ui`, stays in
 `widgets` — the stage does not pretend it is pure.
 
+**Done as three moves, `a1aaba4`, `06cf497`, `9e60bb2`, with the line count owed for the reason
+stage 6's was.** `leaf.rs` went 2653 → 2272 → 2154 → 1890.
+
+1. **[`core::fit`](../src/core/fit.rs)** — `fit_strip_names`, `fit_tab_widths`, `share_room`,
+   `StripFit`, `TabRoom`, `TabBarFit`, and the twelve tests that state them, byte-exact. Four
+   constants came with them, because they are the rule rather than the drawing: the minimum a
+   squeezed name keeps, its active-tab double, the strip's name padding, and the minimum built out
+   of the two. `FADE_LENGTH`, `TAB_TEXT_PADDING` and `OVERFLOW_MARK` stayed — they are about what
+   is painted around a name, and only the caller uses them. The thirteenth test stayed too, being
+   about `Id`.
+2. **[`show::glyph`](../src/widgets/dock_area/show/glyph.rs)** — all seven painters, each taking
+   what it draws with and then what it draws into.
+3. **[`show::title`](../src/widgets/dock_area/show/title.rs)** — `SizedTitle`, `measure_title`,
+   `paint_title` and their helpers. They could not follow the arithmetic into `core`, and the DoD
+   says so; but "stays in `widgets`" is not "stays in `leaf.rs`", and the stage's own heading asks
+   for *one place*, which is what a module is.
+
+**What the glyphs turned out to be.** The stage expected "the duplicates collapse" and there were
+exactly two. The arrow on a collapsed tab bar and the arrow on a strip against the left edge were
+one triangle written twice, and are now one `triangle(.., Dir::Right)` — what used to be two
+branches choosing between two functions is one branch choosing a direction. Both chevrons are that
+same triangle three times over, across the two halves of the rectangle along the direction, and
+that replaced two sets of corner literals: the one place in this stage where geometry was
+*rewritten* rather than moved. It is pinned accordingly — `corners` is split out of the painting so
+the shapes can be judged without a `Ui`, four tests assert both chevrons draw the points they used
+to *in the order they used to* (a filled polygon is feathered along its winding, so the same
+triangle listed backwards is a different half-pixel at its edge), and the oracle was mutated to
+check it bites. `junction.rs`'s `draw_arrow` was **not** a duplicate — a stroked arrow with barbs,
+placed by a centre and a direction — and only shared a name with the triangle; it is
+`barbed_arrow` now.
+
+**The 1800 is owed, and this time there is nothing left to move for it.** `leaf.rs` is 1890 lines
+and 1860 of them are drawing: what follows line 1861 is the one test left, about `Id`. Where stage 6's
+overshoot was tests that turned out to need a frame, this one is simply that the three moves the
+stage named add up to 763 lines and the estimate wanted about 850. The next 490 would have to be
+the collapsed half — `collapsed_bar`, `strip_names`, `strip_name_list`, `show_stowed_split`,
+`tab_collapse`, with `StripName`, `StripNaming` and `OVERFLOW_MARK` — as a fourth module, which
+would put the file near 1400. That is a coherent module (what a leaf looks like when it is not
+showing) and it is a move the stage did not ask for, so it is left as stage 3's three ways out
+were: written down rather than taken.
+
+**Two things worth knowing before the next move in this crate.**
+
+* **Do not run `rustfmt` on a file you have just moved code into.** `rustfmt.toml` says
+  `max_width = 110` and the code is written at 100, so it reflows lines the move never touched —
+  five call sites and an import in the moved tests here — and the byte-exact diff, which is how a
+  move is checked at all, stops meaning anything. It was run once and reverted. The same run also
+  showed `src/core/cut.rs` is not clean under that config, so this is the crate's habit and not an
+  accident. And per the usual trap, `rustfmt src/core/mod.rs` follows the `mod` tree and
+  reformats every file under it.
+* **Say which build a test count came from.** `cargo test` passes 329 tests here and
+  `--all-features` passes more; stage 6's note and this stage's second commit both name "353"
+  without saying which, and 353 is not the featureless number — which is the build stage 6 itself
+  found broken. `cargo doc` is the same trap in a different coat: stage 6 recorded 27 warnings,
+  today's run prints "30 warnings (2 duplicates)", and the checkable claim is not the total but
+  that none of them names `core::fit`, `show::glyph` or `show::title`.
+
 ### 8. The CHANGELOG says what August did
 
 It is a release ago behind the code, and the gap is not small: the row that holds many panels,

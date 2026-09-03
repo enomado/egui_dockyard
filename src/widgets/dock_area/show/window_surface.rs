@@ -5,7 +5,7 @@ use egui::{
 
 use super::glyph::{self, Dir};
 use crate::{
-    DockArea, NodePath, Style, SurfaceIndex, TabViewer, WindowIndex,
+    DockArea, NodeId, NodePath, Style, SurfaceIndex, TabViewer, WindowIndex,
     dock_area::{
         DockMutation,
         events::DockEvent,
@@ -45,6 +45,18 @@ const WINDOW_EDGES: [(WindowEdge, &str); 8] = [
 /// * the window frame — its margin and its stroke;
 /// * [`Style::dock_area_padding`], which `allocate_area_for_root_node` takes off the top;
 /// * the clearance the same function keeps from the border it draws, at both ends.
+/// Whether the gesture `widget` is ending actually moved the window — the same commit gate every
+/// other subject answers, read out of the field before [`State::end_drag`] empties it.
+///
+/// `false` for a press that never travelled: egui reports a window's drag-from-anywhere for
+/// presses aimed at the dock's own widgets inside it too, and a press on a tab or an arrow is that
+/// widget's gesture, not the window's.
+fn moved_this_gesture(state: &State, widget: Id) -> bool {
+    state
+        .in_flight()
+        .is_some_and(|drag| drag.widget == widget && drag.moved)
+}
+
 fn window_chrome_height(frame: &Frame, style: &Style) -> f32 {
     let padding = style.dock_area_padding.map_or(0.0, |margin| {
         f32::from(margin.top) + f32::from(margin.bottom)
@@ -86,15 +98,7 @@ impl<Tab> DockArea<'_, Tab> {
 
         // Get galley of currently selected node as a window title
         let title = {
-            let node_id = self.dock_state[surf_index]
-                .focused_leaf()
-                .unwrap_or_else(|| {
-                    self.dock_state[surf_index]
-                        .breadth_first()
-                        .into_iter()
-                        .find(|node| self.dock_state[surf_index][*node].is_leaf())
-                        .expect("a window surface should never be empty")
-                });
+            let node_id = self.window_leaf(surf_index);
             let leaf = self.dock_state[surf_index][node_id].get_leaf().unwrap();
             let active = leaf
                 .active_focused()
@@ -199,6 +203,52 @@ impl<Tab> DockArea<'_, Tab> {
         }
     }
 
+    /// The leaf a gesture aimed at the window *as a whole* belongs to: the one this surface
+    /// already has focused, or — for a window nobody has pointed at yet — the first leaf in it.
+    ///
+    /// One home for the question, because two readers ask it and would look wrong disagreeing:
+    /// the window's title says whose name it carries, and a press on the window says which leaf
+    /// takes the focus. A title naming one tab while `Ctrl+W` closed another is exactly the shape
+    /// of bug the second caller exists to prevent.
+    fn window_leaf(&self, surface: SurfaceIndex) -> NodeId {
+        self.dock_state[surface].focused_leaf().unwrap_or_else(|| {
+            self.dock_state[surface]
+                .breadth_first()
+                .into_iter()
+                .find(|node| self.dock_state[surface][*node].is_leaf())
+                .expect("a window surface should never be empty")
+        })
+    }
+
+    /// Asks for the focus to move to `surface`, because a gesture that has just **ended** was
+    /// about the window as a whole: it was moved across the screen, or resized by an edge.
+    ///
+    /// A click already moves the focus from inside a leaf, and that is not enough here: a press
+    /// that travels is a *drag*, never a click, and a window built with no title bar is dragged
+    /// from anywhere over its body — so the one gesture that most obviously means "this window"
+    /// was the one gesture that left the focus behind. What an application then read out of
+    /// [`DockState::find_active_focused`] was the surface the hand had left, which is how `Ctrl+W`
+    /// over a window the user had just dragged came to close a tab somewhere else entirely.
+    ///
+    /// **Asked at the release, and only for a gesture that moved something.** Both halves are
+    /// load-bearing, and the `dst` sweep states why:
+    ///
+    /// * at the *press*, this would land a frame before the click the same press may still turn
+    ///   into — one press on a window's collapse arrow would then be two commits, one per frame,
+    ///   which is what the sweep calls a live frame of a drag announced as a commit;
+    /// * for a gesture that moved *nothing*, it would fire on every press inside a window,
+    ///   including presses aimed at a widget of the dock's own — and it would name the window's
+    ///   leaf rather than the one that was pressed.
+    ///
+    /// Idempotent by construction: the epilogue only announces a focus that actually moved, so
+    /// re-asking for the focus a surface already has costs a request and changes nothing.
+    ///
+    /// [`DockState::find_active_focused`]: crate::DockState::find_active_focused
+    fn focus_window(&mut self, surface: SurfaceIndex) {
+        let path = NodePath::new(surface, self.window_leaf(surface));
+        self.mutations.push(DockMutation::Focus(path));
+    }
+
     /// Puts a window the hand is moving into the field that says what the hand holds.
     ///
     /// The gesture is egui's, not the dock's: a window is built with no title bar, which egui
@@ -216,7 +266,12 @@ impl<Tab> DockArea<'_, Tab> {
     /// the layout being edited right now" asks it of every subject alike.
     ///
     /// [`DragInFlight::widget`]: crate::DragInFlight::widget
-    fn follow_window_move(&self, response: &Response, surf_index: SurfaceIndex, state: &mut State) {
+    fn follow_window_move(
+        &mut self,
+        response: &Response,
+        surf_index: SurfaceIndex,
+        state: &mut State,
+    ) {
         let pass = response.ctx.cumulative_pass_nr();
 
         if response.drag_started() {
@@ -251,6 +306,11 @@ impl<Tab> DockArea<'_, Tab> {
         }
 
         if response.drag_stopped() {
+            // Asked before the gesture is taken out of the field, since `moved` is what the field
+            // remembers about it.
+            if moved_this_gesture(state, response.id) {
+                self.focus_window(surf_index);
+            }
             state.end_drag(response.id);
         }
     }
@@ -275,7 +335,7 @@ impl<Tab> DockArea<'_, Tab> {
     /// answering at these ids, rather than the field going quietly empty while a window resizes
     /// under the hand.
     fn follow_window_resize(
-        &self,
+        &mut self,
         ctx: &Context,
         window_id: Id,
         surf_index: SurfaceIndex,
@@ -293,6 +353,7 @@ impl<Tab> DockArea<'_, Tab> {
             };
 
             if response.drag_started() {
+                //TEMP self.focus_window(surf_index);
                 state.begin_drag(
                     response.id,
                     DragSubject::Window {
@@ -318,6 +379,9 @@ impl<Tab> DockArea<'_, Tab> {
             }
 
             if response.drag_stopped() {
+                if moved_this_gesture(state, response.id) {
+                    self.focus_window(surf_index);
+                }
                 state.end_drag(response.id);
             }
         }

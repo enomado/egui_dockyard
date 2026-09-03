@@ -231,6 +231,14 @@ pub(in crate::widgets::dock_area) enum DockMutation {
     },
     Remove(TabRemoval),
     Detach(TabPath),
+    /// Move the focus to a leaf, because something pointed at it.
+    ///
+    /// Queued from wherever a gesture *ends* — the click on a tab or in a body, the release of a
+    /// window that was moved — and never from its opening press. The focus is part of the tree a
+    /// consumer saves, so moving it announces a
+    /// [`DockEvent::LayoutCommitted`](events::DockEvent::LayoutCommitted); asking for it while a
+    /// gesture is still live would announce a change per frame of that gesture, which is exactly
+    /// what the `dst` sweep's commit rule is written against.
     Focus(NodePath),
 }
 

@@ -640,10 +640,7 @@ impl<Tab> DockArea<'_, Tab> {
                                         self.mutations
                                             .push(DockMutation::Activate((path, tab_index).into()));
                                     }
-                                    self.mutations.push(DockMutation::Focus {
-                        path,
-                        announce: true,
-                    });
+                                    self.mutations.push(DockMutation::Focus(path));
                                 }
                                 OnCloseResponse::Ignore => (),
                             }
@@ -709,10 +706,7 @@ impl<Tab> DockArea<'_, Tab> {
                     self.mutations
                         .push(DockMutation::Activate((path, tab_index).into()));
                 }
-                self.mutations.push(DockMutation::Focus {
-                        path,
-                        announce: true,
-                    });
+                self.mutations.push(DockMutation::Focus(path));
             }
 
             tab_viewer.on_tab_button(tab, &response);
@@ -1764,10 +1758,7 @@ impl<Tab> DockArea<'_, Tab> {
                 && body_rect.contains(pos)
                 && Some(ui.layer_id()) == ui.ctx().layer_id_at(pos)
             {
-                self.mutations.push(DockMutation::Focus {
-                        path,
-                        announce: true,
-                    });
+                self.mutations.push(DockMutation::Focus(path));
             }
 
             let (style, fade_factor) = fade.unwrap_or_else(|| (self.style.as_ref().unwrap(), 1.0));

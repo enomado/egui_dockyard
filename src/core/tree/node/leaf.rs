@@ -23,6 +23,48 @@ struct TabEntry<Tab> {
     tab: Tab,
 }
 
+/// What a folded leaf gave up — and the whole of what tells a bar from a strip.
+///
+/// # Why this is state and not a reading of the tree
+///
+/// It was a reading, once: a leaf carried `collapsed: bool` and the direction was taken off its
+/// parent — a vertical parent folded it into a bar, a horizontal one into a strip (behind
+/// [`DockArea::collapse_sideways`](crate::DockArea::collapse_sideways)). That is one gesture with
+/// two outcomes and no way for a hand to choose between them, and it is what a user hit: the
+/// arrow that used to leave a column standing began to put it away sideways, with nothing to ask
+/// for the old picture short of turning the knob off for the whole application.
+///
+/// So the axis is a decision now, taken by the gesture that folds ([`Fold::Bar`] on a plain
+/// click, [`Fold::Strip`] on the modifier) and kept where every other decision about a node is
+/// kept. The parent still has a veto — width given up under a *vertical* parent has nobody to
+/// take it — but it no longer casts the vote.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Fold {
+    /// Open: tab bar and body, taking its whole share of the parent.
+    #[default]
+    Open,
+    /// Folded into a bar: the leaf gave up its **height** and is a tab bar with nothing under it.
+    /// Its width is untouched, so under a horizontal parent the column stays where it was.
+    Bar,
+    /// Folded into a strip: the leaf gave up its **width** and is one tab bar thick, pressed
+    /// against the edge of its own split, with the sibling column taking the width at once.
+    ///
+    /// Only ever asked for under a horizontal parent — see [`Fold`] — and drawn as a bar
+    /// wherever that stops being true, which is what a leaf dragged into a vertical split does.
+    Strip,
+}
+
+impl Fold {
+    /// Whether the leaf is folded at all, either way.
+    ///
+    /// The question most of the crate asks: a folded leaf draws one bar and no body, and which
+    /// axis it spent is the layout's business rather than the tab bar's.
+    #[inline]
+    pub fn is_folded(self) -> bool {
+        self != Fold::Open
+    }
+}
+
 /// The inner data of a [`Node::Leaf`](crate::Node), which contains tabs and can be collapsed.
 ///
 /// Carries no geometry: both the full rectangle (tab bar plus body) and the body-only
@@ -78,8 +120,8 @@ pub struct LeafNode<Tab> {
     /// Scroll amount of the tab bar.
     pub scroll: f32,
 
-    /// Whether the leaf is collapsed.
-    pub collapsed: bool,
+    /// Whether the leaf is folded, and which way — see [`Fold`].
+    pub fold: Fold,
 }
 
 impl<Tab> LeafNode<Tab> {
@@ -100,7 +142,7 @@ impl<Tab> LeafNode<Tab> {
             active,
             history: Vec::new(),
             scroll: 0.0,
-            collapsed: false,
+            fold: Fold::Open,
         }
     }
 
@@ -118,11 +160,11 @@ impl<Tab> LeafNode<Tab> {
         active: TabIndex,
         history: Vec<TabIndex>,
         scroll: f32,
-        collapsed: bool,
+        fold: Fold,
     ) -> Self {
         let mut leaf = Self::new(tabs);
         leaf.scroll = scroll;
-        leaf.collapsed = collapsed;
+        leaf.fold = fold;
         leaf.active = leaf.tab_id_at(active).or(leaf.active);
         leaf.history = history
             .into_iter()
@@ -530,7 +572,7 @@ impl<Tab> LeafNode<Tab> {
             active: self.active,
             history: self.history.clone(),
             scroll: self.scroll,
-            collapsed: self.collapsed,
+            fold: self.fold,
         };
         leaf.repair_focus();
         Some(leaf)

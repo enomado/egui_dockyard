@@ -55,8 +55,9 @@ use egui::{
 use egui_dockyard::dock_area::DockEvent;
 use egui_dockyard::shape::subtree_shape;
 use egui_dockyard::{
-    DockArea, DockLayout, DockState, DragInFlight, DragSubject, GapIndex, GapPath, JunctionArms,
-    Node, NodeId, NodePath, Split, Style, SurfaceIndex, TabId, TabIndex, TabPath, TabViewer, Tree,
+    DockArea, DockLayout, DockState, DragInFlight, DragSubject, Fold, GapIndex, GapPath,
+    JunctionArms, Node, NodeId, NodePath, Split, Style, SurfaceIndex, TabId, TabIndex, TabPath,
+    TabViewer, Tree,
     drag_hover_node, drag_in_flight, dragged_tab, tab_widget_id,
 };
 
@@ -212,6 +213,20 @@ enum Step {
     /// crate's documented behaviour rather than a hole in this step, and [`CollapseWatch`] counts
     /// which of the two the press turned out to be.
     Stow { arrow: usize },
+    /// Press an arrow with **Ctrl** held, which folds that leaf along the other axis: into a
+    /// strip, or back open if it is one already — see [`Fold`].
+    ///
+    /// A third step rather than a flag, for the reason `Stow` is a step: the shrinker has to be
+    /// able to drop one of the three and keep the others, and each reaches a state neither of
+    /// the others can. This is the only one that produces a strip at all — the plain press is a
+    /// bar now, whatever the parent — so without it the sweep runs entirely on the `Fold::Bar`
+    /// half of the layout, which is what the coverage gate at the bottom of this file says in so
+    /// many words.
+    ///
+    /// Where the gesture does not apply — a vertical parent, a stowed side's own arrow — the
+    /// press goes through as the plain fold, exactly as `Stow`'s does, and [`CollapseWatch`]
+    /// counts which of the two it turned out to be.
+    FoldSideways { arrow: usize },
     /// Drag the separator of a row, moving the boundary between two of its children.
     ///
     /// The only gesture here that edits a number rather than the shape — and that number is
@@ -327,6 +342,7 @@ impl Step {
                 | Step::ClickJunction { .. }
                 | Step::Collapse { .. }
                 | Step::Stow { .. }
+                | Step::FoldSideways { .. }
         )
     }
 
@@ -1518,6 +1534,11 @@ impl Sim {
             .iter_all_nodes()
             .map(|(_, node)| match node {
                 node if node.is_stowed() => 's',
+                // The axis is part of the mark, not just the yes/no: re-folding a bar into a
+                // strip is a change the dock announces and a picture the user sees, and a trace
+                // that spelled both `c` would report it as a press that flipped nothing — which
+                // is the commit rule's cue to expect no event at all.
+                node if node.is_leaf() && node.fold() == Fold::Strip => 'w',
                 node if node.is_leaf() && node.is_collapsed() => 'c',
                 _ => '.',
             })
@@ -2557,6 +2578,17 @@ impl Sim {
             let t = f32::from(step) / 4.0;
             self.run_frame(vec![Event::PointerMoved(at + (out - at) * t)]);
         }
+        // One quiet frame with the pointer resting where it landed. The dock publishes a hover
+        // destination while drawing and reads it back on the *next* pass, so the frame that
+        // brings the pointer home is one too early for `dnd` to be open — and `dragged_tab`,
+        // which is the conjunction of subject and destination, answers `None` until it is.
+        //
+        // It only started to matter when a plain fold began keeping its column: the sweep of
+        // frames above passes over whatever the travel crosses, and under two folded bars that
+        // is a stretch of the row belonging to nobody, so the homeward frame can be the only one
+        // over a leaf at all. Resting is what every other held gesture here does for the same
+        // kind of reason (see `move_while_held`).
+        self.run_frame(vec![]);
         if self.ctx.dragged_id() != Some(tab_widget_id(Id::new(DOCK_ID), leaf, id)) {
             self.run_frame(vec![Event::PointerButton {
                 pos: at,
@@ -2712,6 +2744,38 @@ impl Sim {
         gaps.iter().map(|gap| self.boundary_of(*gap)).collect()
     }
 
+    /// The same gaps, plus every other gap of any row that has a **strip** among its children.
+    ///
+    /// A strip does not take a share of its row: it keeps a fixed width, and a divider drawn
+    /// beside one trades between the nearest open children on either side of it rather than
+    /// between the gap's own neighbours (`DockArea::trading_pair`). So a gesture that names one
+    /// gap of such a row may legitimately move a different one — while still moving nothing
+    /// outside that row, which is what this keeps judging.
+    ///
+    /// Asked of the *layout*, which is the one entitled to answer "is this a strip": a narrow
+    /// rectangle is not one, and the two were told apart once already
+    /// (`NodeGeometry::side_strip`).
+    fn widen_over_strips(&self, gaps: Vec<GapPath>) -> Vec<GapPath> {
+        let layout = self.layout();
+        let mut widened = gaps.clone();
+        for gap in gaps {
+            let Some(children) = self.state[gap.row.surface].children(gap.row.node) else {
+                continue;
+            };
+            let has_strip = children
+                .iter()
+                .any(|child| layout.side_strip(NodePath::new(gap.row.surface, *child)).is_some());
+            if has_strip {
+                for sibling in self.gaps_of(gap.row) {
+                    if !widened.contains(&sibling) {
+                        widened.push(sibling);
+                    }
+                }
+            }
+        }
+        widened
+    }
+
     /// The tab the **dock** believes it is carrying, if any.
     ///
     /// Distinct from [`Sim::hold`] in both directions, which is the whole point: the hand can be
@@ -2791,7 +2855,12 @@ impl Sim {
         // state from being a one-way door — everything else would skip forever, and the sweep
         // would spend the rest of the scenario green and idle. See
         // `a_dock_with_nothing_open_can_still_be_brought_back`.
-        if leaves.is_empty() && !matches!(step, Step::Collapse { .. } | Step::Stow { .. }) {
+        if leaves.is_empty()
+            && !matches!(
+                step,
+                Step::Collapse { .. } | Step::Stow { .. } | Step::FoldSideways { .. }
+            )
+        {
             // An empty dock can only be rebuilt through the model — and "no panel is on screen"
             // stopped meaning "there is no panel" the moment folding arrived. A dock can have
             // every one of its leaves put away, tabs and all, and pushing into the focused one
@@ -3076,7 +3145,7 @@ impl Sim {
                 vec![target]
             }
 
-            Step::Collapse { arrow } | Step::Stow { arrow } => {
+            Step::Collapse { arrow } | Step::Stow { arrow } | Step::FoldSideways { arrow } => {
                 let arrows = self.arrows();
                 if arrows.is_empty() {
                     return None;
@@ -3104,6 +3173,7 @@ impl Sim {
                     self.refused[refused_index(Refused::Elsewhere)] += 1;
                     return None;
                 }
+                let sideways = matches!(step, Step::FoldSideways { .. });
                 self.collapse.offered += 1;
                 if leaves.is_empty() {
                     self.collapse.pressed_with_nothing_open += 1;
@@ -3113,10 +3183,10 @@ impl Sim {
                 let focus_before = self.focus_trace();
                 self.click_holding(
                     at,
-                    if modified {
-                        Modifiers::SHIFT
-                    } else {
-                        Modifiers::NONE
+                    match (modified, sideways) {
+                        (true, _) => Modifiers::SHIFT,
+                        (_, true) => Modifiers::COMMAND,
+                        _ => Modifiers::NONE,
                     },
                 );
                 // No extra quiet frame: a fold is queued while drawing and applied at the end of
@@ -3583,7 +3653,13 @@ impl Sim {
                 // the line every split beneath it is cut from, so holding it changes their
                 // *range* — which is precisely the pressure the frame pass must not answer by
                 // rewriting their stored ratios.
-                boundaries = BoundaryRule::Only(point.moves);
+                //
+                // Widened to the whole row wherever a **strip** stands in it, and that is the
+                // crate's rule rather than slack: a strip keeps its own width whatever a drag
+                // does, so a line beside one trades between the nearest *open* children on
+                // either side of it (`DockArea::trading_pair`) — a pair this harness does not
+                // re-derive. What it can say is which row the trade is confined to.
+                boundaries = BoundaryRule::Only(self.widen_over_strips(point.moves.clone()));
                 // A live drag reports `SeparatorDragging` per frame and nothing final; the one
                 // `LayoutCommitted` comes on release. The focus term is the same allowance
                 // `GrabSeparator` makes — the handle sits in its own foreground layer and should
@@ -4220,7 +4296,7 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
             steps.push(Step::Collapse { arrow });
             continue;
         }
-        let step = match rng.below(42) {
+        let step = match rng.below(44) {
             0..=4 => Step::Drag {
                 from: rng.below(8),
                 to: rng.below(8),
@@ -4389,6 +4465,14 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
             35..=36 => Step::Stow {
                 arrow: rng.below(8),
             },
+            // The other modified press, and the only step in the vocabulary that produces a
+            // strip: the plain fold spends height whatever the parent, so `Fold::Strip` is
+            // reachable this way alone. Two draws, the same as `Stow` — and for the same reason,
+            // since most of them land where the axis cannot be chosen (a vertical parent) and go
+            // through as plain folds.
+            41..=42 => Step::FoldSideways {
+                arrow: rng.below(8),
+            },
             // The plain click, drawn on its own rather than folded into the hold: a click is a
             // press and a release inside egui's click window, and a hold's release is a step
             // away.
@@ -4435,7 +4519,7 @@ fn scenario(seed: u64, len: usize) -> Vec<Step> {
         }
         // ...and not under a hold either, for the same reason: an arrow is a press, and a press
         // is refused while the hand is closed.
-        if let Step::Collapse { arrow } | Step::Stow { arrow } = step
+        if let Step::Collapse { arrow } | Step::Stow { arrow } | Step::FoldSideways { arrow } = step
             && until_release.is_none()
             && until_junction_release.is_none()
         {
@@ -6651,3 +6735,4 @@ fn the_geometry_map_forgets_the_nodes_that_are_gone() {
         "the dock never grew past {peak} entries; a scene this small proves little"
     );
 }
+

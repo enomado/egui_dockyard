@@ -23,13 +23,37 @@ collision below — it is what keeps the table finite: four targets and three ge
 | Divider | double click | reset to the middle | same | same | same |
 | Junction handle | drag | resizes the two or three boundaries the corner is made of, each as a `Pair` | same | same | same |
 | Junction handle | click | nothing | nothing | **transpose** the crossing | transpose |
-| Leaf collapse arrow | click | collapse *this leaf* | **stow the whole side** it belongs to | — | stow |
+| Leaf collapse arrow | click | fold this leaf into a **bar**: it spends its height and keeps its column | **stow the whole side** it belongs to | fold this leaf into a **strip**: it spends its width, and the sibling column takes it | stow — Shift wins |
 | Floating-window tab-bar buttons | click | primary action | the button's **secondary** action | — | secondary |
 
 Shift's column is one meaning read twice: *the bigger, or the more explicit, version of this
 action*. On a divider that is "no, only these two"; on an arrow it is "no, the whole side". It is
 also the one key a host can rebind — [`DockArea::secondary_button_modifiers`], which the last two
 rows follow.
+
+## The collapse arrow answers two questions, and that is why it takes two keys
+
+The arrow's row is the one place where two modifiers are live at once, and they are not two
+degrees of the same thing:
+
+* **Shift picks the target** — this leaf, or the whole side it lives in. Same meaning as
+  everywhere else in its column.
+* **Ctrl picks the axis** — which of the leaf's two dimensions the fold spends. A bar spends
+  height and leaves the column standing (empty, under a horizontal parent — that is what it
+  means); a strip spends width and hands the column to the sibling at once.
+
+Keeping them apart is what makes the arrow describable at all. The axis used to be read off the
+parent split — vertical parent, a bar; horizontal parent, a strip, behind
+[`DockArea::collapse_sideways`] — and that is a rule with no gesture behind it: when a user wanted
+the other picture, the only answer was to turn the knob off for the whole application. It was
+reported as exactly that (Стас, 03.09: *«при клике колонка прячется вправо — хотя должна при
+контрол клике»*). The axis is now [`Fold`] on the leaf, chosen where every other decision about a
+node is chosen — by the hand, on the node.
+
+`Ctrl` adds nothing where the axis is not a choice: under a vertical parent, where width given up
+has nobody to take it, and with `collapse_sideways` off, which is what admits strips at all. There
+the press goes through as the plain fold — the same answer `Shift` gives on a leaf that is already
+its own side.
 
 ## The collision, named rather than avoided
 
@@ -68,3 +92,6 @@ One place per meaning, and the table above is the index of them:
 * `is_on_secondary_button` / `stow_target` in `show/leaf.rs` — both read
   `secondary_button_modifiers` through `Modifiers::matches_logically`, which is what makes Shift
   mean *Shift and nothing else on top of it*.
+* `strip_target` in `show/leaf.rs` — the axis, read the same exact way from `Modifiers::COMMAND`.
+  It is deliberately **not** behind `secondary_button_modifiers`: a host rebinding "the bigger
+  version of this action" is not asking for the other axis to move with it.

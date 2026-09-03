@@ -35,10 +35,7 @@ use egui::{
     Atoms, CentralPanel, Context, Event, Id, Modifiers, PointerButton, Pos2, RawInput, Rect, Ui,
     Vec2,
 };
-use egui_dockyard::{
-    DockArea, DockLayout, DockState, GapIndex, GapPath, Node, NodeId, NodePath, Split, Style,
-    SurfaceIndex, TabViewer,
-};
+use egui_dockyard::{DockArea, DockLayout, DockState, Fold, GapIndex, GapPath, Node, NodeId, NodePath, Split, Style, SurfaceIndex, TabViewer};
 
 const SCREEN: Vec2 = Vec2::new(1200.0, 900.0);
 const DOCK_ID: &str = "a_strip_in_the_middle_still_has_a_handle";
@@ -90,7 +87,7 @@ impl Sim {
         let mut sim = Self::row_of_three();
         sim.state
             .main_surface_mut()
-            .set_leaf_collapsed(sim.panels[1], true);
+            .set_leaf_fold(sim.panels[1], Fold::Strip);
         sim.settle();
         sim
     }
@@ -298,7 +295,7 @@ fn a_strip_at_the_edge_grows_no_handle() {
     let mut sim = Sim::row_of_three();
     sim.state
         .main_surface_mut()
-        .set_leaf_collapsed(sim.panels[0], true);
+        .set_leaf_fold(sim.panels[0], Fold::Strip);
     sim.settle();
 
     assert_eq!(

@@ -25,10 +25,7 @@ use egui::{
     Atoms, CentralPanel, Context, Event, Id, LayerId, Modifiers, PointerButton, Pos2, RawInput,
     Rect, Shape, Ui, Vec2,
 };
-use egui_dockyard::{
-    DockArea, DockLayout, DockState, Node, NodeId, NodePath, Split, Style, SurfaceIndex, TabIndex,
-    TabViewer,
-};
+use egui_dockyard::{DockArea, DockLayout, DockState, Fold, Node, NodeId, NodePath, Split, Style, SurfaceIndex, TabIndex, TabViewer};
 
 const SCREEN: Vec2 = Vec2::new(1200.0, 900.0);
 const DOCK_ID: &str = "a_strip_says_what_is_inside_it";
@@ -254,7 +251,7 @@ fn a_collapsed_leaf_beside_a_column() -> (DockState<String>, NodeId, NodeId) {
         0.5,
         Node::leaf_with(vec![tab("Geology"), tab("Trajectory"), tab("Schema")]),
     );
-    state.main_surface_mut().set_leaf_collapsed(strip, true);
+    state.main_surface_mut().set_leaf_fold(strip, Fold::Strip);
     (state, strip, open)
 }
 
@@ -446,7 +443,7 @@ fn a_name_too_long_for_the_strip_fades_out_inside_it() {
     // whether or not anything was cut at all.
     let long = &"Geology, trajectory, schema, map, graph, and everything else. ".repeat(8);
     let [_, strip] = state.split(path(open), Split::Left, 0.5, Node::leaf(tab(long)));
-    state.main_surface_mut().set_leaf_collapsed(strip, true);
+    state.main_surface_mut().set_leaf_fold(strip, Fold::Strip);
 
     let ctx = Context::default();
     let frame = frames(&ctx, &mut state, &style);
@@ -490,7 +487,7 @@ fn names_are_squeezed_before_any_of_them_is_dropped() {
         .map(|i| tab(&format!("Panel number {i} with a name of some length")))
         .collect();
     let [_, strip] = state.split(path(open), Split::Left, 0.5, Node::leaf_with(tabs));
-    state.main_surface_mut().set_leaf_collapsed(strip, true);
+    state.main_surface_mut().set_leaf_fold(strip, Fold::Strip);
 
     let ctx = Context::default();
     let frame = frames(&ctx, &mut state, &style);
@@ -528,7 +525,7 @@ fn what_the_strip_cannot_hold_is_stood_for_by_an_ellipsis() {
     let open = state.main_surface().root().unwrap();
     let tabs: Vec<String> = (0..40).map(|i| tab(&format!("Panel number {i}"))).collect();
     let [_, strip] = state.split(path(open), Split::Left, 0.5, Node::leaf_with(tabs));
-    state.main_surface_mut().set_leaf_collapsed(strip, true);
+    state.main_surface_mut().set_leaf_fold(strip, Fold::Strip);
 
     let ctx = Context::default();
     let frame = frames(&ctx, &mut state, &style);

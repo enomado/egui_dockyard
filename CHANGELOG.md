@@ -47,14 +47,50 @@
   instead: it shrinks to a strip one tab bar thick with an expand arrow, and the sibling column
   takes the width at once, so nothing is left over.
 
-  The direction is never stored — it is read off the parent split. A leaf dragged into a vertical
-  split goes back to collapsing into a row, and transposing a split turns its strips the other
-  way by itself. Nothing new is serialized either, so turning the knob back off restores the old
-  layout with no migration of saved trees.
+  **The direction is asked for, not derived** — see the entry below, which supersedes the first
+  shape of this feature: `Ctrl` + click on the arrow is what spends the width, and a plain click
+  spends the height as it always did.
 
-  Only a collapsed *leaf* whose sibling is open becomes a strip. Two collapsed siblings keep
-  their columns, because the width they gave up would have nobody to go to; so does a collapsed
-  *split*, whose subtree is rows of tab bars that do not fit in a strip.
+  Only a *leaf* whose sibling is open becomes a strip. Two folded siblings keep their columns,
+  because the width they gave up would have nobody to go to; so does a collapsed *split*, whose
+  subtree is rows of tab bars that do not fit in a strip.
+
+- **One arrow, two axes: `Ctrl` folds a leaf sideways.** A collapse arrow now asks *which*
+  dimension the leaf gives up, and the hand answers it:
+
+  * a plain click folds it into a **bar** — the leaf spends its height, keeps its column, and
+    under a horizontal parent that column stands open and empty, exactly as it did before
+    `collapse_sideways` existed;
+  * `Ctrl` + click folds it into a **strip** — the leaf spends its width and the sibling column
+    takes it at once. On a leaf already a strip it takes it back, and on a bar it re-folds it
+    sideways without a trip through "open";
+  * `Shift` is unchanged, and answers the other question — *which target*, this leaf or the whole
+    side it lives in. The two keys never mean the same thing, which is why they are two.
+
+  The axis was read off the parent split before this — horizontal parent, a strip — and that
+  turned a knob into a policy: a user who wanted the column left standing had to turn
+  `collapse_sideways` off for the whole application. It is `LeafNode::fold` now, and the knob is
+  back to admitting the gesture rather than deciding for it. `Ctrl` adds nothing where the axis is
+  not a choice — a vertical parent, or the knob off — and the press goes through as the plain
+  fold. The whole table is `docs/MODIFIERS.md`.
+
+  **Wire format**: a folded leaf writes the `collapsed` boolean it always wrote, plus a
+  `sideways` flag beside it. Every layout on disk still loads, and loads as a *bar* — which is
+  what those folds were, since the sideways picture was a rendering of a plain collapse rather
+  than a state anybody stored. An older build reading a layout written here simply does not see
+  `sideways` and draws the fold the only way it knows.
+
+  **Breaking**: `Tree::set_leaf_collapsed(node, bool)` is now `Tree::set_leaf_fold(node, Fold)`,
+  and `LeafNode::collapsed: bool` is `LeafNode::fold: Fold`. `Node::is_collapsed()` is unchanged
+  and still answers the yes/no every other reader asks. A caller that folded a leaf writes
+  `Fold::Bar` for the old behaviour, or `Fold::Strip` for the sideways one it used to get from the
+  knob and the parent.
+
+- **A crossing with a folded panel in it is not transposed.** The transposing `Ctrl`+click on a
+  junction promises the same rectangles grouped differently; a folded part holds a fixed length
+  along its row's axis, and a transposition turns that axis, so the promise cannot hold. The
+  handle is still offered to drag — the same answer the crate already gives for a part too thin
+  to put back. Found by the `dst` sweep, which measures the promise in pixels.
 
 - **One drag resizes the panels around a tee.** Where a divider ends on the line between a
   split's two children — a "T" of three panels — the dock offers a small handle, and dragging it

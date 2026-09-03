@@ -28,10 +28,7 @@
 //! left over, which is then empty by decision rather than by accident.
 
 use egui::{Atoms, CentralPanel, Context, Id, Pos2, RawInput, Rect, Ui, Vec2};
-use egui_dockyard::{
-    DockArea, DockLayout, DockState, Node, NodeId, NodePath, SideStrip, Split, Style, SurfaceIndex,
-    TabViewer,
-};
+use egui_dockyard::{DockArea, DockLayout, DockState, Fold, Node, NodeId, NodePath, SideStrip, Split, Style, SurfaceIndex, TabViewer};
 
 const SCREEN: Vec2 = Vec2::new(1200.0, 900.0);
 const DOCK_ID: &str = "a_collapsed_leaf_can_hide_sideways";
@@ -113,11 +110,11 @@ fn two_columns(collapse: Collapse) -> (DockState<String>, NodeId, NodeId, NodeId
         Node::leaf(tab("right")),
     );
     match collapse {
-        Collapse::Left => state.main_surface_mut().set_leaf_collapsed(left, true),
-        Collapse::Right => state.main_surface_mut().set_leaf_collapsed(right, true),
+        Collapse::Left => state.main_surface_mut().set_leaf_fold(left, Fold::Strip),
+        Collapse::Right => state.main_surface_mut().set_leaf_fold(right, Fold::Strip),
         Collapse::Both => {
-            state.main_surface_mut().set_leaf_collapsed(left, true);
-            state.main_surface_mut().set_leaf_collapsed(right, true);
+            state.main_surface_mut().set_leaf_fold(left, Fold::Strip);
+            state.main_surface_mut().set_leaf_fold(right, Fold::Strip);
         }
     }
     let parent = state
@@ -324,7 +321,7 @@ fn two_of_three_collapsed_are_two_strips_beside_one_column() {
             let (mut state, nodes) = three_columns();
             for (i, node) in nodes.iter().enumerate() {
                 if i != open {
-                    state.main_surface_mut().set_leaf_collapsed(*node, true);
+                    state.main_surface_mut().set_leaf_fold(*node, Fold::Strip);
                 }
             }
             let layout = run(&mut state, &style, true);
@@ -388,7 +385,7 @@ fn a_fully_collapsed_row_is_a_row_of_strips() {
     {
         let (mut state, nodes) = three_columns();
         for node in nodes {
-            state.main_surface_mut().set_leaf_collapsed(node, true);
+            state.main_surface_mut().set_leaf_fold(node, Fold::Strip);
         }
         let layout = run(&mut state, &style, true);
         let row = row_rect(&layout, &state);
@@ -443,8 +440,8 @@ fn a_row_of_strips_marks_its_leaves_not_the_split() {
     let style = style();
 
     let (mut state, [a, b, c]) = three_columns();
-    state.main_surface_mut().set_leaf_collapsed(b, true);
-    state.main_surface_mut().set_leaf_collapsed(c, true);
+    state.main_surface_mut().set_leaf_fold(b, Fold::Strip);
+    state.main_surface_mut().set_leaf_fold(c, Fold::Strip);
     let row = state
         .main_surface()
         .parent(b)
@@ -526,8 +523,8 @@ fn a_vertically_collapsed_split_beside_a_column_keeps_the_column() {
     );
     // The whole left-hand subtree is collapsed, so the split above these two is itself
     // collapsed — and it is a split, not a leaf.
-    state.main_surface_mut().set_leaf_collapsed(top, true);
-    state.main_surface_mut().set_leaf_collapsed(bottom, true);
+    state.main_surface_mut().set_leaf_fold(top, Fold::Strip);
+    state.main_surface_mut().set_leaf_fold(bottom, Fold::Strip);
 
     let inner = state
         .main_surface()
@@ -575,7 +572,7 @@ fn expanding_a_strip_takes_it_back() {
         "the leaf has to be a strip before expanding it can prove anything"
     );
 
-    state.main_surface_mut().set_leaf_collapsed(left, false);
+    state.main_surface_mut().set_leaf_fold(left, Fold::Open);
     frames(&ctx, &mut state, &style, true);
     let layout = DockLayout::load(&ctx, Id::new(DOCK_ID));
 

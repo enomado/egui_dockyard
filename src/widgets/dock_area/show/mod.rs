@@ -19,7 +19,8 @@ use crate::dock_area::tab_removal::ForcedRemoval;
 use crate::layout::{DockLayout, SideStrip};
 use crate::tab_viewer::OnCloseResponse;
 use crate::{
-    AllowedSplits, DockArea, Node, OverlayType, Style, SurfaceIndex, TabDestination, TabViewer,
+    AllowedSplits, DockArea, Fold, Node, OverlayType, Style, SurfaceIndex, TabDestination,
+    TabViewer,
     utils::{expand_to_pixel, fade_dock_style, map_to_pixel},
 };
 use crate::{GapIndex, GapPath, NodePath, RowGap};
@@ -276,7 +277,7 @@ impl<Tab> DockArea<'_, Tab> {
         let mut new_focused = mutations.iter().rev().find_map(|mutation| match mutation {
             DockMutation::Focus(path) => Some(*path),
             DockMutation::Activate(_)
-            | DockMutation::SetLeafCollapsed { .. }
+            | DockMutation::SetLeafFold { .. }
             | DockMutation::SetSplitStowed { .. }
             | DockMutation::SetLeafScroll { .. }
             | DockMutation::SetBoundary { .. }
@@ -346,9 +347,12 @@ impl<Tab> DockArea<'_, Tab> {
                         );
                     }
                 }
-                DockMutation::SetLeafCollapsed { path, collapsed } => {
-                    if self.dock_state[path].is_collapsed() != collapsed {
-                        self.dock_state[path.surface].set_leaf_collapsed(path.node, collapsed);
+                DockMutation::SetLeafFold { path, fold } => {
+                    // Compared as a whole, axis included: re-folding a bar into a strip changes
+                    // nothing about *whether* the leaf is folded and everything about the
+                    // picture, so asking `is_collapsed` here would drop that request.
+                    if self.dock_state[path].fold() != fold {
+                        self.dock_state[path.surface].set_leaf_fold(path.node, fold);
                         // Reads the collapsed flag it has just written, plus this pass's
                         // geometry, to remember the height an expand has to restore.
                         self.window_update_collapsed(path);
@@ -858,7 +862,17 @@ impl<Tab> DockArea<'_, Tab> {
         if !node.is_collapsed() {
             return None;
         }
-        if node.is_leaf() || node.is_stowed() {
+        // A leaf goes sideways because it was *asked* to — [`Fold::Strip`] is the axis the
+        // gesture chose, and a leaf folded into a bar keeps its column even here, which is the
+        // whole of what the plain click means. It used to be this function's own decision, taken
+        // for any collapsed leaf under a horizontal parent, and a hand had no way to ask for the
+        // other picture.
+        if node.is_leaf() {
+            return (node.fold() == Fold::Strip).then_some(1);
+        }
+        // A stowed split has no axis to choose: putting a subtree away *is* the sideways gesture,
+        // and it draws one bar for whatever it contains.
+        if node.is_stowed() {
             return Some(1);
         }
         if !node.is_horizontal() {
@@ -1974,7 +1988,7 @@ mod tests {
     use super::{collapsed_strip_height, collapsed_strip_width};
     use crate::layout::{DockLayout, SideStrip};
     use crate::{
-        DockArea, DockState, GapIndex, GapPath, Node, NodeId, NodePath, Share, Split, Style,
+        DockArea, DockState, Fold, GapIndex, GapPath, Node, NodeId, NodePath, Share, Split, Style,
         SurfaceIndex, TabViewer, Tree,
     };
 
@@ -2133,8 +2147,8 @@ mod tests {
     fn strips_at_both_ends_of_a_row_hug_their_own_edges() {
         let style = style();
         let (mut state, row, [a, b, c]) = row_of_three(true, [1.0, 1.0, 1.0]);
-        state.main_surface_mut().set_leaf_collapsed(a, true);
-        state.main_surface_mut().set_leaf_collapsed(c, true);
+        state.main_surface_mut().set_leaf_fold(a, Fold::Strip);
+        state.main_surface_mut().set_leaf_fold(c, Fold::Strip);
         let layout = lay_out(&mut state, &style, true);
 
         let whole = rect_of(&layout, row);
@@ -2187,7 +2201,7 @@ mod tests {
     fn a_strip_among_open_columns_hands_its_width_to_both_sides() {
         let style = style();
         let (mut state, row, [a, b, c]) = row_of_three(true, [1.0, 1.0, 3.0]);
-        state.main_surface_mut().set_leaf_collapsed(b, true);
+        state.main_surface_mut().set_leaf_fold(b, Fold::Strip);
         let layout = lay_out(&mut state, &style, true);
 
         let strip = rect_of(&layout, b);
@@ -2239,7 +2253,7 @@ mod tests {
         let style = style();
         let (mut state, row, leaves) = row_of_three(true, [1.0, 1.0, 1.0]);
         for leaf in leaves {
-            state.main_surface_mut().set_leaf_collapsed(leaf, true);
+            state.main_surface_mut().set_leaf_fold(leaf, Fold::Strip);
         }
         let layout = lay_out(&mut state, &style, true);
 
@@ -2273,8 +2287,8 @@ mod tests {
     fn collapsed_rows_at_both_ends_of_a_stack_leave_the_open_one_between() {
         let style = style();
         let (mut state, row, [a, b, c]) = row_of_three(false, [1.0, 1.0, 1.0]);
-        state.main_surface_mut().set_leaf_collapsed(a, true);
-        state.main_surface_mut().set_leaf_collapsed(c, true);
+        state.main_surface_mut().set_leaf_fold(a, Fold::Strip);
+        state.main_surface_mut().set_leaf_fold(c, Fold::Strip);
         let layout = lay_out(&mut state, &style, false);
 
         let whole = rect_of(&layout, row);
@@ -2339,8 +2353,8 @@ mod tests {
         let (b, c) = (leaves[0], leaves[1]);
         let outer = state.main_surface().root().unwrap();
         assert_ne!(inner, outer, "the stack is nested, not the root");
-        state.main_surface_mut().set_leaf_collapsed(b, true);
-        state.main_surface_mut().set_leaf_collapsed(c, true);
+        state.main_surface_mut().set_leaf_fold(b, Fold::Strip);
+        state.main_surface_mut().set_leaf_fold(c, Fold::Strip);
         let layout = lay_out(&mut state, &style, false);
 
         let bar = collapsed_strip_height(1, &style);
@@ -2440,7 +2454,7 @@ mod tests {
         let style = style();
         let (mut state, row, leaves) = row_of_three(false, [1.0, 1.0, 1.0]);
         for leaf in leaves {
-            state.main_surface_mut().set_leaf_collapsed(leaf, true);
+            state.main_surface_mut().set_leaf_fold(leaf, Fold::Strip);
         }
         let layout = lay_out(&mut state, &style, false);
 

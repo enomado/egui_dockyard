@@ -267,7 +267,7 @@ pub use crate::core::translations::{
     LeafTranslations, TabContextMenuTranslations, Translations,
 };
 pub use crate::core::tree::{
-    ChildIndex, DockViolation, GapIndex, GapPath, LeafNode, Node, NodeId, NodePath, RowGap,
+    ChildIndex, DockViolation, Fold, GapIndex, GapPath, LeafNode, Node, NodeId, NodePath, RowGap,
     RowNode, Share, Split, SurfaceViolation, TabDestination, TabId, TabIndex, TabInsert, TabIter,
     TabPath, Tree, TreeViolation,
 };

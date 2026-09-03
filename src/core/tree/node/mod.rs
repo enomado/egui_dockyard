@@ -2,7 +2,7 @@ use crate::core::tree::TabIndex;
 
 mod leaf;
 mod row;
-pub use leaf::{LeafNode, TabId};
+pub use leaf::{Fold, LeafNode, TabId};
 pub use row::{RowNode, Share};
 
 /// Represents an abstract node of a [`Tree`](crate::Tree).
@@ -108,8 +108,21 @@ impl<Tab> Node<Tab> {
     /// business, and matters only when bringing it back.
     pub fn is_collapsed(&self) -> bool {
         match self {
-            Node::Leaf(leaf) => leaf.collapsed,
+            Node::Leaf(leaf) => leaf.fold.is_folded(),
             Node::Row(row) => row.stowed || row.fully_collapsed,
+        }
+    }
+
+    /// Which way a folded leaf was folded — see [`Fold`].
+    ///
+    /// [`Fold::Open`] for an open leaf **and** for a row: a row is not folded along an axis of
+    /// its own, it is stowed or it is a stack of folded leaves, and both of those are
+    /// [`is_collapsed`](Self::is_collapsed)'s question rather than this one.
+    #[inline]
+    pub fn fold(&self) -> Fold {
+        match self {
+            Node::Leaf(leaf) => leaf.fold,
+            Node::Row(_) => Fold::Open,
         }
     }
 
@@ -136,7 +149,7 @@ impl<Tab> Node<Tab> {
     pub fn collapsed_leaf_count(&self) -> i32 {
         match self {
             Node::Row(row) => row.collapsed_leaf_count,
-            Node::Leaf(leaf) => i32::from(leaf.collapsed),
+            Node::Leaf(leaf) => i32::from(leaf.fold.is_folded()),
         }
     }
 
@@ -190,12 +203,15 @@ impl<Tab> Node<Tab> {
     ///
     /// Deliberately not public: on its own it makes the tree inconsistent, because every
     /// row above the node derives its bookkeeping from what it contains. The operation
-    /// callers want is [`Tree::set_leaf_collapsed`](crate::Tree::set_leaf_collapsed).
+    /// callers want is [`Tree::set_leaf_fold`](crate::Tree::set_leaf_fold).
+    ///
+    /// A row has no axis to fold along, so it takes only the folded/open half of the answer:
+    /// [`Fold::Open`] opens it, and anything else is `fully_collapsed`.
     #[inline]
-    pub(crate) fn set_collapsed(&mut self, collapsed: bool) {
+    pub(crate) fn set_fold(&mut self, fold: Fold) {
         match self {
-            Node::Leaf(leaf) => leaf.collapsed = collapsed,
-            Node::Row(row) => row.fully_collapsed = collapsed,
+            Node::Leaf(leaf) => leaf.fold = fold,
+            Node::Row(row) => row.fully_collapsed = fold.is_folded(),
         }
     }
 

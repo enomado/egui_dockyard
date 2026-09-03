@@ -47,6 +47,7 @@ use std::{
     ops::{Index, IndexMut},
 };
 
+pub use node::Fold;
 pub use node::LeafNode;
 pub use node::Node;
 pub use node::RowNode;
@@ -1015,27 +1016,31 @@ impl<Tab> Tree<Tab> {
     // Collapsing
     // ------------------------------------------------------------------------
 
-    /// Collapses or expands a leaf, and settles everything that follows from it.
+    /// Folds or opens a leaf, and settles everything that follows from it.
     ///
-    /// This is the only entry point into collapsing, and it is one call on purpose.
-    /// [`LeafNode::collapsed`] is the single decision in the whole scheme — the user makes
+    /// This is the only entry point into folding, and it is one call on purpose.
+    /// [`LeafNode::fold`] is the single decision in the whole scheme — the user makes
     /// it; every number a split or the tree itself stores is *derived* from the leaves
-    /// below. Setting the flag without recomputing the ancestors leaves the tree describing
+    /// below. Setting the field without recomputing the ancestors leaves the tree describing
     /// a shape it no longer has, and nothing in the type system asks for the second step:
     /// that exact omission was found and fixed twice (see `FINDINGS.md`, the collapsed-rows
     /// entries) before it became a single operation here.
+    ///
+    /// `fold` carries the *axis* as well as the yes/no — see [`Fold`]. Which axis is a choice
+    /// the gesture makes and the tree keeps; whether it can be honoured is the layout's call,
+    /// since width given up under a vertical parent has nobody to take it.
     ///
     /// # Panics
     ///
     /// If `node` is not a live leaf of this tree.
     #[track_caller]
-    pub fn set_leaf_collapsed(&mut self, node: NodeId, collapsed: bool) {
+    pub fn set_leaf_fold(&mut self, node: NodeId, fold: Fold) {
         assert!(
             self[node].is_leaf(),
-            "set_leaf_collapsed on a node that is not a leaf: collapsing is a decision about \
+            "set_leaf_fold on a node that is not a leaf: folding is a decision about \
              a leaf, and every split above it is derived from its children"
         );
-        self[node].set_collapsed(collapsed);
+        self[node].set_fold(fold);
         self.node_update_collapsed(node);
     }
 
@@ -1054,7 +1059,7 @@ impl<Tab> Tree<Tab> {
         assert!(
             self[node].is_parent(),
             "set_split_stowed on a node that is not a split: stowing puts a subtree away, and a \
-             leaf has none — use set_leaf_collapsed"
+             leaf has none — use set_leaf_fold"
         );
         self[node].set_stowed(stowed);
         // The split's own bookkeeping first — its row count is now 1 (or back to its children's)
@@ -1125,7 +1130,9 @@ impl<Tab> Tree<Tab> {
             )
         };
         self[split].set_collapsed_leaf_count(count);
-        self[split].set_collapsed(all_collapsed);
+        // A row has no axis of its own, so the axis half of `Fold` is not its business — see
+        // `Node::set_fold`. `Bar` stands for "folded" here and reaches `fully_collapsed`.
+        self[split].set_fold(if all_collapsed { Fold::Bar } else { Fold::Open });
     }
 
     /// Mirrors the root's bookkeeping onto the tree itself, which is where the window
@@ -1527,7 +1534,7 @@ mod test {
 
     /// Collapses a leaf the way the tab bar's button does.
     fn collapse(tree: &mut Tree<Tab>, leaf: NodeId) {
-        tree.set_leaf_collapsed(leaf, true);
+        tree.set_leaf_fold(leaf, Fold::Bar);
     }
 
     /// A stack of three leaves, the lower two collapsed: `V(top, V(mid, low))`.
@@ -1608,18 +1615,18 @@ mod test {
         let [top, bottom] = tree.split_below(root, 0.5, vec![Tab(1)]);
         let split = tree.parent(top).unwrap();
 
-        tree.set_leaf_collapsed(bottom, true);
+        tree.set_leaf_fold(bottom, Fold::Bar);
         assert_eq!(tree[split].collapsed_leaf_count(), 1);
         assert_eq!(tree.collapsed_leaf_count(), 1, "the tree mirrors its root");
 
-        tree.set_leaf_collapsed(top, true);
+        tree.set_leaf_fold(top, Fold::Bar);
         assert!(
             tree[split].is_collapsed(),
             "both children collapsed makes the split collapsed"
         );
 
         // Expanding walks the same path back down.
-        tree.set_leaf_collapsed(bottom, false);
+        tree.set_leaf_fold(bottom, Fold::Open);
         assert!(!tree[split].is_collapsed());
         assert_eq!(tree[split].collapsed_leaf_count(), 1);
     }
@@ -1634,7 +1641,7 @@ mod test {
         let [top, _] = tree.split_below(root, 0.5, vec![Tab(1)]);
         let split = tree.parent(top).unwrap();
 
-        tree.set_leaf_collapsed(split, true);
+        tree.set_leaf_fold(split, Fold::Bar);
     }
 
     /// The copying sweeps rebuild the tree, so a split they copy carries the count of the

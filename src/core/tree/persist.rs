@@ -29,7 +29,9 @@ use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
-use crate::core::tree::{ChildIndex, LeafNode, Node, NodeId, RowNode, Share, TabIndex, Tree};
+use crate::core::tree::{
+    ChildIndex, Fold, LeafNode, Node, NodeId, RowNode, Share, TabIndex, Tree,
+};
 
 use super::arena::NodeEntry;
 
@@ -65,7 +67,20 @@ enum NodeOut<'a, Tab> {
         /// older build reading one loses the history rather than misreading it.
         history: Vec<TabIndex>,
         scroll: f32,
+        /// Whether the leaf is folded at all. **Kept as it was** although the model now says
+        /// more than a `bool`: this is the field every build ever written reads, and a reader
+        /// given a string where it expects a boolean loses the whole file. The axis rides
+        /// beside it in `sideways`, which an older build simply does not see — so it opens the
+        /// layout and draws the fold the only way it knows.
         collapsed: bool,
+        /// Which way it was folded: `true` for a strip (width given up), `false` for a bar.
+        ///
+        /// A second flag rather than [`Fold`](crate::Fold) spelled out, for the reason above —
+        /// and it reads correctly by *absence* as well, which is what makes the migration free:
+        /// every file written before an axis could be chosen carries no `sideways`, and `false`
+        /// is exactly what those folds were, since the sideways picture was a rendering of a
+        /// plain collapse rather than a state anybody stored.
+        sideways: bool,
     },
     /// A row, of however many children it has.
     ///
@@ -109,7 +124,8 @@ fn node_out<Tab>(tree: &Tree<Tab>, id: NodeId) -> NodeOut<'_, Tab> {
                 .rev()
                 .collect(),
             scroll: leaf.scroll,
-            collapsed: leaf.collapsed,
+            collapsed: leaf.fold.is_folded(),
+            sideways: leaf.fold == Fold::Strip,
         },
         // The orientation and the weights go out exactly as memory holds them: one variant, one
         // list of children, one weight each. The model and the format said different things for
@@ -186,6 +202,20 @@ fn none<T>() -> Option<T> {
     None
 }
 
+/// The fold a stored leaf describes, out of the two flags the file carries.
+///
+/// The pair is a wire shape, not a model one — see the writer's note on `NodeOut::Leaf` for why
+/// [`Fold`] is not spelled out on disk. `sideways` is meaningless without `collapsed` and is
+/// ignored there rather than trusted: a file claiming an open leaf that is also a strip is
+/// describing a state the model has no room for, and the open half is the one the user sees.
+fn stored_fold(collapsed: bool, sideways: bool) -> Fold {
+    match (collapsed, sideways) {
+        (false, _) => Fold::Open,
+        (true, false) => Fold::Bar,
+        (true, true) => Fold::Strip,
+    }
+}
+
 /// The focus history a stored leaf describes, whichever way it says it.
 ///
 /// A file written by this build carries `history`; one written before the history became a
@@ -250,6 +280,11 @@ enum NodeIn<Tab> {
         scroll: f32,
         #[serde(default)]
         collapsed: bool,
+        /// Absent in every file written before a fold had an axis, and `false` is what those
+        /// folds were — see the writer's note. So the migration is the default and nothing has
+        /// to be walked.
+        #[serde(default)]
+        sideways: bool,
     },
     /// The current form: a row of however many children, with a weight each.
     Row {
@@ -452,6 +487,7 @@ impl<Tab> Tree<Tab> {
                 history,
                 scroll,
                 collapsed,
+                sideways,
             } => {
                 if tabs.is_empty() {
                     return None;
@@ -461,7 +497,7 @@ impl<Tab> Tree<Tab> {
                     active,
                     stored_history(history, prev_active),
                     scroll,
-                    collapsed,
+                    stored_fold(collapsed, sideways),
                 ))
             }
             NodeIn::Vertical {
@@ -541,9 +577,9 @@ impl<Tab> Tree<Tab> {
         active: TabIndex,
         history: Vec<TabIndex>,
         scroll: f32,
-        collapsed: bool,
+        fold: Fold,
     ) -> NodeId {
-        let leaf = LeafNode::from_persisted(tabs, active, history, scroll, collapsed);
+        let leaf = LeafNode::from_persisted(tabs, active, history, scroll, fold);
         self.adopt(Node::Leaf(leaf))
     }
 
@@ -584,7 +620,9 @@ impl<Tab> Tree<Tab> {
                     active,
                     stored_history(Vec::new(), prev_active),
                     scroll,
-                    collapsed,
+                    // The pre-arena heap predates the axis by two formats over; a fold it
+                    // recorded is the only one it could mean.
+                    stored_fold(collapsed, false),
                 )
             }
             LegacyNode::Vertical(split) | LegacyNode::Horizontal(split) => {
@@ -906,7 +944,7 @@ mod tests {
         // A leaf collapsed *inside* what is about to be put away: the state that "collapse
         // every leaf" would have destroyed and cannot tell apart afterwards.
         let [inner_top, _] = tree[right].get_row().unwrap().children_pair();
-        tree.set_leaf_collapsed(inner_top, true);
+        tree.set_leaf_fold(inner_top, Fold::Bar);
         tree.set_split_stowed(right, true);
 
         let json = serde_json::to_string(&tree).unwrap();

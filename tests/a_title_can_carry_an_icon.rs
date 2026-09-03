@@ -27,9 +27,7 @@ use egui::{
     Atoms, CentralPanel, Color32, Context, Id, Image, LayerId, Pos2, RawInput, Rect, Shape,
     TextureId, Ui, Vec2,
 };
-use egui_dockyard::{
-    DockArea, DockLayout, DockState, NodeId, NodePath, Style, SurfaceIndex, TabViewer,
-};
+use egui_dockyard::{DockArea, DockLayout, DockState, Fold, NodeId, NodePath, Style, SurfaceIndex, TabViewer};
 
 const SCREEN: Vec2 = Vec2::new(1200.0, 900.0);
 const DOCK_ID: &str = "a_title_can_carry_an_icon";
@@ -424,7 +422,7 @@ fn a_strip_carries_the_icon_upright() {
         0.5,
         egui_dockyard::Node::leaf("Tuning".to_owned()),
     );
-    state.main_surface_mut().set_leaf_collapsed(strip, true);
+    state.main_surface_mut().set_leaf_fold(strip, Fold::Strip);
 
     let ctx = Context::default();
     let painted = frames(&ctx, &mut state, &style, true);

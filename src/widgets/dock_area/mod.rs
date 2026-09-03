@@ -22,7 +22,9 @@ pub use state::{DragInFlight, DragSubject, JunctionArms, WindowEdge};
 use tab_removal::TabRemoval;
 
 use crate::layout::DockLayout;
-use crate::{GapPath, NodePath, Share, Style, SurfaceIndex, TabIndex, TabPath, core::DockState};
+use crate::{
+    Fold, GapPath, NodePath, Share, Style, SurfaceIndex, TabIndex, TabPath, core::DockState,
+};
 
 /// Displays a [`DockState`] in `egui`.
 pub struct DockArea<'tree, Tab> {
@@ -123,11 +125,12 @@ pub(in crate::widgets::dock_area) enum DockMutation {
     /// drawing, removal in the epilogue. The distinction matters — `remove_tab_choosing` only
     /// asks for a successor when the tab it removes is the active one.
     Activate(TabPath),
-    /// Collapse or expand a leaf. Carries the target value rather than a toggle so that two
-    /// requests for the same leaf in one frame cannot cancel each other out by ordering.
-    SetLeafCollapsed {
+    /// Fold or open a leaf, and along which axis — see [`Fold`](crate::Fold). Carries the target
+    /// value rather than a toggle so that two requests for the same leaf in one frame cannot
+    /// cancel each other out by ordering.
+    SetLeafFold {
         path: NodePath,
-        collapsed: bool,
+        fold: Fold,
     },
     /// Put a whole split away behind one arrow, or bring it back — see
     /// [`SplitNode::stowed`](crate::SplitNode::stowed).

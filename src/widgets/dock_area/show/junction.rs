@@ -85,6 +85,17 @@ struct Band {
     /// that reproduces what is on screen, with no separator width to fold in or out. Deriving a
     /// fraction from the parts' *sizes* instead drifts the ratio, most visibly on small tiles.
     bounds: Vec<f32>,
+
+    /// Whether any part of the band is a **folded** node.
+    ///
+    /// A folded part does not take a share of its row: it is given a fixed length along that
+    /// row's axis (a bar spends height, a strip spends width — see [`Fold`](crate::Fold)). A
+    /// transposition turns the band the other way, and that fixed length would then be measured
+    /// along the *other* axis, so the part lands at a size nobody asked for. The promise the
+    /// gesture is made on — the same rectangles, grouped differently — cannot hold, and the
+    /// answer is the one `parts_can_be_renested` already gives for a part too thin to put back:
+    /// keep offering the handle to drag, withhold the transposition.
+    folded_part: bool,
 }
 
 impl Band {
@@ -378,6 +389,11 @@ impl<Tab> DockArea<'_, Tab> {
         }
         bounds.push(edge(rects[rects.len() - 1], horizontal, true));
 
+        let folded_part = chain
+            .parts
+            .iter()
+            .any(|node| self.dock_state[NodePath::new(root.surface, *node)].is_collapsed());
+
         Some(Band {
             dividers: chain
                 .dividers
@@ -385,6 +401,7 @@ impl<Tab> DockArea<'_, Tab> {
                 .map(|gap| GapPath::in_surface(root.surface, gap))
                 .collect(),
             bounds,
+            folded_part,
         })
     }
 
@@ -418,8 +435,10 @@ impl<Tab> DockArea<'_, Tab> {
         let inner_horizontal = !outer_horizontal;
         let band0 = self.band(c0, inner_horizontal)?;
         let band1 = self.band(c1, inner_horizontal)?;
-        let can_transpose =
-            band0.parts_can_be_renested(extra) && band1.parts_can_be_renested(extra);
+        let can_transpose = band0.parts_can_be_renested(extra)
+            && band1.parts_can_be_renested(extra)
+            && !band0.folded_part
+            && !band1.folded_part;
 
         let (c0_rect, c1_rect) = (self.layout.rect(c0)?, self.layout.rect(c1)?);
         let outer_bounds = [

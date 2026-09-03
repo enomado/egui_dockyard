@@ -33,7 +33,7 @@ use crate::core::DockState;
 use crate::core::geom::{Point, Rect, Size};
 use crate::core::surface_index::{SurfaceIndex, WindowIndex};
 use crate::core::tree::node::Node;
-use crate::core::tree::{NodePath, Split, TabIndex, TabInsert, TabPath};
+use crate::core::tree::{Fold, NodePath, Split, TabIndex, TabInsert, TabPath};
 
 /// One operation applied to a dock state.
 ///
@@ -93,6 +93,16 @@ pub enum Op {
     /// reshaped underneath them — without it every count in every generated tree is zero and
     /// a property about them holds for free.
     ToggleCollapsed {
+        /// Which live leaf.
+        leaf: u8,
+    },
+    /// The same button with Ctrl held: fold a leaf along the *other* axis, into a strip, or
+    /// open one already folded that way — see [`Fold`](crate::Fold).
+    ///
+    /// A separate op rather than a flag on the one above, for the same reason `ToggleStowed` is
+    /// separate: it reaches a state the other cannot. Without it every generated tree holds
+    /// bars alone, and a property about strips holds for free.
+    FoldSideways {
         /// Which live leaf.
         leaf: u8,
     },
@@ -181,6 +191,7 @@ pub fn tab_count_rule(op: Op) -> TabCountRule {
         | Op::SetActive { .. }
         | Op::Focus { .. }
         | Op::ToggleCollapsed { .. }
+        | Op::FoldSideways { .. }
         | Op::ToggleStowed { .. }
         | Op::Remap => TabCountRule::Unchanged,
     }
@@ -380,9 +391,28 @@ pub fn apply(state: &mut DockState<u32>, op: Op, next_tab: &mut u32) -> Option<A
 
         Op::ToggleCollapsed { leaf } => {
             let path = pick(leaf);
-            let collapsed = state[path].is_collapsed();
-            state[path.surface].set_leaf_collapsed(path.node, !collapsed);
-            // Collapsing hides a leaf's tabs; it does not touch which tabs are where.
+            // Round-trips the axis as well as the flag: an open leaf folds into a bar, and a
+            // leaf folded either way opens. Which axis a *gesture* would pick is the widget's
+            // business (`strip_target`); what this op has to reach is both states of the model,
+            // and `Op::FoldSideways` is the one that reaches the other.
+            let fold = if state[path].is_collapsed() {
+                Fold::Open
+            } else {
+                Fold::Bar
+            };
+            state[path.surface].set_leaf_fold(path.node, fold);
+            // Folding hides a leaf's tabs; it does not touch which tabs are where.
+            vec![]
+        }
+
+        Op::FoldSideways { leaf } => {
+            let path = pick(leaf);
+            let fold = if state[path].fold() == Fold::Strip {
+                Fold::Open
+            } else {
+                Fold::Strip
+            };
+            state[path.surface].set_leaf_fold(path.node, fold);
             vec![]
         }
 
@@ -595,6 +625,7 @@ mod tests {
             Op::SetActive { leaf: 0, tab: 1 },
             Op::Focus { leaf: 1 },
             Op::ToggleCollapsed { leaf: 0 },
+            Op::FoldSideways { leaf: 0 },
             Op::PushToFocused,
             Op::Detach { leaf: 0, tab: 0 },
             Op::AddWindow { tabs: 1 },

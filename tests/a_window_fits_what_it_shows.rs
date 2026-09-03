@@ -27,9 +27,7 @@ use egui::{
     Atoms, CentralPanel, Context, CornerRadius, Frame, Id, LayerId, Pos2, RawInput, Rect, Shape,
     Stroke, Ui, Vec2, epaint::ClippedShape,
 };
-use egui_dockyard::{
-    DockArea, DockLayout, DockState, Node, NodePath, Split, Style, SurfaceIndex, TabViewer,
-};
+use egui_dockyard::{DockArea, DockLayout, DockState, Fold, Node, NodePath, Split, Style, SurfaceIndex, TabViewer};
 
 const SCREEN: Vec2 = Vec2::new(1200.0, 900.0);
 const DOCK_ID: &str = "a_window_fits_what_it_shows";
@@ -185,7 +183,7 @@ fn window_of_collapsed_rows(
         leaves.push(new);
     }
     for &leaf in &leaves {
-        state[window].set_leaf_collapsed(leaf, true);
+        state[window].set_leaf_fold(leaf, Fold::Bar);
     }
 
     (state, window, leaves)

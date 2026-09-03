@@ -21,10 +21,7 @@
 use egui::{
     Atoms, CentralPanel, Context, Event, Id, PointerButton, Pos2, RawInput, Rect, Ui, Vec2,
 };
-use egui_dockyard::{
-    DockArea, DockLayout, DockState, GapIndex, GapPath, Node, NodeId, NodePath, SideStrip, Split,
-    Style, SurfaceIndex, TabViewer,
-};
+use egui_dockyard::{DockArea, DockLayout, DockState, Fold, GapIndex, GapPath, Node, NodeId, NodePath, SideStrip, Split, Style, SurfaceIndex, TabViewer};
 
 const SCREEN: Vec2 = Vec2::new(1200.0, 900.0);
 const DOCK_ID: &str = "a_hidden_half_has_no_boundary_to_drag";
@@ -184,9 +181,10 @@ impl Sim {
     }
 
     fn collapse(&mut self, node: NodeId, collapsed: bool) {
-        self.state
-            .main_surface_mut()
-            .set_leaf_collapsed(node, collapsed);
+        // Sideways, which is what this file is about: the half that goes away has to give up its
+        // *width*, or there is no boundary for the test to find missing.
+        let fold = if collapsed { Fold::Strip } else { Fold::Open };
+        self.state.main_surface_mut().set_leaf_fold(node, fold);
         self.settle();
     }
 

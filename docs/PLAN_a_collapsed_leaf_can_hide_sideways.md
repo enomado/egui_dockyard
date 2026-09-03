@@ -40,10 +40,16 @@ that closed the case in the first place never appears.
 
 ## Decisions
 
-1. **The direction is read off the parent split, never stored.** Vertical parent → a horizontal
-   bar (as today); horizontal parent → a vertical strip. A second field would drift from the tree
-   the moment a leaf is dragged into another split. Free bonus: transposing a split turns its
-   strips by itself.
+1. ~~**The direction is read off the parent split, never stored.**~~ **Superseded on 03.09** —
+   see *Afterwards: the axis became a gesture* at the foot of this file. The reasoning here was
+   sound about *drift* and wrong about *choice*: reading the axis off the parent meant the user
+   could not ask for the other one, and the arrow's plain click stopped doing what it had always
+   done the moment the knob went on. The axis is `LeafNode::fold` now; the parent still has a veto
+   (width under a vertical parent has nobody to take it) but no longer casts the vote.
+
+   The original text: vertical parent → a horizontal bar; horizontal parent → a vertical strip. A
+   second field would drift from the tree the moment a leaf is dragged into another split. Free
+   bonus: transposing a split turns its strips by itself.
 2. **Collapsing is local to the parent.** The strip hugs an edge of *its own split*, not of the
    screen: the area's edge for a root split, a column between neighbours in the middle of a row.
    The same locality the existing bar has.
@@ -51,8 +57,12 @@ that closed the case in the first place never appears.
    three buttons along x) is left alone.
 4. **A separate knob, off by default**: `DockArea::collapse_sideways(bool)`. The old behaviour and
    its test are untouched.
-5. **Nothing new is serialized.** "This leaf is drawn as a strip" lives in the frame-local
-   [`NodeGeometry`](../src/layout/mod.rs), which by construction never reaches a saved layout.
+5. ~~**Nothing new is serialized.**~~ **Superseded on 03.09**, and it follows from decision 1: an
+   axis the *user* chose is state, and a layout that reopened with the other picture would be
+   losing what they asked for. A folded leaf now writes one extra boolean (`sideways`) beside the
+   `collapsed` it always wrote — an addition that reads correctly by absence, so every layout on
+   disk still loads, as a bar. "Which side of its split the strip hugs" stays exactly where this
+   decision put it: the frame-local [`NodeGeometry`](../src/layout/mod.rs).
 
 ### Boundaries of v1 — pinned by tests, not left to "however it comes out"
 
@@ -225,3 +235,42 @@ than guessed at:
 * The `egui_tiles` fork was rebased onto 0.17.1 in the same session; upstream turned on
   `clippy::pedantic` (`aa543cfe`) and our 20 commits have **not** been checked under it —
   `check.sh` may go red. Separate task.
+
+## Afterwards: the axis became a gesture (03.09)
+
+**Reported after ten days of use**, and it is the same sentence decision 1 was written in, read
+back from the other side (Стас): *«при клике колонка прячется вправо или влево — хотя должна при
+контрол клике; а при просто клике она как бы должна свернуться»*. With the knob on there was one
+gesture, and it did whatever the parent split said — so the plain arrow, which had folded a leaf
+into a bar since before this feature existed, silently changed meaning for every leaf under a
+horizontal parent, and no key anywhere could ask for the old picture back.
+
+What changed, and it is a change to the **model** rather than to the widget:
+
+* `LeafNode::collapsed: bool` is now `LeafNode::fold: Fold` — `Open` / `Bar` / `Strip`. The
+  yes/no every other reader asks is still `Node::is_collapsed()`, unchanged.
+* The gesture picks the axis: plain click → `Bar`, `Ctrl`+click → `Strip`, on the same arrow.
+  `Shift` keeps answering the *other* question (this leaf, or the whole side) — the two keys are
+  two questions, which is what makes the arrow describable at all. See
+  [MODIFIERS.md](MODIFIERS.md).
+* `strip_columns` asks the leaf, not the parent: a leaf is a strip because it was asked to be
+  one. The parent's veto stays where the hole is — `Ctrl` offers nothing under a *vertical*
+  parent, since width given up there has nobody to take it.
+* One boolean joins the wire (`sideways`), and old layouts load as bars. See decision 5.
+
+**The hole is back, on purpose.** A bar under a horizontal parent leaves the rest of its column
+with no tab bar, no body and no owner — the very thing the second paragraph of this plan says the
+sideways fold was invented to avoid. It is now what a plain click *means*, which was the choice
+put to Стас and taken with the picture in front of him. What used to be an unreachable state is
+therefore an ordinary one, and the `dst` sweep found the first consequence within a run: the
+pointer travelling across such a hole reaches no leaf, so a tab drag that crosses one has no
+hover destination until it lands (`grab_tab_at` now rests a frame, as every other held gesture
+does). Anything else that assumed "every point of a row belongs to some leaf" is worth re-reading
+with this in hand.
+
+## What was left, and is now done
+
+* **A `Collapse` step in `tests/dst.rs`** — it exists, and so do `Stow` and `FoldSideways`. The
+  sweep asserts an outcome counter per axis: `collapse.sideways > 0` is what fails if the strip
+  branch stops being reachable, which is exactly how the missing `FoldSideways` step announced
+  itself when the plain click stopped producing strips.

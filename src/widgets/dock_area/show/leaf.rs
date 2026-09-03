@@ -2,7 +2,7 @@ use std::ops::RangeInclusive;
 
 use egui::{
     Align, AtomLayout, Atoms, Button, CornerRadius, CursorIcon, Frame, Id, Key, LayerId, Layout,
-    NumExt, Order, Popup, PopupCloseBehavior, Rect, Response, ScrollArea, Sense, Stroke,
+    Modifiers, NumExt, Order, Popup, PopupCloseBehavior, Rect, Response, ScrollArea, Sense, Stroke,
     StrokeKind, TextStyle, Ui, UiBuilder, Vec2, emath::TSTransform, pos2, vec2,
 };
 
@@ -20,7 +20,7 @@ use crate::dock_area::tab_removal::{ForcedRemoval, TabRemoval};
 use crate::layout::SideStrip;
 use crate::tab_viewer::OnCloseResponse;
 use crate::{
-    DockArea, Style, SurfaceIndex, TabAddAlign, TabIndex, TabStyle, TabViewer,
+    DockArea, Fold, Style, SurfaceIndex, TabAddAlign, TabIndex, TabStyle, TabViewer,
     dock_area::{
         DockMutation,
         drag_and_drop::{DragSource, HoverData, TreeComponent},
@@ -127,9 +127,9 @@ impl<Tab> DockArea<'_, Tab> {
                 tab_viewer,
                 fade_style.map(|(style, _)| style),
                 Some(side),
-                DockMutation::SetLeafCollapsed {
+                DockMutation::SetLeafFold {
                     path,
-                    collapsed: false,
+                    fold: Fold::Open,
                 },
             );
         } else {
@@ -338,9 +338,13 @@ impl<Tab> DockArea<'_, Tab> {
                     fade_style,
                     collapsed,
                     None,
-                    DockMutation::SetLeafCollapsed {
+                    DockMutation::SetLeafFold {
                         path,
-                        collapsed: !collapsed,
+                        // A plain click spends **height**: the leaf becomes a tab bar and keeps
+                        // its column, which is what folding meant before an axis could be
+                        // chosen. Spending width is the same arrow with Ctrl held — see
+                        // `strip_target`.
+                        fold: if collapsed { Fold::Open } else { Fold::Bar },
                     },
                 )
             }
@@ -1322,6 +1326,11 @@ impl<Tab> DockArea<'_, Tab> {
         } else {
             self.stow_target(path, ui, &response)
         };
+        // The third meaning, on the other key: fold this leaf the *other* way. Shift asks about
+        // a bigger target (the whole side), Ctrl about a different axis (width instead of
+        // height) — two questions, two keys, and neither can be mistaken for the other because
+        // both are read as an exact match. See `docs/MODIFIERS.md`.
+        let strip_target = self.strip_target(path, ui, &response);
 
         let color = if response.hovered() || response.has_focus() {
             ui.painter().rect_filled(
@@ -1348,6 +1357,10 @@ impl<Tab> DockArea<'_, Tab> {
             );
         } else if stow_target.is_some() {
             glyph::stow_arrow(ui.painter(), arrow_rect, color);
+        } else if let Some((_, towards)) = strip_target {
+            // Where the leaf is about to go, or come back from — the same question the plain
+            // arrow answers below, asked of the other axis.
+            glyph::triangle(ui.painter(), arrow_rect, towards, color);
         } else {
             // The arrow points at the space this leaf will expand into: away from the edge a
             // sideways strip is pressed against, rightwards out of a collapsed tab bar, and down
@@ -1380,6 +1393,8 @@ impl<Tab> DockArea<'_, Tab> {
                     path: target,
                     stowed: true,
                 });
+            } else if let Some((fold, _)) = strip_target {
+                self.mutations.push(DockMutation::SetLeafFold { path, fold });
             } else {
                 // Queued, not applied: what this flips belongs to the node being drawn, and the
                 // rest of that node is still ahead in this pass. See `DockMutation` for the
@@ -1461,9 +1476,10 @@ impl<Tab> DockArea<'_, Tab> {
     /// reason it is there — otherwise every arrow in the dock would change its icon the moment
     /// the key went down.
     ///
-    /// [`None`] where the gesture would add nothing. A leaf that is *itself* a side already goes
-    /// away with the plain arrow, which folds it into a strip — the same picture, one modifier
-    /// less; and a side already stowed is what the plain arrow brings back.
+    /// [`None`] where the gesture would add nothing. A leaf that is *itself* a side is put away
+    /// sideways by [`strip_target`](Self::strip_target), one key over — the same picture for one
+    /// panel, and nothing for this gesture to add; and a side already stowed is what the plain
+    /// arrow brings back.
     ///
     /// Behind [`DockArea::collapse_sideways`] because the layout is: with the knob off a side
     /// stowed under a horizontal split would draw one bar and leave the rest of its column to
@@ -1483,6 +1499,73 @@ impl<Tab> DockArea<'_, Tab> {
         let side = tree.top_level_ancestor(path.node)?;
         (!tree[side].is_leaf() && !tree[side].is_stowed())
             .then(|| NodePath::new(path.surface, side))
+    }
+
+    /// What this collapse arrow would do to *this leaf's axis* while `Ctrl` is held — the fold to
+    /// ask for, and the direction to draw the arrow — or [`None`] where the gesture does not
+    /// apply.
+    ///
+    /// # Why a second modifier rather than a second button
+    ///
+    /// Folding spends one of the leaf's two dimensions, and which one is a real choice: a bar
+    /// keeps the column and empties it, a strip hands the column to the sibling. The dock used to
+    /// take that choice off the parent split — horizontal parent, strip; vertical parent, bar —
+    /// which reads as a rule until the day it is the wrong one, and then there is no gesture to
+    /// say so. [`Fold`] is where the choice lives now, and this is where a hand makes it.
+    ///
+    /// The key is `Ctrl` and not the [`secondary_button_modifiers`](DockArea::secondary_button_modifiers)
+    /// this crate's other arrow gestures read, because it answers a different question. `Shift`
+    /// means *a bigger target* — this leaf's whole side ([`stow_target`](Self::stow_target)).
+    /// `Ctrl` means *the other axis*, on the same target. Two questions, two keys, and both read
+    /// as an exact match, so a hand resting on one is never taken for the other.
+    ///
+    /// # When it is [`None`]
+    ///
+    /// * the knob is off — [`DockArea::collapse_sideways`] is what admits strips at all;
+    /// * the arrow is not the one under the pointer, or `Ctrl` is not the exact chord held;
+    /// * this is not a leaf: the same arrow is drawn for a *stowed side*, which has no axis of
+    ///   its own to choose (its column is already what it gave up);
+    /// * the parent is not a horizontal row. Width given up under a vertical parent has nobody
+    ///   to take it, which is the hole `collapse_sideways` was written to avoid — so there is
+    ///   nothing here to offer, and the arrow keeps its plain meaning.
+    fn strip_target(&self, path: NodePath, ui: &mut Ui, response: &Response) -> Option<(Fold, Dir)> {
+        if !self.collapse_sideways
+            || !ui.input(|i| i.modifiers.matches_logically(Modifiers::COMMAND))
+            || !(response.hovered() || response.has_focus() || response.is_pointer_button_down_on())
+        {
+            return None;
+        }
+        let tree = &self.dock_state[path.surface];
+        if !tree[path.node].is_leaf() {
+            return None;
+        }
+        let parent = tree.parent(path.node)?;
+        if !tree[parent].is_horizontal() {
+            return None;
+        }
+
+        if tree[path.node].fold() == Fold::Strip {
+            // Already sideways: the modifier takes it back, and the arrow points where the leaf
+            // will expand into — away from the edge it is pressed against.
+            let towards = match self.layout.side_strip(path) {
+                Some(SideStrip::Right) => Dir::Left,
+                // `None` for a strip the layout did not honour (the knob turned off under a
+                // stored layout): it is drawn as a bar, and its way back out is rightwards, the
+                // same as any bar's.
+                Some(SideStrip::Left) | None => Dir::Right,
+            };
+            return Some((Fold::Open, towards));
+        }
+
+        // On its way out: towards the edge of its own row it will be pressed against. Only the
+        // last child goes to the trailing edge — the same rule `cut_runs` lays the strips out by,
+        // so the arrow promises what the next frame draws.
+        let children = tree.children(parent).expect("a horizontal node is a row");
+        let is_last = children.last() == Some(&path.node);
+        Some((
+            Fold::Strip,
+            if is_last { Dir::Right } else { Dir::Left },
+        ))
     }
 
     /// Updates the collapsed state of the node and its parents.

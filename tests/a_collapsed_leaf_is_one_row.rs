@@ -18,9 +18,7 @@
 //! it lives in `a_window_fits_what_it_shows.rs`.
 
 use egui::{Atoms, CentralPanel, Context, Id, Pos2, RawInput, Rect, Ui, Vec2};
-use egui_dockyard::{
-    DockArea, DockLayout, DockState, Node, NodeId, NodePath, Split, Style, SurfaceIndex, TabViewer,
-};
+use egui_dockyard::{DockArea, DockLayout, DockState, Fold, Node, NodeId, NodePath, Split, Style, SurfaceIndex, TabViewer};
 
 const SCREEN: Vec2 = Vec2::new(1200.0, 900.0);
 const DOCK_ID: &str = "a_collapsed_leaf_is_one_row";
@@ -105,7 +103,7 @@ fn a_collapsed_row_beside_an_open_one_takes_exactly_a_tab_bar() {
         } else {
             (bottom, top)
         };
-        state.main_surface_mut().set_leaf_collapsed(collapsed, true);
+        state.main_surface_mut().set_leaf_fold(collapsed, Fold::Bar);
 
         let (_ctx, layout) = run(&mut state, &style);
         let (collapsed, open) = (rect_of(&layout, collapsed), rect_of(&layout, open));
@@ -164,7 +162,7 @@ fn a_collapsed_leaf_beside_a_column_keeps_the_column() {
         0.5,
         Node::leaf(tab("right bottom")),
     );
-    state.main_surface_mut().set_leaf_collapsed(left, true);
+    state.main_surface_mut().set_leaf_fold(left, Fold::Bar);
 
     let (_ctx, layout) = run(&mut state, &style);
     let outer = state

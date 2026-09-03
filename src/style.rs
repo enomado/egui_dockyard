@@ -97,6 +97,30 @@ pub struct ButtonsStyle {
     /// Color of the background close tab button.
     pub close_tab_bg_fill: Color32,
 
+    /// The square a close button takes: the width reserved for it inside the tab, and the target
+    /// the pointer has to hit.
+    ///
+    /// Capped at [`TabBarStyle::height`], since a button cannot be taller than the bar it is in.
+    /// Larger than what is drawn inside it on purpose — a target the size of the drawing is hard
+    /// to hit, and this one sits at the edge of a tab that can be dragged.
+    pub close_tab_size: f32,
+
+    /// The disc drawn under the ✕ when the pointer is on it, by radius.
+    ///
+    /// Filling the whole [`ButtonsStyle::close_tab_size`] square instead reads as the right-hand
+    /// end of the tab lighting up rather than as a button being pointed at, which is why this is
+    /// smaller than half that square. A browser marks its ✕ the same way.
+    pub close_tab_mark_radius: f32,
+
+    /// The ✕ itself, across. Meant to sit inside [`ButtonsStyle::close_tab_mark_radius`]'s disc.
+    pub close_tab_x_size: f32,
+
+    /// How far down the button sits from the middle of the tab. Positive is down.
+    ///
+    /// A ✕ centred by arithmetic can read as sitting high, because a title's letters do not fill
+    /// their line box evenly — so this is the nudge that answers the eye rather than the maths.
+    pub close_tab_y_offset: f32,
+
     /// Left or right aligning of the add tab button.
     pub add_tab_align: TabAddAlign,
 
@@ -528,6 +552,10 @@ impl Default for ButtonsStyle {
             close_tab_color: Color32::WHITE,
             close_tab_active_color: Color32::WHITE,
             close_tab_bg_fill: Color32::GRAY,
+            close_tab_size: 18.0,
+            close_tab_mark_radius: 7.0,
+            close_tab_x_size: 7.0,
+            close_tab_y_offset: 1.0,
 
             add_tab_align: TabAddAlign::Right,
             add_tab_color: Color32::WHITE,

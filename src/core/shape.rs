@@ -122,9 +122,9 @@ pub fn dock_shape<Tab>(state: &DockState<Tab>, tab_label: impl Fn(&Tab) -> Strin
                     let tabs: Vec<String> = leaf.iter_tabs().map(&tab_label).collect();
                     writeln!(
                         out,
-                        "  {index}: leaf active={:?} collapsed={} tabs={tabs:?}",
+                        "  {index}: leaf active={:?} fold={:?} tabs={tabs:?}",
                         leaf.active_index().map(|i| i.0),
-                        leaf.collapsed
+                        leaf.fold
                     )
                     .unwrap();
                 }
@@ -208,8 +208,8 @@ mod tests {
             dock_shape(&state, |tab| tab.clone()),
             "surface 0: 3 nodes, focus Some(2)\n  \
              0: horizontal fraction=0.25 collapsed=false children=[Some(1), Some(2)]\n  \
-             1: leaf active=Some(0) collapsed=false tabs=[\"a\"]\n  \
-             2: leaf active=Some(0) collapsed=false tabs=[\"b\"]\n",
+             1: leaf active=Some(0) fold=Open tabs=[\"a\"]\n  \
+             2: leaf active=Some(0) fold=Open tabs=[\"b\"]\n",
             "the dump format drifted — the parity gates that compare it against itself notice \
              nothing"
         );

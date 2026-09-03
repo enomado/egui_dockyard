@@ -529,6 +529,22 @@ fn the_close_button_is_marked_with_a_disc_not_a_slab() {
         2.0 * radius,
         style.tab_bar.height
     );
+
+    // And the ✕ sits inside its own mark. The two are separate constants, so this is what says
+    // they still belong to each other: a cross drawn larger than the disc under it would look
+    // like a stray mark rather than like a button.
+    let cross = pointed
+        .crosses
+        .iter()
+        .find(|stroke| stroke.center().distance(target) < TOLERANCE)
+        .expect("the ✕ under the pointer is still drawn");
+    assert!(
+        cross.width() <= 2.0 * radius && cross.height() <= 2.0 * radius,
+        "the ✕ is {:.0}×{:.0} px inside a {:.0} px disc",
+        cross.width(),
+        cross.height(),
+        2.0 * radius
+    );
 }
 
 /// Whatever the squeeze does, it does to the bar rather than to one tab at a time.

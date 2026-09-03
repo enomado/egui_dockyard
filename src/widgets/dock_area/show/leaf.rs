@@ -12,7 +12,7 @@ use super::title::{
 };
 use crate::NodePath;
 use crate::core::fit::{
-    MIN_SQUEEZED_TEXT, MIN_SQUEEZED_TEXT_ACTIVE, TabBarFit, TabRoom, fit_strip_names,
+    MIN_SQUEEZED_TEXT, MIN_SQUEEZED_TEXT_ACTIVE, TabBarFit, TabRoom, TabWant, fit_strip_names,
     fit_tab_widths,
 };
 use crate::dock_area::ids::tab_widget_id;
@@ -261,7 +261,7 @@ impl<Tab> DockArea<'_, Tab> {
                 path,
                 tab_viewer,
                 tabbar_outer_rect,
-                &fit.rooms,
+                &fit,
                 fade_style,
             );
 
@@ -383,9 +383,7 @@ impl<Tab> DockArea<'_, Tab> {
             .leaf(path)
             .expect("This node must be a leaf");
 
-        let mut wants = Vec::with_capacity(leaf.len());
-        let mut floors = Vec::with_capacity(leaf.len());
-        let mut reserved = Vec::with_capacity(leaf.len());
+        let mut wants: Vec<TabWant> = Vec::with_capacity(leaf.len());
         let mut fixed = 0.0;
         for index in 0..leaf.len() {
             let tab_index = TabIndex(index);
@@ -405,16 +403,24 @@ impl<Tab> DockArea<'_, Tab> {
             } else {
                 0.0
             };
-            let furniture = close + 2.0 * TAB_TEXT_PADDING;
             let title = measure_title(ui, tab_viewer.title(tab)).length(false);
 
-            let want = (title + furniture).at_least(tab_style.minimum_width.unwrap_or(0.0));
-            wants.push(want);
-            // Under pressure only the active tab keeps its close button, so only its floor has to
-            // make room for one; the rest are floored on padding and a name alone.
-            let kept = if active { close } else { 0.0 };
-            floors.push(want.min(kept + 2.0 * TAB_TEXT_PADDING + least));
-            reserved.push(kept);
+            // `minimum_width` is a minimum for the whole tab, furniture included, so what it asks
+            // of the *name* is that much less the button beside it.
+            let name = (title + 2.0 * TAB_TEXT_PADDING)
+                .at_least(tab_style.minimum_width.unwrap_or(0.0) - close);
+            wants.push(TabWant {
+                name,
+                furniture: close,
+                // Under pressure the active tab keeps its close button: it is the one you are
+                // reading, and the one a crowded bar is closed from.
+                keeps_furniture: active,
+                // A floor, not a width: a tab whose name is shorter than the minimum keeps its own
+                // width rather than being padded out to a minimum it does not need. The button an
+                // active tab keeps sits on top of that, since it is drawn beside the name and not
+                // over it.
+                floor: name.min(2.0 * TAB_TEXT_PADDING + least) + if active { close } else { 0.0 },
+            });
             if index != 0 {
                 fixed += tab_style.spacing;
             }
@@ -426,11 +432,11 @@ impl<Tab> DockArea<'_, Tab> {
         if style.tab_bar.fill_tab_bar && !wants.is_empty() {
             let equal = (available_width - fixed) / wants.len() as f32;
             for want in &mut wants {
-                *want = want.at_least(equal);
+                want.name = want.name.at_least(equal - want.furniture);
             }
         }
 
-        fit_tab_widths(&wants, &floors, &reserved, fixed, available_width)
+        fit_tab_widths(&wants, fixed, available_width)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -441,7 +447,7 @@ impl<Tab> DockArea<'_, Tab> {
         path: NodePath,
         tab_viewer: &mut impl TabViewer<Tab = Tab>,
         tabbar_outer_rect: Rect,
-        rooms: &[TabRoom],
+        fit: &TabBarFit,
         fade: Option<&Style>,
     ) -> bool {
         let mut tab_hovered = false;
@@ -526,7 +532,8 @@ impl<Tab> DockArea<'_, Tab> {
                             is_active && Some(path) == focused,
                             is_active,
                             is_being_dragged,
-                            rooms[tab_index.0],
+                            fit.rooms[tab_index.0],
+                            fit.crowded,
                             show_close_button,
                             fade,
                         )
@@ -571,7 +578,8 @@ impl<Tab> DockArea<'_, Tab> {
                     is_active && Some(path) == focused,
                     is_active,
                     is_being_dragged,
-                    rooms[tab_index.0],
+                    fit.rooms[tab_index.0],
+                    fit.crowded,
                     show_close_button,
                     fade,
                 );
@@ -632,7 +640,10 @@ impl<Tab> DockArea<'_, Tab> {
                                         self.mutations
                                             .push(DockMutation::Activate((path, tab_index).into()));
                                     }
-                                    self.mutations.push(DockMutation::Focus(path));
+                                    self.mutations.push(DockMutation::Focus {
+                        path,
+                        announce: true,
+                    });
                                 }
                                 OnCloseResponse::Ignore => (),
                             }
@@ -698,7 +709,10 @@ impl<Tab> DockArea<'_, Tab> {
                     self.mutations
                         .push(DockMutation::Activate((path, tab_index).into()));
                 }
-                self.mutations.push(DockMutation::Focus(path));
+                self.mutations.push(DockMutation::Focus {
+                        path,
+                        announce: true,
+                    });
             }
 
             tab_viewer.on_tab_button(tab, &response);
@@ -1516,6 +1530,7 @@ impl<Tab> DockArea<'_, Tab> {
         active: bool,
         is_being_dragged: bool,
         room: TabRoom,
+        crowded: bool,
         show_close_button: bool,
         fade: Option<&Style>,
     ) -> (Response, Option<Response>) {
@@ -1533,17 +1548,25 @@ impl<Tab> DockArea<'_, Tab> {
             response = response.on_hover_cursor(CursorIcon::Grab);
         }
 
-        // A squeezed tab gives up its close button: sixteen pixels matter more to a name with
-        // thirty than a second way to close a tab does, and the active tab — the one you are
-        // reading — keeps its own. The pointer brings the button back on whichever tab it is
-        // over, which is how Chrome hands it back too.
-        let show_close_button =
-            show_close_button && (!room.squeezed || active || response.hovered());
-        let close_button_size = if show_close_button {
-            Style::TAB_CLOSE_BUTTON_SIZE.min(style.tab_bar.height)
+        // A crowded bar gives up its close buttons: those pixels matter more to a name with thirty
+        // than a second way to close a tab does, and the active tab — the one you are reading —
+        // keeps its own. It is the *bar* that decides, so every tab lets go at the same width; see
+        // [`TabBarFit::crowded`] for what it looked like when each tab decided for itself.
+        let button = Style::TAB_CLOSE_BUTTON_SIZE.min(style.tab_bar.height);
+        // The width of the tab was shared out knowing which buttons would be drawn, so only a
+        // button the bar paid for takes room away from the name.
+        let close_button_size = if show_close_button && (!crowded || active) {
+            button
         } else {
             0.0
         };
+
+        // The pointer brings the button back on whichever tab it is over, the way Chrome does —
+        // but on a crowded bar it comes back *over* the name rather than beside it. Taking the
+        // room from the name instead would re-cut the title of whichever tab the pointer crossed,
+        // so simply moving the mouse along the bar would set the names jumping.
+        let show_close_button = show_close_button && (!crowded || active || response.hovered());
+        let overlaid = show_close_button && close_button_size == 0.0;
 
         let tab_style = if focused || is_being_dragged {
             if response.has_focus() {
@@ -1607,10 +1630,19 @@ impl<Tab> DockArea<'_, Tab> {
         );
 
         let close_response = show_close_button.then(|| {
+            // Always at the tab's own right-hand end, whether the width was reserved for it or the
+            // button is standing over the name.
             let mut close_button_rect = tab_rect;
-            close_button_rect.set_left(text_rect.right());
+            close_button_rect.set_left(tab_rect.right() - button);
             close_button_rect =
-                Rect::from_center_size(close_button_rect.center(), Vec2::splat(close_button_size));
+                Rect::from_center_size(close_button_rect.center(), Vec2::splat(button));
+
+            if overlaid {
+                // Nothing was taken off the name for this button, so the glyphs run underneath it.
+                // They are faded into the tab the same way a name is faded where it runs out of
+                // tab — the button stands on the background rather than on the letters.
+                fade_out(ui, close_button_rect, tab_style.bg_fill, false);
+            }
 
             let close_response = ui
                 .interact(close_button_rect, id.with("close-button"), Sense::click())
@@ -1623,13 +1655,13 @@ impl<Tab> DockArea<'_, Tab> {
             };
 
             if close_response.hovered() || close_response.has_focus() {
-                let mut corner_radius = tab_style.corner_radius;
-                corner_radius.nw = 0;
-                corner_radius.sw = 0;
-
-                ui.painter().rect_filled(
-                    close_button_rect,
-                    corner_radius,
+                // A disc, not a slab: the button is a mark on the tab rather than a division of
+                // it. Filling its whole 24 px square — which is the full height of the bar, with
+                // the tab's own corner radius on two of its corners — reads as the right-hand end
+                // of the tab lighting up, which is what Chrome's small circle avoids.
+                ui.painter().circle_filled(
+                    close_button_rect.center(),
+                    Style::TAB_CLOSE_BUTTON_RADIUS,
                     style.buttons.close_tab_bg_fill,
                 );
             }
@@ -1732,7 +1764,10 @@ impl<Tab> DockArea<'_, Tab> {
                 && body_rect.contains(pos)
                 && Some(ui.layer_id()) == ui.ctx().layer_id_at(pos)
             {
-                self.mutations.push(DockMutation::Focus(path));
+                self.mutations.push(DockMutation::Focus {
+                        path,
+                        announce: true,
+                    });
             }
 
             let (style, fade_factor) = fade.unwrap_or_else(|| (self.style.as_ref().unwrap(), 1.0));

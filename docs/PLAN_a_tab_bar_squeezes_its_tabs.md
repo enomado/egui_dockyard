@@ -108,6 +108,44 @@ Both readings have to happen **inside** the pass. `end_pass` empties the shape l
 first version of the fade oracle read them afterwards — "no fade was painted" and "the feature
 does not work" look identical from there.
 
+## Revised 2026-09-03: the squeeze is one move, not one per tab
+
+Стас, dragging a separator rather than looking at a still: *"мне не очень нравится, как работает
+ужимание тайтла у вкладок. оно какое-то дёрганое… всё выглядит так, как будто произвольные тайтлы
+взрываются. хотя лучше бы конечно чтобы все одновременно как-то переходили в состояние шейда"*.
+
+Everything above is about what a bar looks like *at a width*. This is about what it looks like
+*between* two of them, and the two questions have different answers.
+
+**Measured first.** [`tests/a_squeeze_moves_every_tab_at_once.rs`](../tests/a_squeeze_moves_every_tab_at_once.rs)
+sweeps a bar of eight mixed names from 1400 px to 320 px a pixel at a time and diffs consecutive
+frames. On the code above: **fourteen step-changes over 155 px of drag** — seven names growing by
+~24 px on a bar 1 px narrower, and the same seven jumping ~12 px sideways. Firing order is by name
+length (`Torque and drag` at 795 px, `Survey` at 640), which is unrelated to where the tabs sit;
+that is the "произвольные" in the report.
+
+**One cause, not three.** All three symptoms are the same event: the tab dropping its ✕. Squeezing
+`squeezed` — a per-tab fact — into service as the condition for that gave every tab a threshold of
+its own. The sweep also cleared a suspect: the switch from a centred name to a left-pinned one
+happens exactly where the name stops fitting, so the slack it re-distributes is ~0 px and it costs
+nothing on screen. It was measured rather than assumed, and it is not a jolt.
+
+**The fix is where the question is asked.** `fit_tab_widths` takes a `TabWant` per tab and asks
+once for the whole bar whether everything wanted fits (`TabBarFit::crowded`). Furniture then goes
+from every tab at once, save the active one. Because widths are shared out from the *names* alone,
+crossing the threshold takes the button's width off each tab and nothing off any name: the sweep
+finds **no step-changes at all**, which is better than the synchronised one the report asked for.
+
+**The pointer was the other half of it**, and was never in the drag at all: the ✕ returning on a
+hovered tab used to take its room from that tab's name, so running the mouse along a crowded bar
+re-cut every title it passed (44 px of name down to 20 px, measured). It is now drawn *over* the
+end of the name on a fade into the tab, so a hover changes what is painted and never what is laid
+out.
+
+Three mutations, three kills — the per-tab decision, the hover reserving room, and the disc drawn
+as a slab again. The scene tests above are unchanged and still pass, which is the point: they were
+never wrong, they were answering a different question.
+
 ## What this does not do
 
 * **No overflow menu behind the mark.** Clicking it could reasonably list the tabs that are off

@@ -12,6 +12,58 @@ Ordered newest first.
 
 ---
 
+## Each tab decided on its own when to shed its close button, so a narrowing bar rattled
+
+**Status another implementation:** not reported.
+
+**Symptom.** User-facing, and reported as a feeling rather than as a bug: dragging a separator to
+narrow a tab bar looked *jumpy*, "as though arbitrary titles were exploding". Nothing was wrong in
+any single frame, which is why it had survived a file of scene tests: every still the bar passes
+through is correct, and the complaint is about the sequence.
+
+**Root cause.** `TabRoom.squeezed` — "this tab was given less than it asked for" — was also the
+condition for dropping the tab's close button. That is a threshold reached at the width where
+*that particular name* stops fitting, so a bar of names of different lengths crossed it at as many
+different widths as it had tabs. Each crossing hands 24 px of furniture straight to the name, so
+the name it belongs to *grew* at the moment the bar shrank.
+
+Sweeping a bar of eight mixed names from 1400 px to 320 px, a pixel at a time, measured **fourteen
+step-changes spread across 155 px of the drag**: seven names each growing by ~24 px on a bar 1 px
+narrower, and the same seven jumping ~12 px sideways as the extra room re-centred them. In bar
+order they fire longest-name-first, which bears no relation to where the tabs sit — hence
+"arbitrary".
+
+A second copy of the same mistake made the bar rattle under the *pointer* rather than under a
+drag: the button came back on the hovered tab by taking the room from that tab's name. Moving the
+mouse along a crowded bar therefore re-cut each title it passed over. Measured: a tab showing
+44 px of name dropped to 20 px — over half of it — for as long as the pointer rested there.
+
+**Fix.** The question moved from the tab to the bar. `fit_tab_widths` now takes a `TabWant` per
+tab — the name, its furniture, whether it keeps that furniture under pressure, and its floor — and
+asks once, for the whole bar, whether everything wanted fits (`TabBarFit::crowded`). If it does
+not, furniture goes from every tab at once bar those that keep it (the active one). Because the
+widths are then shared out from the names alone, crossing that threshold takes exactly the
+button's width off each *tab* and nothing off any *name*: the sweep now finds **no step-changes at
+all**, not merely synchronised ones.
+
+The pointer's button no longer takes room either. On a crowded bar it is drawn *over* the end of
+the name, on a fade into the tab's own background — the same fade a cut name already ends with —
+so a hover changes what is painted and never what is laid out.
+
+**Evidence.** `tests/a_squeeze_moves_every_tab_at_once.rs` sweeps the bar a pixel at a time and
+compares consecutive frames, which is the reading no single-width scene can make. Three mutations,
+three kills: restoring the per-tab decision brought back all fourteen jolts (caught by both sweep
+oracles); letting a hover reserve room again cut "Geology" from 44 px to 20 px (caught by the
+pointer oracle); and drawing the hover mark as a slab again left no disc to find.
+
+**Unrelated to the jolt, asked for at the same time:** the mark under the pointer was the button's
+whole 24 px square, carrying the tab's corner radius on two corners, which reads as the end of the
+tab lighting up rather than as a button. It is now a disc of `Style::TAB_CLOSE_BUTTON_RADIUS`.
+The *hit target* is deliberately left at the full `TAB_CLOSE_BUTTON_SIZE`: it sits at the edge of a
+draggable tab, and a target the size of the drawing would be hard to hit.
+
+---
+
 ## Killing a stale drop preference killed the drag it belonged to
 
 **Status another implementation:** not reported.

@@ -109,13 +109,31 @@ pub(crate) fn fit_strip_names(naturals: &[f32], gaps: &[f32], available: f32, el
     }
 }
 
+/// What one tab of a bar asks the bar for.
+///
+/// Split into the name and the furniture around it because the two are given up at different
+/// times: a name is squeezed by degrees, while furniture is either drawn whole or not at all.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TabWant {
+    /// The name and the padding around it — what the tab wants before any furniture.
+    pub(crate) name: f32,
+    /// The close button, or zero for a tab that has none.
+    pub(crate) furniture: f32,
+    /// Whether this tab keeps its furniture when the bar is crowded. In practice the active tab:
+    /// it is the one you are reading and the one a crowded bar is closed from.
+    pub(crate) keeps_furniture: bool,
+    /// The width below which this tab is not squeezed, whatever that costs the bar.
+    pub(crate) floor: f32,
+}
+
 /// What one tab of a bar was given, and whether that was less than it asked for.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TabRoom {
     pub(crate) width: f32,
-    /// The bar had to squeeze this one. Two things follow: its name is faded off where it runs
-    /// past the tab, and — unless it is the active tab or the pointer is on it — its close button
-    /// is not drawn, because that button is sixteen pixels the name needs more than the bar does.
+    /// The bar had to squeeze this one, so its name is faded off where it runs past the tab.
+    ///
+    /// This is per tab and says nothing about the close button: which tabs draw one is
+    /// [`TabBarFit::crowded`], a decision the whole bar makes at once.
     pub(crate) squeezed: bool,
 }
 
@@ -128,6 +146,22 @@ pub(crate) struct TabBarFit {
     /// Set when the tabs do not fit even squeezed, so the bar fades its right-hand edge to say
     /// there is more here than is on screen.
     pub(crate) overflow: bool,
+    /// The bar could not seat every tab with all of its furniture, so the furniture goes — from
+    /// every tab at once, save those that keep it.
+    ///
+    /// # Why this is the bar's decision and not each tab's
+    ///
+    /// It used to be per tab: a tab dropped its close button when *that tab* was given less than
+    /// it asked for. Since a threshold like that is reached at the width where that particular
+    /// name stops fitting, and names differ in length, a bar of eight tabs dropped eight buttons
+    /// at eight different widths — and each of those hands 24 px straight to the name, so a name
+    /// *grew* as the bar narrowed. Measured over a drag from 1400 px to 320 px: seven jolts spread
+    /// across 155 px of it, each a 24 px step in a name's width and a 12 px jump in where its
+    /// glyphs sat. That is what "произвольные тайтлы взрываются" was.
+    ///
+    /// Asking it of the bar makes it one move at one width, which is also what a browser does:
+    /// Chrome's tabs are all the same width, so they cross every threshold together.
+    pub(crate) crowded: bool,
 }
 
 /// Shares `available` out between tabs wanting `wants`, never squeezing one below its `floor`.
@@ -138,49 +172,60 @@ pub(crate) struct TabBarFit {
 /// The fade at the bar's edge is what says so — without it a bar that is scrolled to the left
 /// looks exactly like a bar with nothing more to show.
 ///
-/// `fixed` is the room the gaps between tabs take, which no tab can be given. `reserved` is
-/// furniture a tab keeps under pressure while its neighbours drop theirs — in practice the active
-/// tab's close button. It is taken off the top and handed straight back, so that the tab which
-/// keeps a button is not the tab that pays for it out of its name: without this the active tab
-/// ends up showing *less* of its title than the tabs beside it, which is the opposite of the
-/// point (measured: 56 px of name against its neighbours' 79).
-pub(crate) fn fit_tab_widths(
-    wants: &[f32],
-    floors: &[f32],
-    reserved: &[f32],
-    fixed: f32,
-    available: f32,
-) -> TabBarFit {
-    debug_assert_eq!(wants.len(), floors.len());
-    debug_assert_eq!(wants.len(), reserved.len());
-
-    let shared: Vec<f32> = wants
+/// `fixed` is the room the gaps between tabs take, which no tab can be given.
+///
+/// Furniture is answered for in two steps, and the first is a question about the *bar*: can it seat
+/// every tab with everything it wants? If it cannot, it is crowded, and furniture goes from every
+/// tab at once except those that keep it ([`TabWant::keeps_furniture`]) — see [`TabBarFit::crowded`]
+/// for why the alternative rattles.
+///
+/// What is kept is then taken off the top and handed straight back, so that the tab which keeps a
+/// button is not the tab that pays for it out of its name: without this the active tab ends up
+/// showing *less* of its title than the tabs beside it, which is the opposite of the point
+/// (measured: 56 px of name against its neighbours' 79).
+pub(crate) fn fit_tab_widths(wants: &[TabWant], fixed: f32, available: f32) -> TabBarFit {
+    // Everything every tab wants. This is the only question that decides whether furniture is
+    // drawn, and it is asked once for the whole bar rather than once per tab.
+    let asked: f32 = wants
         .iter()
-        .zip(reserved)
-        .map(|(want, kept)| want - kept)
+        .map(|want| want.name + want.furniture)
+        .sum::<f32>()
+        + fixed;
+    let crowded = asked > available;
+
+    let kept: Vec<f32> = wants
+        .iter()
+        .map(|want| {
+            if crowded && !want.keeps_furniture {
+                0.0
+            } else {
+                want.furniture
+            }
+        })
         .collect();
-    let budget = available - fixed - reserved.iter().sum::<f32>();
+    let shared: Vec<f32> = wants.iter().map(|want| want.name).collect();
+    let budget = available - fixed - kept.iter().sum::<f32>();
 
     // `floor` is a floor, not a width: a tab whose name is shorter than the minimum keeps its own
     // width instead of being padded out to a minimum it does not need.
     let rooms: Vec<TabRoom> = share_room(&shared, budget)
         .into_iter()
         .zip(wants)
-        .zip(floors)
-        .zip(reserved)
-        .map(|(((share, want), floor), kept)| {
-            let width = (share + kept).max(*floor);
-            TabRoom {
-                width,
-                squeezed: width < *want,
-            }
+        .zip(&kept)
+        .map(|((share, want), kept)| TabRoom {
+            width: (share + kept).max(want.floor),
+            squeezed: share < want.name,
         })
         .collect();
 
     // Nothing is taken off the width for the fade: it is painted *over* the bar's last few
     // pixels rather than beside them, which is the whole reason it was preferred to a mark.
     let overflow = rooms.iter().map(|room| room.width).sum::<f32>() + fixed > available;
-    TabBarFit { rooms, overflow }
+    TabBarFit {
+        rooms,
+        overflow,
+        crowded,
+    }
 }
 
 /// Shares `budget` out between claims wanting `naturals`, evenly but never past what each wants.
@@ -209,10 +254,25 @@ fn share_room(naturals: &[f32], budget: f32) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{STRIP_MIN_NAME_LENGTH, TabBarFit, fit_strip_names, fit_tab_widths};
+    use super::{STRIP_MIN_NAME_LENGTH, TabBarFit, TabWant, fit_strip_names, fit_tab_widths};
 
     /// What an ellipsis costs, near enough: these are tests of the sharing, not of a font.
     const ELLIPSIS: f32 = 12.0;
+
+    /// A tab wanting `name` px for its title, with no furniture and a floor of `floor`.
+    fn plain(name: f32, floor: f32) -> TabWant {
+        TabWant {
+            name,
+            furniture: 0.0,
+            keeps_furniture: false,
+            floor,
+        }
+    }
+
+    /// `count` alike tabs, each wanting `name` px and floored at `floor`.
+    fn alike(count: usize, name: f32, floor: f32) -> Vec<TabWant> {
+        vec![plain(name, floor); count]
+    }
 
     fn no_gaps(count: usize) -> Vec<f32> {
         vec![0.0; count]
@@ -285,10 +345,6 @@ mod tests {
 
     /// A bar where no tab keeps furniture its neighbours give up — the plain case, and the one
     /// every oracle below but the reserving one is about.
-    fn nothing_reserved(count: usize) -> Vec<f32> {
-        vec![0.0; count]
-    }
-
     fn squeezed(fit: &TabBarFit) -> Vec<bool> {
         fit.rooms.iter().map(|room| room.squeezed).collect()
     }
@@ -297,7 +353,7 @@ mod tests {
     /// runs out: three tabs wanting 300 px each get a third of the bar apiece.
     #[test]
     fn a_full_bar_squeezes_its_tabs() {
-        let fit = fit_tab_widths(&[300.0; 3], &[72.0; 3], &nothing_reserved(3), 0.0, 300.0);
+        let fit = fit_tab_widths(&alike(3, 300.0, 72.0), 0.0, 300.0);
 
         assert_eq!(widths(&fit), vec![100.0, 100.0, 100.0]);
         assert_eq!(
@@ -312,13 +368,7 @@ mod tests {
     /// it would take to fit them all — the bar scrolls, so the tabs past the edge are not lost.
     #[test]
     fn a_tab_is_not_squeezed_below_its_floor() {
-        let fit = fit_tab_widths(
-            &[300.0, 300.0],
-            &[72.0, 72.0],
-            &nothing_reserved(2),
-            0.0,
-            100.0,
-        );
+        let fit = fit_tab_widths(&alike(2, 300.0, 72.0), 0.0, 100.0);
 
         assert_eq!(widths(&fit), vec![72.0, 72.0], "held up by the floor");
         assert!(
@@ -332,13 +382,7 @@ mod tests {
     /// everything it asked for.
     #[test]
     fn a_short_tab_keeps_its_own_width() {
-        let fit = fit_tab_widths(
-            &[30.0, 300.0],
-            &[30.0, 72.0],
-            &nothing_reserved(2),
-            0.0,
-            200.0,
-        );
+        let fit = fit_tab_widths(&[plain(30.0, 30.0), plain(300.0, 72.0)], 0.0, 200.0);
 
         assert_eq!(widths(&fit), vec![30.0, 170.0]);
         assert_eq!(squeezed(&fit), vec![false, true]);
@@ -348,29 +392,18 @@ mod tests {
     /// A bar with room to spare gives every tab what it asked for and says nothing.
     #[test]
     fn a_bar_with_room_to_spare_marks_nothing() {
-        let fit = fit_tab_widths(
-            &[100.0, 100.0],
-            &[72.0, 72.0],
-            &nothing_reserved(2),
-            0.0,
-            400.0,
-        );
+        let fit = fit_tab_widths(&alike(2, 100.0, 72.0), 0.0, 400.0);
 
         assert_eq!(widths(&fit), vec![100.0, 100.0], "nothing to squeeze");
         assert_eq!(squeezed(&fit), vec![false, false]);
         assert!(!fit.overflow);
+        assert!(!fit.crowded, "room to spare is the opposite of crowded");
     }
 
     /// The gaps between tabs are not the tabs' to share: they come off the width first.
     #[test]
     fn the_gaps_between_tabs_are_not_shared_out() {
-        let fit = fit_tab_widths(
-            &[300.0, 300.0],
-            &[72.0, 72.0],
-            &nothing_reserved(2),
-            20.0,
-            220.0,
-        );
+        let fit = fit_tab_widths(&alike(2, 300.0, 72.0), 20.0, 220.0);
 
         assert_eq!(widths(&fit), vec![100.0, 100.0]);
         assert!(
@@ -385,17 +418,87 @@ mod tests {
     /// Without this the tab that keeps its close button is the one showing the least of its
     /// title — an equal share, minus a button the others no longer draw.
     #[test]
-    fn reserved_furniture_is_not_paid_for_out_of_the_name() {
-        // Two alike tabs, the second keeping a 24 px button. Each is given 100 px of the 200,
-        // and the one that keeps the button gets those 24 px on top.
-        let fit = fit_tab_widths(&[300.0, 300.0], &[72.0, 96.0], &[0.0, 24.0], 0.0, 224.0);
+    fn kept_furniture_is_not_paid_for_out_of_the_name() {
+        // Two alike tabs, both with a button; the second keeps it under pressure. Each is given
+        // 100 px of the 200, and the one that keeps the button gets those 24 px on top.
+        let wants = [
+            TabWant {
+                name: 300.0,
+                furniture: 24.0,
+                keeps_furniture: false,
+                floor: 72.0,
+            },
+            TabWant {
+                name: 300.0,
+                furniture: 24.0,
+                keeps_furniture: true,
+                floor: 96.0,
+            },
+        ];
+        let fit = fit_tab_widths(&wants, 0.0, 224.0);
 
+        assert!(fit.crowded, "648 px of tabs asked of a 224 px bar");
         assert_eq!(
             widths(&fit),
             vec![100.0, 124.0],
             "the same 100 px of name apiece, and the button on top of one of them"
         );
         assert!(!fit.overflow, "224 px asked for, 224 px available");
+    }
+
+    /// Furniture is given up by the whole bar at one width, not by each tab at its own.
+    ///
+    /// The two tabs here have names of different lengths, which is what used to spread the
+    /// decision out: the long one stopped fitting — and dropped its button — while the short one
+    /// still had room to spare. Both are answered by the same question now, so both keep their
+    /// buttons at a width that seats them and both give them up together at one that does not.
+    #[test]
+    fn furniture_goes_from_the_whole_bar_at_once() {
+        let wants = [
+            TabWant {
+                name: 60.0,
+                furniture: 24.0,
+                keeps_furniture: false,
+                floor: 40.0,
+            },
+            TabWant {
+                name: 300.0,
+                furniture: 24.0,
+                keeps_furniture: false,
+                floor: 40.0,
+            },
+        ];
+
+        // 408 px asked for. One pixel over, and every button is still drawn.
+        let roomy = fit_tab_widths(&wants, 0.0, 409.0);
+        assert!(!roomy.crowded);
+        assert_eq!(
+            widths(&roomy),
+            vec![84.0, 324.0],
+            "each tab gets its name and its button"
+        );
+
+        // One pixel under, and they go together — the short tab's included, though its own name
+        // still fits comfortably.
+        let crowded = fit_tab_widths(&wants, 0.0, 407.0);
+        assert!(crowded.crowded);
+        assert_eq!(
+            widths(&crowded),
+            vec![60.0, 300.0],
+            "each tab is exactly its own name: what went is the buttons and nothing else"
+        );
+
+        // Which is the property the whole change is for: crossing the threshold takes 24 px off
+        // each tab and none off any name. Nothing on screen moves except the buttons going.
+        assert_eq!(
+            widths(&roomy)
+                .iter()
+                .zip(widths(&crowded))
+                .map(|(before, after)| before - after)
+                .collect::<Vec<_>>(),
+            vec![24.0, 24.0],
+            "the step is the button's width, paid by the tab rather than by the name"
+        );
     }
 
     /// The hairlines between leaves come out of the strip's length like everything else.

@@ -403,7 +403,7 @@ impl<Tab> DockArea<'_, Tab> {
                 .unwrap_or_else(|| style.tab.clone());
 
             let close = if self.show_close_buttons && tab_viewer.is_closeable(tab) {
-                Style::TAB_CLOSE_BUTTON_SIZE.min(style.tab_bar.height)
+                style.buttons.close_tab_size.min(style.tab_bar.height)
             } else {
                 0.0
             };
@@ -1629,7 +1629,7 @@ impl<Tab> DockArea<'_, Tab> {
         // than a second way to close a tab does, and the active tab — the one you are reading —
         // keeps its own. It is the *bar* that decides, so every tab lets go at the same width; see
         // [`TabBarFit::crowded`] for what it looked like when each tab decided for itself.
-        let button = Style::TAB_CLOSE_BUTTON_SIZE.min(style.tab_bar.height);
+        let button = style.buttons.close_tab_size.min(style.tab_bar.height);
         // The width of the tab was shared out knowing which buttons would be drawn, so only a
         // button the bar paid for takes room away from the name.
         let close_button_size = if show_close_button && (!crowded || active) {
@@ -1708,11 +1708,14 @@ impl<Tab> DockArea<'_, Tab> {
 
         let close_response = show_close_button.then(|| {
             // Always at the tab's own right-hand end, whether the width was reserved for it or the
-            // button is standing over the name.
+            // button is standing over the name. `close_tab_y_offset` moves the whole button, hit
+            // target included: a mark that sits lower than what answers the click would be a
+            // button that misses on purpose.
             let mut close_button_rect = tab_rect;
             close_button_rect.set_left(tab_rect.right() - button);
             close_button_rect =
-                Rect::from_center_size(close_button_rect.center(), Vec2::splat(button));
+                Rect::from_center_size(close_button_rect.center(), Vec2::splat(button))
+                    .translate(vec2(0.0, style.buttons.close_tab_y_offset));
 
             if overlaid {
                 // Nothing was taken off the name for this button, so the glyphs run underneath it.
@@ -1738,13 +1741,13 @@ impl<Tab> DockArea<'_, Tab> {
                 // of the tab lighting up, which is what Chrome's small circle avoids.
                 ui.painter().circle_filled(
                     close_button_rect.center(),
-                    Style::TAB_CLOSE_BUTTON_RADIUS,
+                    style.buttons.close_tab_mark_radius,
                     style.buttons.close_tab_bg_fill,
                 );
             }
 
             let mut x_rect = close_button_rect;
-            rect_set_size_centered(&mut x_rect, Vec2::splat(Style::TAB_CLOSE_X_SIZE));
+            rect_set_size_centered(&mut x_rect, Vec2::splat(style.buttons.close_tab_x_size));
             ui.painter().line_segment(
                 [x_rect.left_top(), x_rect.right_bottom()],
                 Stroke::new(1.0_f32, color),

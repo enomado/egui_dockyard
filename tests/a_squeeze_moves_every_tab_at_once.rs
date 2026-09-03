@@ -547,6 +547,78 @@ fn the_close_button_is_marked_with_a_disc_not_a_slab() {
     );
 }
 
+/// The close button's size and its place are the consumer's to set, not the crate's to decide.
+///
+/// They were `pub(crate)` constants, which meant "tune this" was a fork away. A field nobody reads
+/// is the failure mode here — it compiles, it serialises, and it changes nothing on screen — so
+/// this drives each one and reads the drawing back.
+#[test]
+fn the_close_button_is_sized_and_placed_by_the_style() {
+    let mut state = DockState::new(NAMES.iter().map(|name| (*name).to_owned()).collect());
+    let ctx = Context::default();
+    let width = 1400.0;
+
+    let plain = style();
+    let quiet = shot_at(&ctx, &mut state, &plain, width);
+    let target = quiet
+        .crosses
+        .iter()
+        .min_by(|left, right| left.center().x.total_cmp(&right.center().x))
+        .expect("a bar of closeable tabs draws close buttons")
+        .center();
+
+    // The mark's radius is the style's, whatever the style says.
+    let mut tuned = style();
+    tuned.buttons.close_tab_mark_radius = 3.0;
+    let marked = shot_with_pointer(&ctx, &mut state, &tuned, width, Some(target));
+    let radius = marked
+        .circles
+        .iter()
+        .find(|(centre, _)| centre.distance(target) < 6.0)
+        .map(|(_, radius)| *radius)
+        .expect("the button under the pointer is still marked");
+    assert!(
+        (radius - 3.0).abs() < TOLERANCE,
+        "asked for a 3 px mark, got {radius:.1}"
+    );
+
+    // The ✕ is the style's too. Measured as the difference between two sizes rather than against
+    // one: a stroke has width of its own, and it lands in the bounding box either way.
+    let leftmost = |shot: &BarShot| {
+        *shot
+            .crosses
+            .iter()
+            .min_by(|left, right| left.center().x.total_cmp(&right.center().x))
+            .expect("the ✕ is drawn")
+    };
+    let mut small = style();
+    small.buttons.close_tab_x_size = 4.0;
+    let mut large = style();
+    large.buttons.close_tab_x_size = 8.0;
+    let thin = leftmost(&shot_at(&ctx, &mut state, &small, width)).width();
+    let wide = leftmost(&shot_at(&ctx, &mut state, &large, width)).width();
+    assert!(
+        (wide - thin - 4.0).abs() < TOLERANCE,
+        "4 px more ✕ drew {:.1} px more",
+        wide - thin
+    );
+
+    // And the offset moves it down — compared against the same scene at zero, so what is measured
+    // is the offset itself rather than where the middle of a tab happens to be.
+    let mut level = style();
+    level.buttons.close_tab_y_offset = 0.0;
+    let mut lowered = style();
+    lowered.buttons.close_tab_y_offset = 5.0;
+    let at_zero = shot_at(&ctx, &mut state, &level, width);
+    let at_five = shot_at(&ctx, &mut state, &lowered, width);
+    let top = |shot: &BarShot| leftmost(shot).center().y;
+    assert!(
+        (top(&at_five) - top(&at_zero) - 5.0).abs() < TOLERANCE,
+        "a 5 px offset moved the ✕ by {:.1} px",
+        top(&at_five) - top(&at_zero)
+    );
+}
+
 /// Whatever the squeeze does, it does to the bar rather than to one tab at a time.
 ///
 /// Each of the two step-changes — the ✕ going, the name stopping being centred — should happen at

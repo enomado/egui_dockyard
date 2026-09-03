@@ -720,26 +720,9 @@ impl Default for LeafHighlighting {
 impl Style {
     pub(crate) const TAB_ADD_BUTTON_SIZE: f32 = 24.0;
     pub(crate) const TAB_ADD_PLUS_SIZE: f32 = 12.0;
-    /// What a close button costs a tab: the room reserved for it, and the square the pointer has
-    /// to hit.
-    ///
-    /// It used to be [`Style::TAB_CLOSE_ALL_BUTTON_SIZE`] — the same 24 as the bar's own buttons,
-    /// which at a default `tab_bar.height` of 24 is the tab's *full height*. A button as tall as
-    /// the thing it sits in does not read as a button on a tab; it reads as a piece of the tab.
-    /// This leaves a margin on all four sides of it instead, the way a browser's does.
-    ///
-    /// Still larger than what is drawn inside it: a small target is hard to hit, and this one sits
-    /// at the edge of a tab that can be dragged.
-    pub(crate) const TAB_CLOSE_BUTTON_SIZE: f32 = 20.0;
-    /// The disc drawn under the ✕ when the pointer is on it.
-    ///
-    /// Small on purpose: filling the whole [`Style::TAB_CLOSE_BUTTON_SIZE`] square — and, before
-    /// that, doing it with the tab's own corner radius on two corners — reads as the right-hand
-    /// end of the tab lighting up rather than as a button being pointed at. Chrome marks the ✕
-    /// with a circle of about this size for the same reason.
-    pub(crate) const TAB_CLOSE_BUTTON_RADIUS: f32 = 8.0;
-    /// The ✕ itself, which sits inside [`Style::TAB_CLOSE_BUTTON_RADIUS`]'s disc.
-    pub(crate) const TAB_CLOSE_X_SIZE: f32 = 8.0;
+    // A tab's close button is not here: it is four fields on [`ButtonsStyle`]
+    // (`close_tab_size`, `close_tab_mark_radius`, `close_tab_x_size`, `close_tab_y_offset`),
+    // because it is the one button of the lot a consumer has asked to be able to tune.
     pub(crate) const TAB_CLOSE_ALL_BUTTON_SIZE: f32 = 24.0;
     pub(crate) const TAB_CLOSE_ALL_SIZE: f32 = 10.0;
     pub(crate) const TAB_COLLAPSE_BUTTON_SIZE: f32 = 24.0;

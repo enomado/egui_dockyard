@@ -1568,30 +1568,6 @@ impl<Tab> DockArea<'_, Tab> {
         ))
     }
 
-    /// Updates the collapsed state of the node and its parents.
-    ///
-    /// Called from the render epilogue, right after the collapsed flag it reads has been
-    /// written, not from the click handler that requested the change.
-    pub(super) fn window_update_collapsed(&mut self, path: NodePath) {
-        let surface = &mut self.dock_state[path.surface];
-        let collapsed = surface[path.node].is_collapsed();
-        if !collapsed {
-            if let Some(window_state) = self.dock_state.get_window_state_mut(path.surface) {
-                window_state.set_new(true);
-            }
-        } else if surface.root_node().is_some_and(|root| root.is_collapsed()) {
-            // Height of the window before collapsing, so expanding restores it. A root
-            // that was never laid out has no height to remember.
-            let surface_height = surface
-                .root()
-                .and_then(|root| self.layout.rect(NodePath::new(path.surface, root)))
-                .map_or(0.0, |rect| rect.height());
-            if let Some(window_state) = self.dock_state.get_window_state_mut(path.surface) {
-                window_state.set_expanded_height(surface_height);
-            }
-        }
-    }
-
     /// * `active` means "the tab that is opened in the parent panel".
     /// * `focused` means "the tab that was last interacted with".
     ///

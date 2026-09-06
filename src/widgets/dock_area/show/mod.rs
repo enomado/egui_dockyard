@@ -1,29 +1,26 @@
-use std::collections::VecDeque;
-
 use egui::{
-    Context, CornerRadius, CursorIcon, EventFilter, Key, Pos2, Rect, Sense, StrokeKind, Ui, Vec2,
+    Context, CornerRadius, CursorIcon, EventFilter, Key, Rect, Sense, StrokeKind, Ui, Vec2,
     epaint::MarginF32,
 };
 
 use super::{
     DockAreaResponse, DockMutation,
+    apply::DockDraw,
     drag_and_drop::{DragSource, DropAim, HoverData, overlay_layer, register_overlay_layer},
     events::DockEvent,
     state::{DragSubject, State},
-    tab_removal::TabRemoval,
 };
 use crate::Share;
 use crate::core::cut::{Extent, Run, SeparatorBand, Span, cut_runs};
 use crate::core::resize::{SepBehavior, apply_drag};
-use crate::dock_area::tab_removal::ForcedRemoval;
 use crate::layout::{DockLayout, SideStrip};
-use crate::tab_viewer::OnCloseResponse;
 use crate::{
     AllowedSplits, DockArea, Fold, Node, OverlayType, Style, SurfaceIndex, TabDestination,
-    TabInsert, TabViewer,
+    TabViewer,
+    core::DockState,
     utils::{expand_to_pixel, fade_dock_style, map_to_pixel},
 };
-use crate::{GapIndex, GapPath, NodePath, RowGap};
+use crate::{GapIndex, GapPath, NodePath};
 
 mod glyph;
 mod junction;
@@ -50,6 +47,15 @@ impl<Tab> DockArea<'_, Tab> {
         ui: &mut Ui,
         tab_viewer: &mut impl TabViewer<Tab = Tab>,
     ) -> DockAreaResponse {
+        let drawn = self.draw(ui, tab_viewer);
+        drawn.apply(ui.ctx(), self.dock_state, tab_viewer)
+    }
+
+    /// Draw one pass, and hand back what it asks of the tree.
+    ///
+    /// Nothing here edits the tree: every edit a frame wants is a [`DockMutation`] on the
+    /// returned [`DockDraw`], applied by [`DockDraw::apply`] once every surface has been visited.
+    fn draw(&mut self, ui: &mut Ui, tab_viewer: &mut impl TabViewer<Tab = Tab>) -> DockDraw {
         self.style
             .get_or_insert(Style::from_egui(ui.style().as_ref()));
         self.window_bounds.get_or_insert(ui.ctx().content_rect());
@@ -232,340 +238,28 @@ impl<Tab> DockArea<'_, Tab> {
             );
         }
 
-        let mutations = std::mem::take(&mut self.mutations);
-        self.apply_render_mutations(
-            &mutations,
-            state.last_hover_pos,
-            ui.ctx().pixels_per_point(),
-            tab_viewer,
-        );
-
         // Read before the state is stored away, and read through the liveness filter for the same
         // reason `drag_in_flight` does: a gesture whose subject left the tree never gets its
         // `drag_stopped`, and what it leaves behind is a leftover the dock itself no longer acts
         // on — announcing it would name a gesture nobody is making.
         let dragging = state.in_flight_at(ui.ctx().cumulative_pass_nr()).copied();
+        // Where a detach puts the window it makes, read out before the state is handed over.
+        let last_hover_pos = state.last_hover_pos;
         state.store(ui.ctx(), self.id);
-        // Drop geometry of nodes that this pass removed (closed tabs, collapsed splits)
-        // before publishing, so out-of-frame readers never see a rectangle for a node
-        // that no longer exists.
-        self.layout.retain_live(self.dock_state);
-        std::mem::take(&mut self.layout).store(ui.ctx(), self.id);
-        DockAreaResponse {
-            events: std::mem::take(&mut self.events),
+
+        DockDraw::new(
+            self.id,
+            self.style.take().unwrap(),
+            self.collapse_sideways,
+            std::mem::take(&mut self.layout),
+            std::mem::take(&mut self.events),
+            std::mem::take(&mut self.mutations),
+            last_hover_pos,
+            ui.ctx().pixels_per_point(),
             dragging,
-        }
+        )
     }
 
-    /// Apply the requests accumulated while surfaces were rendered.
-    ///
-    /// This is deliberately a separate phase: draw code is allowed to *request* a structural
-    /// edit, but it cannot invalidate paths while sibling surfaces are still being visited.
-    /// The method is the pre-public D3 seam; D4 moves the remaining live edits into the same
-    /// request list before the draw API itself can borrow only `&DockState`.
-    fn apply_render_mutations(
-        &mut self,
-        mutations: &[DockMutation],
-        last_hover_pos: Option<Pos2>,
-        pixels_per_point: f32,
-        tab_viewer: &mut impl TabViewer<Tab = Tab>,
-    ) {
-        let mut new_focused = mutations.iter().rev().find_map(|mutation| match mutation {
-            DockMutation::Focus(path) => Some(*path),
-            DockMutation::Activate(_)
-            | DockMutation::SetLeafFold { .. }
-            | DockMutation::SetSplitStowed { .. }
-            | DockMutation::SetLeafScroll { .. }
-            | DockMutation::SetBoundary { .. }
-            | DockMutation::SetShares { .. }
-            | DockMutation::SetWindowMinimized { .. }
-            | DockMutation::WindowShown { .. }
-            | DockMutation::TransposeCross { .. }
-            | DockMutation::MoveTab { .. }
-            | DockMutation::Remove(_)
-            | DockMutation::Detach(_) => None,
-        });
-
-        // What a leaf *shows* is settled first, and in request order — these edits address nodes
-        // that still exist exactly as drawing saw them. Removals come after, for the reason
-        // spelled out on `DockMutation::Activate`: a removal asks who inherits the focus only
-        // when it takes the active tab, so it has to see the activation this frame requested.
-        for mutation in mutations {
-            match *mutation {
-                DockMutation::Activate(path) => {
-                    let leaf = self.dock_state.leaf_mut(path.node_path()).unwrap();
-                    if !leaf.is_active(path.tab) {
-                        leaf.activate_tab_remembering(path.tab);
-                        self.events.push(DockEvent::LayoutCommitted);
-                    }
-                }
-                DockMutation::TransposeCross {
-                    outer,
-                    at,
-                    ref bounds,
-                    stack_fraction,
-                } => {
-                    let [first, second] = bounds;
-                    self.dock_state[outer.row.surface].transpose_cross(
-                        RowGap {
-                            row: outer.row.node,
-                            gap: outer.gap,
-                        },
-                        at,
-                        [first, second],
-                        stack_fraction,
-                    );
-                    // The pass drew — and hit-tested — the grouping this replaces, so the
-                    // geometry map describes that one. Bring it back in step here, while the
-                    // shape just written is the shape the surface has: `max_rect` is the surface
-                    // root's rectangle, the same value `render_nodes` hands to
-                    // `compute_rect_sizes`. Parents before children, each call cutting its
-                    // children out of a rectangle an earlier call wrote.
-                    let root = self.dock_state[outer.row.surface]
-                        .root()
-                        .expect("the surface being laid out has a root: `outer` lives in it");
-                    let max_rect = self
-                        .layout
-                        .rect(NodePath::new(outer.row.surface, root))
-                        .expect("the root was laid out at the top of this pass");
-                    let mut queue = VecDeque::from([outer.row.node]);
-                    while let Some(node) = queue.pop_front() {
-                        let Some(children) = self.dock_state[outer.row.surface].children(node)
-                        else {
-                            continue;
-                        };
-                        // Queued before the cut below, and only so that the borrow of the tree
-                        // ends first — the queue is drained in exactly the order it was.
-                        queue.extend(children.iter().copied());
-                        self.compute_rect_sizes(
-                            pixels_per_point,
-                            NodePath::new(outer.row.surface, node),
-                            max_rect,
-                        );
-                    }
-                }
-                DockMutation::SetLeafFold { path, fold } => {
-                    // Compared as a whole, axis included: re-folding a bar into a strip changes
-                    // nothing about *whether* the leaf is folded and everything about the
-                    // picture, so asking `is_collapsed` here would drop that request.
-                    if self.dock_state[path].fold() != fold {
-                        self.dock_state[path.surface].set_leaf_fold(path.node, fold);
-                        // Reads the collapsed flag it has just written, plus this pass's
-                        // geometry, to remember the height an expand has to restore.
-                        self.window_update_collapsed(path);
-                        self.events.push(DockEvent::LayoutCommitted);
-                    }
-                }
-                DockMutation::SetSplitStowed { path, stowed } => {
-                    // Asked of `is_stowed`, not of `is_collapsed`: a side whose leaves all
-                    // happen to be collapsed is collapsed without being stowed, and answering
-                    // the wrong question here would drop the request that puts it away.
-                    if self.dock_state[path].is_stowed() != stowed {
-                        self.dock_state[path.surface].set_split_stowed(path.node, stowed);
-                        // Same reason as for a collapsed leaf: in a floating window this is what
-                        // the window's height follows, and stowing changes whether the root of
-                        // that window is collapsed.
-                        self.window_update_collapsed(path);
-                        self.events.push(DockEvent::LayoutCommitted);
-                    }
-                }
-                DockMutation::SetLeafScroll { path, scroll } => {
-                    self.dock_state
-                        .leaf_mut(path)
-                        .expect("a scroll is only requested for a leaf")
-                        .scroll = scroll;
-                    // No `LayoutCommitted`: scrolling a tab bar has never been a layout edit a
-                    // consumer diffs, and it is requested on plain resizes too (the clamp).
-                }
-                DockMutation::SetBoundary { gap, at } => {
-                    self.dock_state[gap.row.surface][gap.row.node]
-                        .get_row_mut()
-                        .expect("a boundary is only requested for a row")
-                        .set_boundary(gap.gap, at);
-                    // No event either: the gesture that asked already said what it was —
-                    // `SeparatorDragging` while the hand moves, `LayoutCommitted` on release or
-                    // on the double-click reset.
-                }
-                DockMutation::SetShares { row, ref shares } => {
-                    // Cloned rather than moved: the request list is borrowed for the whole loop
-                    // (a `TransposeCross` further down reads its own `bounds` the same way), and
-                    // a row's worth of weights is a handful of floats.
-                    self.dock_state[row.surface][row.node]
-                        .get_row_mut()
-                        .expect("weights are only requested for a row")
-                        .set_shares(shares.clone());
-                    // No event, for the same reason `SetBoundary` pushes none: the gesture that
-                    // asked has already said what it was.
-                }
-                DockMutation::SetWindowMinimized { surface, minimized } => {
-                    // Pushes `LayoutCommitted` itself, as it did when it ran during the click.
-                    self.window_set_minimized(surface, minimized);
-                }
-                DockMutation::WindowShown {
-                    surface,
-                    took_expanded_height,
-                } => {
-                    self.dock_state
-                        .get_window_state_mut(surface)
-                        .expect("the window was drawn this frame")
-                        .requests_honoured(took_expanded_height);
-                }
-                DockMutation::MoveTab { .. }
-                | DockMutation::Remove(_)
-                | DockMutation::Detach(_)
-                | DockMutation::Focus(_) => (),
-            }
-        }
-
-        for mutation in mutations.iter().rev() {
-            let DockMutation::Remove(removal) = *mutation else {
-                continue;
-            };
-            match removal {
-                TabRemoval::Tab(path, ForcedRemoval(is_forced)) => {
-                    // Who takes the focus is the application's call when it wants it; asked
-                    // only for the tab that has it, since closing any other moves nothing.
-                    // The leaf is handed over as it stands now — the removal is next.
-                    let successor = {
-                        let leaf = self.dock_state.leaf(path.node_path()).unwrap();
-                        leaf.is_active(path.tab)
-                            .then(|| tab_viewer.successor_on_close(leaf, path.tab))
-                            .flatten()
-                    };
-                    if is_forced {
-                        self.dock_state.remove_tab_choosing(path, successor);
-                        self.events.push(DockEvent::LayoutCommitted);
-                    } else {
-                        let leaf = &mut self.dock_state.leaf_mut(path.node_path()).unwrap();
-                        match tab_viewer.on_close(&leaf[path.tab]) {
-                            OnCloseResponse::Close => {
-                                self.dock_state.remove_tab_choosing(path, successor);
-                                self.events.push(DockEvent::LayoutCommitted);
-                            }
-                            OnCloseResponse::Focus => {
-                                leaf.activate_tab_remembering(path.tab);
-                                new_focused = Some(path.node_path());
-                                self.events.push(DockEvent::LayoutCommitted);
-                            }
-                            OnCloseResponse::Ignore => {
-                                // no-op
-                            }
-                        }
-                    }
-                }
-                TabRemoval::Node(path) => {
-                    let mut all_tabs_are_closable = true;
-                    for tab in self.dock_state[path].iter_tabs_mut() {
-                        if !(tab_viewer.is_closeable(tab)
-                            && matches!(tab_viewer.on_close(tab), OnCloseResponse::Close))
-                        {
-                            all_tabs_are_closable = false;
-                        }
-                    }
-                    if all_tabs_are_closable {
-                        self.dock_state.remove_leaf(path);
-                        self.events.push(DockEvent::LayoutCommitted);
-                    }
-                }
-                TabRemoval::Window(window) => {
-                    let mut all_tabs_are_closable = true;
-                    for node in self.dock_state[SurfaceIndex::Window(window)].iter_mut() {
-                        for tab in node.iter_tabs_mut() {
-                            if !(tab_viewer.is_closeable(tab)
-                                && matches!(tab_viewer.on_close(tab), OnCloseResponse::Close))
-                            {
-                                all_tabs_are_closable = false;
-                            }
-                        }
-                    }
-                    if all_tabs_are_closable {
-                        self.dock_state.remove_window(window);
-                        self.events.push(DockEvent::LayoutCommitted);
-                    }
-                }
-            }
-        }
-
-        for mutation in mutations.iter().rev() {
-            let DockMutation::Detach(path) = *mutation else {
-                continue;
-            };
-            // The detached window inherits the size of the node the tab came from; a
-            // node that was never laid out (nothing to inherit) gets a default size.
-            let size = self
-                .layout
-                .rect(path.node_path())
-                .map_or(Vec2::new(100., 150.), |rect| rect.size());
-            self.dock_state.detach_tab(
-                path,
-                Rect::from_min_size(last_hover_pos.unwrap_or(Pos2::ZERO), size).into(),
-            );
-            self.events.push(DockEvent::LayoutCommitted);
-        }
-
-        // The drop, after everything drawing asked for: see `DockMutation::MoveTab` for why this
-        // order and not the other one, and why the subject is re-resolved here.
-        for mutation in mutations {
-            let DockMutation::MoveTab {
-                source,
-                destination,
-            } = *mutation
-            else {
-                continue;
-            };
-            // A drag whose tab has left the tree was cancelled before the pass began — but the
-            // pass itself can also have taken it, by a forced close asked for while drawing.
-            let Some(source) = source.resolve(self.dock_state) else {
-                continue;
-            };
-            if !self.destination_is_live(destination) {
-                continue;
-            }
-            // A drop that resolves to the tab's current slot changes nothing; only a move that
-            // reports a real mutation counts as a finalised event (same rule as the focus push
-            // below).
-            if self.dock_state.move_tab(source, destination) {
-                self.events.push(DockEvent::LayoutCommitted);
-            }
-        }
-
-        if let Some(focused) = new_focused {
-            // `new_focused` is set unconditionally on any click within a leaf
-            // body and on tab-title clicks, even when the leaf is already
-            // focused. Only emit a finalised event if the focus actually
-            // moved — otherwise idle clicks inside already-focused leaves
-            // would emit empty events.
-            let already_focused = self.dock_state.focused_leaf() == Some(focused);
-            self.dock_state.set_focused_node_and_surface(focused);
-            if !already_focused {
-                self.events.push(DockEvent::LayoutCommitted);
-            }
-        }
-    }
-
-    /// Whether a destination settled before this pass drew still names somewhere to drop onto.
-    ///
-    /// A destination is a *path*, and the requests applied ahead of the drop can have taken what
-    /// it names away — or, for [`TabInsert::Insert`], shortened the bar the slot was counted in.
-    /// Asked once, here, rather than left to [`DockState::move_tab`], which indexes on the
-    /// assumption that whoever called it aimed at a tree that still stands.
-    fn destination_is_live(&self, destination: TabDestination) -> bool {
-        match destination {
-            // Made by the drop itself, so there is nothing for it to outlive.
-            TabDestination::Window(_) => true,
-            TabDestination::EmptySurface(surface) => self.dock_state.is_surface_valid(surface),
-            TabDestination::Node(path, insert) => match insert {
-                TabInsert::Insert(index) => self
-                    .dock_state
-                    .leaf(path)
-                    // `<=`, not `<`: the far edge of the bar is a slot like any other, and a
-                    // removal that shortens the bar to exactly the aimed-at index leaves the
-                    // drop meaning "at the end", which is where the hand was pointing.
-                    .is_ok_and(|leaf| index.0 <= leaf.len()),
-                TabInsert::Append | TabInsert::Split(_) => self.dock_state.node(path).is_ok(),
-            },
-        }
-    }
 
     /// Returns some when windows are fading, and what surface index is being hovered over
     #[inline(always)]
@@ -745,56 +439,6 @@ impl<Tab> DockArea<'_, Tab> {
         }
     }
 
-    /// The paths of a row's children, in the row's order: first (left / top) to last
-    /// (right / bottom).
-    ///
-    /// A list, because everything downstream of it walks one: [`Self::cut_row`] cuts as many
-    /// children as the row holds, [`Self::strip_columns`] folds over them, and
-    /// [`Self::compute_rect_sizes`] writes one rectangle per child and one divider per gap.
-    /// Nothing here needs the row to be a pair any more, which is what stage 6 of
-    /// `docs/PLAN_a_row_holds_many_panels.md` was for.
-    ///
-    /// # Panics
-    ///
-    /// If `path` does not name a row.
-    #[track_caller]
-    fn child_paths(&self, path: NodePath) -> Vec<NodePath> {
-        self.dock_state[path]
-            .get_row()
-            .expect("only a row has children")
-            .children()
-            .iter()
-            .map(|&child| NodePath::new(path.surface, child))
-            .collect()
-    }
-
-    /// The paths of the two children `gap` lies between, first (left / top) then second.
-    ///
-    /// Always exactly two, whatever the row holds — that is what a gap *is* — which is why the
-    /// junction detector speaks of these rather than of [`Self::child_paths`]: the line a junction
-    /// sits on is the line between two neighbours, not "the line of the split".
-    ///
-    /// # Panics
-    ///
-    /// If `gap` does not name a gap of a row.
-    #[track_caller]
-    fn gap_neighbours(&self, gap: GapPath) -> [NodePath; 2] {
-        let row = self.dock_state[gap.row]
-            .get_row()
-            .expect("only a row has gaps");
-        let children = row.children();
-        assert!(
-            row.has_gap(gap.gap),
-            "gap {} of a row with {} gaps",
-            gap.gap.0,
-            row.gap_count()
-        );
-        [
-            NodePath::new(gap.row.surface, children[gap.gap.0]),
-            NodePath::new(gap.row.surface, children[gap.gap.0 + 1]),
-        ]
-    }
-
     fn allocate_area_for_root_node(&mut self, ui: &mut Ui, surface: SurfaceIndex) -> Rect {
         let style = self.style.as_ref().unwrap();
         let mut rect = ui.available_rect_before_wrap();
@@ -824,29 +468,142 @@ impl<Tab> DockArea<'_, Tab> {
         rect
     }
 
-    /// Write the rectangles of `path`'s children into [`Self::layout`], cutting them out of
-    /// the rectangle already recorded for `path` itself — along with *where the row was cut*,
-    /// one divider per gap, which is what everything downstream reads instead of working it
-    /// out again.
+    /// The paths of the two children `gap` lies between, first (left / top) then second.
     ///
-    /// Takes `pixels_per_point` rather than a [`Ui`] because it is also called from
-    /// [`Self::transpose_cross_split`], which edits the tree in the middle of a pass and has
-    /// to bring the geometry map back in step with the new shape right there — see the note
-    /// on staleness in that function.
+    /// Always exactly two, whatever the row holds — that is what a gap *is* — which is why the
+    /// junction detector speaks of these rather than of [`Geometry::child_paths`]: the line a
+    /// junction sits on is the line between two neighbours, not "the line of the split".
+    ///
+    /// Here rather than on [`Geometry`] because it is the one question about a row that needs
+    /// neither the style nor the map — only the tree — and asking it through `Geometry` would
+    /// make the answer depend on a style being set.
+    ///
+    /// # Panics
+    ///
+    /// If `gap` does not name a gap of a row.
+    #[track_caller]
+    fn gap_neighbours(&self, gap: GapPath) -> [NodePath; 2] {
+        let row = self.dock_state[gap.row]
+            .get_row()
+            .expect("only a row has gaps");
+        let children = row.children();
+        assert!(
+            row.has_gap(gap.gap),
+            "gap {} of a row with {} gaps",
+            gap.gap.0,
+            row.gap_count()
+        );
+        [
+            NodePath::new(gap.row.surface, children[gap.gap.0]),
+            NodePath::new(gap.row.surface, children[gap.gap.0 + 1]),
+        ]
+    }
+
+    /// Where the geometry of the tree is worked out from, for whoever is asking.
+    ///
+    /// The measuring half of the layout pass reads the tree, the style and last frame's map, and
+    /// writes nothing — so it is the same work whether drawing is asking or the epilogue is, and
+    /// it is stated once here rather than once per phase. See [`Geometry`].
+    fn geometry(&self) -> Geometry<'_, Tab> {
+        Geometry {
+            dock_state: self.dock_state,
+            layout: &self.layout,
+            style: self.style.as_ref().unwrap(),
+            collapse_sideways: self.collapse_sideways,
+        }
+    }
+
+    /// Write the rectangles of `path`'s children into [`Self::layout`] — the measuring and the
+    /// writing, in that order, and with nothing borrowed across the two.
+    ///
+    /// The split is what lets the epilogue reuse the arithmetic: it holds the tree mutably, so it
+    /// cannot hand a `&mut DockLayout` and a `&DockState` to one method that keeps both. See
+    /// [`Geometry::plan_row`], which is where the deciding lives.
     fn compute_rect_sizes(&mut self, pixels_per_point: f32, path: NodePath, max_rect: Rect) {
+        let plan = self.geometry().plan_row(pixels_per_point, path, max_rect);
+        plan.write(&mut self.layout);
+    }
+}
+
+/// The tree as the layout pass reads it: what is where, how wide a strip is, where a row is cut.
+///
+/// Everything here is a **question**, and the answers are values — nothing is written to the tree
+/// or to the map. That is the whole reason the type exists: the same questions are asked twice per
+/// frame, once by drawing (which holds the tree by shared reference) and once by the epilogue
+/// (which holds it mutably, having just rewritten part of it, and has to bring the geometry map
+/// back in step). Written on `DockArea`, as it used to be, the second caller could not ask at all.
+///
+/// Borrows rather than owns, and borrows `layout` **shared**: a plan is computed from last
+/// frame's map and written into it afterwards, never both at once.
+pub(super) struct Geometry<'a, Tab> {
+    dock_state: &'a DockState<Tab>,
+    layout: &'a DockLayout,
+    style: &'a Style,
+    collapse_sideways: bool,
+}
+
+impl<'a, Tab> Geometry<'a, Tab> {
+    /// The tree, the look, and last frame's map — the three things a measurement reads.
+    pub(super) fn new(
+        dock_state: &'a DockState<Tab>,
+        layout: &'a DockLayout,
+        style: &'a Style,
+        collapse_sideways: bool,
+    ) -> Self {
+        Self {
+            dock_state,
+            layout,
+            style,
+            collapse_sideways,
+        }
+    }
+
+    /// The paths of a row's children, in the row's order: first (left / top) to last
+    /// (right / bottom).
+    ///
+    /// A list, because everything downstream of it walks one: [`Self::cut_row`] cuts as many
+    /// children as the row holds, [`Self::strip_columns`] folds over them, and
+    /// [`Self::plan_row`] writes one rectangle per child and one divider per gap.
+    /// Nothing here needs the row to be a pair any more, which is what stage 6 of
+    /// `docs/PLAN_a_row_holds_many_panels.md` was for.
+    ///
+    /// # Panics
+    ///
+    /// If `path` does not name a row.
+    #[track_caller]
+    fn child_paths(&self, path: NodePath) -> Vec<NodePath> {
+        self.dock_state[path]
+            .get_row()
+            .expect("only a row has children")
+            .children()
+            .iter()
+            .map(|&child| NodePath::new(path.surface, child))
+            .collect()
+    }
+
+    /// Work out how the row at `path` is cut this frame, without writing any of it down.
+    ///
+    /// Takes `pixels_per_point` rather than a [`Ui`] because it is also asked by the epilogue,
+    /// which has just rewritten part of the tree and has to bring the geometry map back in step
+    /// with the new shape — see the note on staleness at
+    /// [`DockMutation::TransposeCross`](crate::dock_area::DockMutation::TransposeCross).
+    pub(super) fn plan_row(
+        &self,
+        pixels_per_point: f32,
+        path: NodePath,
+        max_rect: Rect,
+    ) -> RowPlan {
         // A side put away as a unit is one bar for whatever it contains: there are no children
         // to cut it into, and therefore no line between any of them. Said out loud rather than
         // left to the branch not running, because "no divider" is an answer that has to
         // *arrive* — the entry outlives the frame, so a row that stops answering keeps the line
         // it drew before it was stowed, lying across the strip it has become.
         if self.dock_state[path].is_stowed() {
-            self.layout.forget_dividers(path);
-            return;
+            return RowPlan::Stowed { path };
         }
 
         let children = self.child_paths(path);
-        // Collected before the writes below, because the row is borrowed from the tree and the
-        // map is written through `&mut self`. The order is the row's own, first gap first.
+        // The order is the row's own, first gap first.
         let gaps: Vec<GapIndex> = self.dock_state[path]
             .get_row()
             .expect("a parent is a row")
@@ -863,19 +620,11 @@ impl<Tab> DockArea<'_, Tab> {
         );
         assert_eq!(cut.dividers.len(), gaps.len(), "one divider per gap");
         assert_eq!(cut.side_strips.len(), children.len(), "one mark per child");
-
-        for (&child, &rect) in children.iter().zip(&cut.children) {
-            self.layout.set_rect(child, rect);
-        }
-        // Unconditional, every gap: a branch cannot leave a stale answer behind by saying
-        // nothing, because `RowCut` made it say something for each of them.
-        for (gap, divider) in gaps.into_iter().zip(cut.dividers) {
-            self.layout.set_divider(GapPath::new(path, gap), divider);
-        }
-        for (child, side) in children.into_iter().zip(cut.side_strips) {
-            if let Some(side) = side {
-                self.layout.set_side_strip(child, side);
-            }
+        RowPlan::Cut {
+            path,
+            children,
+            gaps,
+            cut,
         }
     }
 
@@ -971,7 +720,7 @@ impl<Tab> DockArea<'_, Tab> {
             .get_row()
             .expect("only a row has children to measure");
         let horizontal = row.is_horizontal();
-        let style = self.style.as_ref().unwrap();
+        let style = self.style;
         let children = self.child_paths(path);
         let weight = |index: usize| Extent::Weighted(row.shares()[index].0);
 
@@ -1075,7 +824,7 @@ impl<Tab> DockArea<'_, Tab> {
             .get_row()
             .expect("only a row is cut into children");
         let horizontal = row.is_horizontal();
-        let style = self.style.as_ref().unwrap();
+        let style = self.style;
         let children = self.child_paths(path);
 
         // The parent's rectangle was written either by `allocate_area_for_root_node` (for
@@ -1318,7 +1067,59 @@ impl<Tab> DockArea<'_, Tab> {
             side_strips: vec![None; children.len()],
         }
     }
+}
 
+/// What [`Geometry::plan_row`] decided, on its way to the map — the one thing the layout pass
+/// writes down.
+///
+/// A value between the deciding and the writing, so that the two can be done by callers holding
+/// the tree differently: drawing has it shared throughout, and the epilogue has it mutably and
+/// asks *after* editing it. Neither of them can hold a shared borrow of the map while writing to
+/// it, and this is what carries the answer across that gap.
+#[derive(Clone, Debug)]
+#[must_use = "a plan that is not written leaves the map describing last frame's shape"]
+pub(super) enum RowPlan {
+    /// A side put away as a unit: nothing to cut, and the lines it used to be cut at have to go.
+    Stowed { path: NodePath },
+    /// One rectangle per child, one answer per gap.
+    Cut {
+        path: NodePath,
+        children: Vec<NodePath>,
+        gaps: Vec<GapIndex>,
+        cut: RowCut,
+    },
+}
+
+impl RowPlan {
+    /// Put what was decided on the map.
+    pub(super) fn write(self, layout: &mut DockLayout) {
+        match self {
+            RowPlan::Stowed { path } => layout.forget_dividers(path),
+            RowPlan::Cut {
+                path,
+                children,
+                gaps,
+                cut,
+            } => {
+                for (&child, &rect) in children.iter().zip(&cut.children) {
+                    layout.set_rect(child, rect);
+                }
+                // Unconditional, every gap: a branch cannot leave a stale answer behind by saying
+                // nothing, because `RowCut` made it say something for each of them.
+                for (gap, divider) in gaps.into_iter().zip(cut.dividers) {
+                    layout.set_divider(GapPath::new(path, gap), divider);
+                }
+                for (child, side) in children.into_iter().zip(cut.side_strips) {
+                    if let Some(side) = side {
+                        layout.set_side_strip(child, side);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<Tab> DockArea<'_, Tab> {
     /// The rectangle the divider in `gap` is drawn in — and, expanded by
     /// [`SeparatorStyle::extra_interact_width`](crate::SeparatorStyle::extra_interact_width),
     /// grabbed by.
@@ -1394,6 +1195,7 @@ impl<Tab> DockArea<'_, Tab> {
         // moves both by writing the boundary of this gap — which beside a strip is the boundary
         // of the strip itself, and moves nothing.
         let spans_a_strip = self
+            .geometry()
             .trading_pair(gap)
             .is_some_and(|(near, far)| far > near + 1);
 
@@ -1728,7 +1530,7 @@ impl<Tab> DockArea<'_, Tab> {
         // because a strip is given its own width whatever it is holding. Taken first so that both
         // the Pair path and the modes go the same way over such a divider, and so that the two
         // lines drawn either side of one strip are one gesture with two handles.
-        if let Some((near, far)) = self.trading_pair(gap)
+        if let Some((near, far)) = self.geometry().trading_pair(gap)
             && far > near + 1
         {
             return self.drag_across_strips(
@@ -1801,11 +1603,11 @@ impl<Tab> DockArea<'_, Tab> {
         if delta == 0.0 {
             return false;
         }
-        let Some(RowExtents { extents, .. }) = self.row_extents(gap.row) else {
+        let Some(RowExtents { extents, .. }) = self.geometry().row_extents(gap.row) else {
             return false;
         };
         let horizontal = self.dock_state[gap.row].is_horizontal();
-        let children = self.child_paths(gap.row);
+        let children = self.geometry().child_paths(gap.row);
         let open: Vec<usize> = (0..extents.len())
             .filter(|&index| matches!(extents[index], Extent::Weighted(_)))
             .collect();

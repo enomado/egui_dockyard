@@ -3,6 +3,9 @@
 /// Otherwise ``mod.rs`` would be humongous.
 mod show;
 
+/// What a drawn frame asks of the tree, and the one place that carries it out.
+mod apply;
+
 // Various components of the `DockArea` which is used when rendering
 mod allowed_splits;
 mod drag_and_drop;

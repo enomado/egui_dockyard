@@ -8,7 +8,6 @@ use crate::{
     DockArea, NodeId, NodePath, Style, SurfaceIndex, TabViewer, WindowIndex,
     dock_area::{
         DockMutation,
-        events::DockEvent,
         show::{border_clearance, collapsed_strip_height},
         state::{DragSubject, State, WindowEdge},
         tab_removal::TabRemoval,
@@ -501,46 +500,4 @@ impl<Tab> DockArea<'_, Tab> {
         });
     }
 
-    /// Minimize or restore a window — the epilogue's half, applied from
-    /// [`DockMutation::SetWindowMinimized`].
-    ///
-    /// Reads this pass's geometry to remember how tall the window was, exactly as it did when
-    /// it ran during the click.
-    pub(super) fn window_set_minimized(&mut self, surf_index: SurfaceIndex, minimized: bool) {
-        let was_minimized = self
-            .dock_state
-            .get_window_state(surf_index)
-            .unwrap()
-            .is_minimized();
-        if was_minimized == minimized {
-            return;
-        }
-        let surface = &mut self.dock_state[surf_index];
-
-        if surface.root_node().is_some_and(|node| node.is_collapsed()) {
-            // The window is already fully collapsed,
-            // so `expanded_height` has already been set.
-            // We don't need to set `new` either.
-            if let Some(window_state) = self.dock_state.get_window_state_mut(surf_index) {
-                window_state.toggle_minimized();
-            }
-        } else if was_minimized {
-            if let Some(window_state) = self.dock_state.get_window_state_mut(surf_index) {
-                window_state.set_new(true);
-                window_state.toggle_minimized();
-            }
-        } else {
-            // Remember how tall the window was so un-minimizing restores that height. A
-            // surface that was never laid out has no height to remember.
-            let surface_height = self.dock_state[surf_index]
-                .root()
-                .and_then(|root| self.layout.rect(NodePath::new(surf_index, root)))
-                .map_or(0.0, |rect| rect.height());
-            if let Some(window_state) = self.dock_state.get_window_state_mut(surf_index) {
-                window_state.set_expanded_height(surface_height);
-                window_state.toggle_minimized();
-            }
-        }
-        self.events.push(DockEvent::LayoutCommitted);
-    }
 }

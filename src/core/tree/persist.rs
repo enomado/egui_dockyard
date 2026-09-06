@@ -872,7 +872,7 @@ impl<'de, Tab: Deserialize<'de>> Deserialize<'de> for crate::core::DockState<Tab
 
 #[cfg(test)]
 mod tests {
-    use crate::core::tree::{GapIndex, Node, Split, TabIndex, Tree};
+    use crate::core::tree::{Fold, GapIndex, Node, Split, TabIndex, Tree};
     use crate::core::{DockState, SurfaceIndex};
 
     fn shape(tree: &Tree<String>) -> Vec<(usize, Vec<String>)> {

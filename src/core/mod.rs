@@ -218,10 +218,21 @@ impl<Tab> DockState<Tab> {
     /// [`DockLayout`](crate::layout::DockLayout), which is keyed by `(surface, node)`
     /// and can be queried for the focused leaf via
     /// [`focused_leaf`](Tree::focused_leaf).
+    ///
+    /// Read-only half of the pair (see [`Tree::find_active_focused`]): the question «which tab
+    /// is the user looking at» is asked by callers that hold the whole state by `&`, and making
+    /// them take it mutably was the last reason a caller kept the tree behind a cell.
     #[inline]
-    pub fn find_active_focused(&mut self) -> Option<&mut Tab> {
+    pub fn find_active_focused(&self) -> Option<&Tab> {
         self.focused_surface
             .and_then(|surface| self[surface].find_active_focused())
+    }
+
+    /// Mutable half of [`find_active_focused`](Self::find_active_focused).
+    #[inline]
+    pub fn find_active_focused_mut(&mut self) -> Option<&mut Tab> {
+        self.focused_surface
+            .and_then(|surface| self[surface].find_active_focused_mut())
     }
 
     /// A borrowed view of the surface at `surface`, or `None` if it names a window slot past

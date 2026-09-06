@@ -473,8 +473,19 @@ impl<Tab> Tree<Tab> {
     }
 
     /// Returns the active `Tab` inside the focused leaf node or [`None`] if it does not exist.
+    ///
+    /// Read-only half of the pair, mirroring [`leaf`](Self::leaf)/[`leaf_mut`](Self::leaf_mut):
+    /// asking *which* tab the user is looking at is a question, not an edit, and a caller
+    /// holding the tree by `&` must be able to ask it.
     #[inline]
-    pub fn find_active_focused(&mut self) -> Option<&mut Tab> {
+    pub fn find_active_focused(&self) -> Option<&Tab> {
+        let focused = self.focused_node?;
+        self.leaf(focused).ok()?.active_focused()
+    }
+
+    /// Mutable half of [`find_active_focused`](Self::find_active_focused).
+    #[inline]
+    pub fn find_active_focused_mut(&mut self) -> Option<&mut Tab> {
         let focused = self.focused_node?;
         self.leaf_mut(focused).ok()?.active_focused_mut()
     }

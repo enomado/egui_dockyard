@@ -34,7 +34,8 @@ fn frame(ctx: &Context, state: &mut DockState<String>, events: Vec<Event>) {
             DockArea::new(state)
                 .id(Id::new(DOCK_ID))
                 .style(Style::from_egui(ui.style().as_ref()))
-                .show_inside(ui, &mut Viewer);
+                .show_inside(ui, &mut Viewer)
+                .apply(ui.ctx(), state, &mut Viewer);
         });
     });
     output.textures_delta.clear();

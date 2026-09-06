@@ -136,7 +136,8 @@ impl Sim {
                     // The whole scene: without the knob a collapsed leaf keeps its column and
                     // there is no strip to have a handle beside.
                     .collapse_sideways(true)
-                    .show_inside(ui, &mut Viewer);
+                    .show_inside(ui, &mut Viewer)
+                    .apply(ui.ctx(), state, &mut Viewer);
             });
         });
         output.textures_delta.clear();

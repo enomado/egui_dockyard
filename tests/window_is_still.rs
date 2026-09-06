@@ -72,7 +72,8 @@ fn frame(ctx: &Context, state: &mut DockState<String>, id: Id, pointer: Option<P
                 .show_junction_handles(true)
                 .show_tab_name_on_hover(true)
                 .show_secondary_button_hint(true)
-                .show_inside(ui, &mut Viewer);
+                .show_inside(ui, &mut Viewer)
+                .apply(ui.ctx(), state, &mut Viewer);
         });
     });
     // Headless harness, no GPU backend to hand the delta to.

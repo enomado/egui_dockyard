@@ -1383,7 +1383,8 @@ impl Sim {
                     // gesture is behind the same knob, deliberately: see `stow_target`), and it
                     // is the arrangement the consumer this crate is written for runs.
                     .collapse_sideways(true)
-                    .show_inside_with_response(ui, &mut Viewer);
+                    .show_inside(ui, &mut Viewer)
+                    .apply(ui.ctx(), state, &mut Viewer);
                 // One per *frame* that carried a finalised event, which is the unit the contract
                 // is written in: `layout_committed()` is a per-frame bool, and it is the signal
                 // a consumer records one undo entry and one save on. A live separator drag

@@ -245,13 +245,15 @@ fn frames_with(
         };
         let mut output = ctx.run_ui(input, |ui| {
             CentralPanel::default().show(ui, |ui| {
+                let mut viewer = viewer.clone();
                 DockArea::new(state)
                     .id(Id::new(DOCK_ID))
                     .style(style.clone())
                     .show_leaf_close_all_buttons(false)
                     .show_leaf_collapse_buttons(true)
                     .collapse_sideways(true)
-                    .show_inside(ui, &mut viewer.clone());
+                    .show_inside(ui, &mut viewer)
+                    .apply(ui.ctx(), state, &mut viewer);
             });
             painted = Frame {
                 names: painted_text(ui.ctx()),

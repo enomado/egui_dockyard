@@ -136,7 +136,8 @@ impl Scene {
                 DockArea::new(state)
                     .id(Id::new(DOCK_ID))
                     .style(style.clone())
-                    .show_inside(ui, &mut Viewer);
+                    .show_inside(ui, &mut Viewer)
+                    .apply(ui.ctx(), state, &mut Viewer);
             });
         });
         // No GPU backend here to apply them, and `TexturesDelta` panics if dropped unapplied.

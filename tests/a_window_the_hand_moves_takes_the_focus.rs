@@ -64,7 +64,8 @@ fn frame(ctx: &Context, state: &mut DockState<String>, id: Id, events: Vec<Event
             DockArea::new(state)
                 .id(id)
                 .style(Style::from_egui(ui.style().as_ref()))
-                .show_inside(ui, &mut Viewer);
+                .show_inside(ui, &mut Viewer)
+                .apply(ui.ctx(), state, &mut Viewer);
         });
     });
     // Headless harness, no GPU backend to hand the delta to.

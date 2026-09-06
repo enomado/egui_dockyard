@@ -145,7 +145,8 @@ fn run_frame_painting(
             reported = DockArea::new(state)
                 .id(id)
                 .style(style.clone())
-                .show_inside_with_response(ui, &mut Viewer)
+                .show_inside(ui, &mut Viewer)
+                .apply(ui.ctx(), state, &mut Viewer)
                 .events;
         });
     });
@@ -177,7 +178,8 @@ fn handle_paint(
             DockArea::new(state)
                 .id(id)
                 .style(style.clone())
-                .show_inside_with_response(ui, &mut Viewer);
+                .show_inside(ui, &mut Viewer)
+                .apply(ui.ctx(), state, &mut Viewer);
         });
     });
     output.textures_delta.clear();

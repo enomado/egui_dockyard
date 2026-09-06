@@ -147,10 +147,11 @@ impl eframe::App for MyApp {
             Viewer::new(ui.ctx(), &tabs)
         });
 
-        DockArea::new(&mut self.tree)
+        DockArea::new(&self.tree)
             .style(Style::from_egui(ui.style().as_ref()))
             .show_leaf_collapse_buttons(true)
             .collapse_sideways(true)
-            .show_inside(ui, viewer);
+            .show_inside(ui, viewer)
+            .apply(ui.ctx(), &mut self.tree, viewer);
     }
 }

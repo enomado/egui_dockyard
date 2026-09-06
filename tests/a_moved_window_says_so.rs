@@ -80,7 +80,8 @@ fn frame(
             held = DockArea::new(state)
                 .id(id)
                 .style(Style::from_egui(ui.style().as_ref()))
-                .show_inside_with_response(ui, &mut Viewer)
+                .show_inside(ui, &mut Viewer)
+                .apply(ui.ctx(), state, &mut Viewer)
                 .dragging;
         });
     });

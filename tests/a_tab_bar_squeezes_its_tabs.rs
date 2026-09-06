@@ -192,7 +192,8 @@ fn frames(ctx: &Context, state: &mut DockState<String>, style: &Style) -> Frame 
                     // close-all button is drawn as crossed diagonals too, and it was the second
                     // "close button" the first version of the ✕ oracle counted.
                     .show_leaf_close_all_buttons(false)
-                    .show_inside(ui, &mut Viewer);
+                    .show_inside(ui, &mut Viewer)
+                    .apply(ui.ctx(), state, &mut Viewer);
             });
             painted = Frame {
                 names: painted_text(ui.ctx()),

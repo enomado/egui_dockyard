@@ -18,11 +18,12 @@ mod window_ui;
 pub mod ids;
 
 pub use allowed_splits::AllowedSplits;
+pub use apply::DockDraw;
 pub use drag_and_drop::DragSource;
 use egui::{Id, Modifiers, emath::*};
 pub use events::{DockAreaResponse, DockEvent};
 pub use state::{DragInFlight, DragSubject, JunctionArms, WindowEdge};
-use tab_removal::TabRemoval;
+pub use tab_removal::{ForcedRemoval, TabRemoval};
 
 use crate::layout::DockLayout;
 use crate::{
@@ -31,9 +32,13 @@ use crate::{
 };
 
 /// Displays a [`DockState`] in `egui`.
+///
+/// The tree is borrowed **shared**: showing a dock does not edit it. What a frame wants changed
+/// it says as a [`DockMutation`], and [`DockDraw::apply`] — handed the tree mutably, after the
+/// frame — carries those out. See [`DockArea::show_inside`].
 pub struct DockArea<'tree, Tab> {
     id: Id,
-    dock_state: &'tree mut DockState<Tab>,
+    dock_state: &'tree DockState<Tab>,
     style: Option<Style>,
     show_add_popup: bool,
     show_add_buttons: bool,
@@ -122,7 +127,7 @@ pub struct DockArea<'tree, Tab> {
 // fixed-size stand-in for "however many parts that chain had". The epilogue reads the list by
 // reference, so nothing is cloned to apply it.
 #[derive(Debug, Clone)]
-pub(in crate::widgets::dock_area) enum DockMutation {
+pub enum DockMutation {
     /// Make a tab the active one in its leaf, remembering the previous active tab.
     ///
     /// Applied before `Remove`, which reproduces the present order: activation happens while
@@ -133,7 +138,9 @@ pub(in crate::widgets::dock_area) enum DockMutation {
     /// value rather than a toggle so that two requests for the same leaf in one frame cannot
     /// cancel each other out by ordering.
     SetLeafFold {
+        /// The leaf being folded or opened.
         path: NodePath,
+        /// What it should be afterwards.
         fold: Fold,
     },
     /// Put a whole split away behind one arrow, or bring it back — see
@@ -147,7 +154,9 @@ pub(in crate::widgets::dock_area) enum DockMutation {
     /// Costs the one frame described above, on the same grounds as `SetLeafCollapsed`: the arrow
     /// that asks is drawn on the very bar the answer changes.
     SetSplitStowed {
+        /// The split being put away or brought back.
         path: NodePath,
+        /// What it should be afterwards.
         stowed: bool,
     },
     /// Scroll position of a leaf's tab bar, in points.
@@ -159,7 +168,9 @@ pub(in crate::widgets::dock_area) enum DockMutation {
     /// already showed up one frame later — so moving it into the epilogue changes nothing a
     /// user can see.
     SetLeafScroll {
+        /// The leaf whose tab bar was scrolled.
         path: NodePath,
+        /// Where the strip of tabs now starts, in points.
         scroll: f32,
     },
     /// Where one boundary of a row sits, as a proportion of the row's length — see
@@ -171,7 +182,9 @@ pub(in crate::widgets::dock_area) enum DockMutation {
     /// frame's layout. Carries the target value, not a delta, so the clamp stays where it is
     /// computed (`nudge_boundary`) and two requests for one gap cannot compound.
     SetBoundary {
+        /// Which line of which row was moved.
         gap: GapPath,
+        /// Where it should sit, as a proportion of the row's length.
         at: f32,
     },
     /// Every weight of one row at once — see
@@ -192,13 +205,17 @@ pub(in crate::widgets::dock_area) enum DockMutation {
     /// carries a value: two of them in one frame must not compound, and the clamp stays where it
     /// was computed.
     SetShares {
+        /// The row whose weights these are.
         row: NodePath,
+        /// One weight per child, in the row's own order.
         shares: Vec<Share>,
     },
     /// Minimize or restore a floating window. Carries the target value, like
     /// [`SetLeafCollapsed`](Self::SetLeafCollapsed) and for the same reason.
     SetWindowMinimized {
+        /// The floating surface whose window this is.
         surface: SurfaceIndex,
+        /// What it should be afterwards.
         minimized: bool,
     },
     /// A floating window has been built this frame out of the one-shot requests recorded in
@@ -215,7 +232,9 @@ pub(in crate::widgets::dock_area) enum DockMutation {
     /// re-derived in the epilogue, because by then `SetLeafCollapsed` may have set the flag
     /// again for the very next frame, and clearing the height on that would lose it.
     WindowShown {
+        /// The floating surface that was built this frame.
         surface: SurfaceIndex,
+        /// Whether the height remembered from before it collapsed was read, and is spent.
         took_expanded_height: bool,
     },
     /// Regroup around a crossing, keeping every leaf where it is on screen — the structural edit
@@ -233,7 +252,9 @@ pub(in crate::widgets::dock_area) enum DockMutation {
         outer: GapPath,
         /// Which divider of each chain the crossing is made of.
         at: [usize; 2],
+        /// Where each chain's own dividers were on screen, along that chain's axis.
         bounds: [Vec<f32>; 2],
+        /// The one number from the other axis: where the crossing cut `outer`.
         stack_fraction: f32,
     },
     /// A hand let go of a tab over somewhere it may land — the drop.
@@ -260,10 +281,14 @@ pub(in crate::widgets::dock_area) enum DockMutation {
     /// documentation says holding one across a mutation is a bug, and `TabInsert::Insert` holds
     /// one.
     MoveTab {
+        /// What the hand was holding, as an identity rather than a path — see above.
         source: DragSource,
+        /// Where the overlay resolved the drop to, before the pass drew.
         destination: TabDestination,
     },
+    /// Take a tab, a leaf or a whole floating window out of the tree.
     Remove(TabRemoval),
+    /// Pull a tab out into a floating window of its own.
     Detach(TabPath),
     /// Move the focus to a leaf, because something pointed at it.
     ///
@@ -279,8 +304,12 @@ pub(in crate::widgets::dock_area) enum DockMutation {
 // Builder
 impl<'tree, Tab> DockArea<'tree, Tab> {
     /// Creates a new [`DockArea`] from the provided [`DockState`].
+    ///
+    /// Shared, not exclusive: drawing reads the tree. `&mut` at the call site still works — it
+    /// coerces — but nothing about the frame needs it, and holding the tree by shared reference
+    /// is what lets the same borrow of an application be handed to the [`TabViewer`] as well.
     #[inline(always)]
-    pub fn new(tree: &'tree mut DockState<Tab>) -> DockArea<'tree, Tab> {
+    pub fn new(tree: &'tree DockState<Tab>) -> DockArea<'tree, Tab> {
         Self {
             id: Id::new("egui_dockyard::DockArea"),
             dock_state: tree,

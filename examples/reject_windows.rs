@@ -118,9 +118,10 @@ impl Default for MyApp {
 impl eframe::App for MyApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let mut tab_viewer = TabViewer::default();
-        DockArea::new(&mut self.tree)
+        DockArea::new(&self.tree)
             .style(Style::from_egui(ui.style().as_ref()))
-            .show_inside(ui, &mut tab_viewer);
+            .show_inside(ui, &mut tab_viewer)
+            .apply(ui.ctx(), &mut self.tree, &mut tab_viewer);
 
         // The viewer only emits intents while the tree is borrowed for drawing. The owner
         // applies them afterwards, so a tab body never mutates its own dock entry mid-frame.

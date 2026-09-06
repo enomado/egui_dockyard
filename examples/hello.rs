@@ -608,7 +608,7 @@ impl eframe::App for MyApp {
             .get_or_insert(Style::from_egui(ui.style()))
             .clone();
 
-        DockArea::new(&mut self.tree)
+        let drawn = DockArea::new(&self.tree)
             .style(style)
             .show_close_buttons(self.context.show_close_buttons)
             .show_add_buttons(self.context.show_add_buttons)
@@ -622,6 +622,7 @@ impl eframe::App for MyApp {
             .secondary_button_on_modifier(self.context.secondary_button_on_modifier)
             .secondary_button_context_menu(self.context.secondary_button_context_menu)
             .show_inside(ui, &mut self.context);
+        drawn.apply(ui.ctx(), &mut self.tree, &mut self.context);
     }
 }
 

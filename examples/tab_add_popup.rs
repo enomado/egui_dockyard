@@ -136,16 +136,15 @@ impl Default for MyApp {
 impl eframe::App for MyApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let mut added_nodes = Vec::new();
-        DockArea::new(&mut self.dock_state)
+        let mut tab_viewer = TabViewer {
+            added_nodes: &mut added_nodes,
+        };
+        DockArea::new(&self.dock_state)
             .show_add_buttons(true)
             .show_add_popup(true)
             .style(Style::from_egui(ui.style().as_ref()))
-            .show_inside(
-                ui,
-                &mut TabViewer {
-                    added_nodes: &mut added_nodes,
-                },
-            );
+            .show_inside(ui, &mut tab_viewer)
+            .apply(ui.ctx(), &mut self.dock_state, &mut tab_viewer);
 
         added_nodes.drain(..).for_each(|request| {
             self.dock_state.set_focused_node_and_surface(request.path);

@@ -134,7 +134,8 @@ fn frame(ctx: &Context, state: &mut DockState<String>, id: Id, style: &Style) ->
             DockArea::new(state)
                 .id(id)
                 .style(style.clone())
-                .show_inside(ui, &mut Viewer);
+                .show_inside(ui, &mut Viewer)
+                .apply(ui.ctx(), state, &mut Viewer);
         });
         shapes = background_shapes(ui.ctx());
     });

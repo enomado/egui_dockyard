@@ -137,7 +137,8 @@ impl Sim {
                 held = DockArea::new(state)
                     .id(Id::new(DOCK_ID))
                     .style(Style::from_egui(ui.style().as_ref()))
-                    .show_inside_with_response(ui, &mut Viewer)
+                    .show_inside(ui, &mut Viewer)
+                    .apply(ui.ctx(), state, &mut Viewer)
                     .dragging
                     .map(|drag| drag.subject);
             });

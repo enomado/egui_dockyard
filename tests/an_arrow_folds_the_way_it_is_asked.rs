@@ -84,7 +84,8 @@ fn frame(
                 .style(style.clone())
                 .show_leaf_collapse_buttons(true)
                 .collapse_sideways(sideways)
-                .show_inside(ui, &mut Viewer);
+                .show_inside(ui, &mut Viewer)
+                .apply(ui.ctx(), state, &mut Viewer);
         });
     });
     output.textures_delta.clear();

@@ -246,7 +246,8 @@ fn shot_with_pointer(
                     // Off: the bar's own close-all button is two crossed diagonals as well, and it
                     // would be counted as a tab's ✕.
                     .show_leaf_close_all_buttons(false)
-                    .show_inside(ui, &mut Viewer);
+                    .show_inside(ui, &mut Viewer)
+                    .apply(ui.ctx(), state, &mut Viewer);
             });
             names = painted_text(ui.ctx());
             crosses = painted_diagonals(ui.ctx());

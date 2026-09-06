@@ -120,7 +120,8 @@ fn frame_with(
                 .style(style.clone())
                 .show_leaf_collapse_buttons(true)
                 .collapse_sideways(sideways)
-                .show_inside(ui, &mut viewer);
+                .show_inside(ui, &mut viewer)
+                .apply(ui.ctx(), state, &mut viewer);
         });
     });
     output.textures_delta.clear();

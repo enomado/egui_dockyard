@@ -32,7 +32,7 @@ use crate::{
 /// reads it.
 #[must_use = "a frame that is not applied makes no edit and stores no geometry: the next frame \
               would draw the tree as it was and find no rectangles for it"]
-pub(in crate::widgets::dock_area) struct DockDraw {
+pub struct DockDraw {
     /// The id the pass drew under, which is also where its geometry is kept.
     id: Id,
     style: Style,
@@ -80,7 +80,7 @@ impl DockDraw {
     /// The order of the two is not a detail: an edit can change the shape of the tree, so the map
     /// is trimmed and stored **after** the edits, or an out-of-frame reader would find a rectangle
     /// for a node that is gone — or none for a node that has just appeared.
-    pub(in crate::widgets::dock_area) fn apply<Tab>(
+    pub fn apply<Tab>(
         mut self,
         ctx: &Context,
         tree: &mut DockState<Tab>,

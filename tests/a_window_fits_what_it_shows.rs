@@ -113,7 +113,8 @@ fn frame_with(
                 .show_leaf_collapse_buttons(true)
                 .show_close_buttons(true)
                 .show_add_buttons(true)
-                .show_inside(ui, &mut Viewer);
+                .show_inside(ui, &mut Viewer)
+                .apply(ui.ctx(), state, &mut Viewer);
         });
         // Still inside the pass: the paint lists exist until `end_pass` drains them, and
         // draining is what loses the layer each shape was painted into.

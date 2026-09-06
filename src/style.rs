@@ -57,9 +57,10 @@ pub enum TabAddAlign {
 /// style.buttons.add_tab_align = TabAddAlign::Left;
 ///
 /// // Use the style with the `DockArea`.
-/// DockArea::new(&mut dock_state)
+/// DockArea::new(&dock_state)
 ///     .style(style)
-///     .show_inside(ui, &mut MyTabViewer);
+///     .show_inside(ui, &mut MyTabViewer)
+///     .apply(ui.ctx(), &mut dock_state, &mut MyTabViewer);
 /// # });
 /// # });
 /// #

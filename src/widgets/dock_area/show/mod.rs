@@ -4,7 +4,7 @@ use egui::{
 };
 
 use super::{
-    DockAreaResponse, DockMutation,
+    DockMutation,
     apply::DockDraw,
     drag_and_drop::{DragSource, DropAim, HoverData, overlay_layer, register_overlay_layer},
     events::DockEvent,
@@ -31,31 +31,28 @@ mod title;
 mod window_surface;
 
 impl<Tab> DockArea<'_, Tab> {
-    /// Shows the docking hierarchy inside a [`Ui`].
+    /// Shows the docking hierarchy inside a [`Ui`], and hands back what it asks of the tree.
     ///
-    /// See also [`show`](Self::show) and
-    /// [`show_inside_with_response`](Self::show_inside_with_response).
-    #[inline]
-    pub fn show_inside(self, ui: &mut Ui, tab_viewer: &mut impl TabViewer<Tab = Tab>) {
-        let _ = self.show_inside_with_response(ui, tab_viewer);
-    }
-
-    /// Same as [`show_inside`](Self::show_inside) but returns a
-    /// [`DockAreaResponse`] describing what changed during this render pass.
-    pub fn show_inside_with_response(
+    /// Nothing here edits the tree — it is borrowed shared for the whole pass, and every edit a
+    /// frame wants is a [`DockMutation`] on the returned [`DockDraw`]. Pass that to
+    /// [`DockDraw::apply`], which is where the tree is held mutably and the edits are made:
+    ///
+    /// ```ignore
+    /// let response = DockArea::new(&tree)
+    ///     .show_inside(ui, &mut tab_viewer)
+    ///     .apply(ui.ctx(), &mut tree, &mut tab_viewer);
+    /// ```
+    ///
+    /// The two halves are separate because they need the tree differently, and a caller that
+    /// keeps the tree inside the same value as the rest of its application cannot lend both at
+    /// once. Drawn and then applied, they can: the frame borrows the application shared, and only
+    /// the application itself does the editing, once the frame is over.
+    #[must_use = "a frame that is not applied makes no edit and stores no geometry: call `apply`"]
+    pub fn show_inside(
         mut self,
         ui: &mut Ui,
         tab_viewer: &mut impl TabViewer<Tab = Tab>,
-    ) -> DockAreaResponse {
-        let drawn = self.draw(ui, tab_viewer);
-        drawn.apply(ui.ctx(), self.dock_state, tab_viewer)
-    }
-
-    /// Draw one pass, and hand back what it asks of the tree.
-    ///
-    /// Nothing here edits the tree: every edit a frame wants is a [`DockMutation`] on the
-    /// returned [`DockDraw`], applied by [`DockDraw::apply`] once every surface has been visited.
-    fn draw(&mut self, ui: &mut Ui, tab_viewer: &mut impl TabViewer<Tab = Tab>) -> DockDraw {
+    ) -> DockDraw {
         self.style
             .get_or_insert(Style::from_egui(ui.style().as_ref()));
         self.window_bounds.get_or_insert(ui.ctx().content_rect());
@@ -1801,7 +1798,7 @@ fn split_rect(node_rect: Rect, pixels_per_point: f32) -> Rect {
 /// Deliberately not `Option<Rect>` per child or a builder: there is no half-cut row, and
 /// nothing here is allowed to be "left as it was".
 #[derive(Clone, Debug)]
-struct RowCut {
+pub(super) struct RowCut {
     /// Rectangles of the children, in [`DockArea::child_paths`] order.
     children: Vec<Rect>,
 
@@ -1903,7 +1900,8 @@ mod tests {
                         .style(style.clone())
                         .show_leaf_collapse_buttons(true)
                         .collapse_sideways(sideways)
-                        .show_inside(ui, &mut Viewer);
+                        .show_inside(ui, &mut Viewer)
+                        .apply(ui.ctx(), state, &mut Viewer);
                 });
             });
             output.textures_delta.clear();

@@ -23,7 +23,8 @@ use tab_removal::TabRemoval;
 
 use crate::layout::DockLayout;
 use crate::{
-    Fold, GapPath, NodePath, Share, Style, SurfaceIndex, TabIndex, TabPath, core::DockState,
+    Fold, GapPath, NodePath, Share, Style, SurfaceIndex, TabDestination, TabIndex, TabPath,
+    core::DockState,
 };
 
 /// Displays a [`DockState`] in `egui`.
@@ -231,6 +232,33 @@ pub(in crate::widgets::dock_area) enum DockMutation {
         at: [usize; 2],
         bounds: [Vec<f32>; 2],
         stack_fraction: f32,
+    },
+    /// A hand let go of a tab over somewhere it may land — the drop.
+    ///
+    /// The last edit drawing made to the tree by itself, and the only one that was settled
+    /// *before* any surface was drawn: the overlay resolves where a drop would go, and the move
+    /// used to happen right there, so the frame of the release already painted the new
+    /// arrangement. Queued like everything else now, which costs that frame — the release paints
+    /// the old arrangement and the tab arrives on the next repaint. Same accepted shift as
+    /// [`Activate`](Self::Activate); a drop is a release, and 16 ms after the hand has already
+    /// stopped is not a gesture anybody is still steering.
+    ///
+    /// # Why it is applied last, and why the source travels as an identity
+    ///
+    /// Every other request in the list was asked for by drawing, and drawing saw the tree
+    /// *without* this move. Applying the move first would rename what those requests named; so it
+    /// goes after all of them, and they land on the tree they were addressed against.
+    ///
+    /// That order costs the drop the same guarantee in return, which is why it carries a
+    /// [`DragSource`] — an identity — rather than the [`TabPath`] it resolved to before the pass:
+    /// a forced close or a leaf removal earlier in the list can take the tab, or the slot it was
+    /// aimed at, away in between. Both are re-checked when it is applied, and a drop whose subject
+    /// or destination is gone is not a drop. `TabIndex` is where this bites — its own
+    /// documentation says holding one across a mutation is a bug, and `TabInsert::Insert` holds
+    /// one.
+    MoveTab {
+        source: DragSource,
+        destination: TabDestination,
     },
     Remove(TabRemoval),
     Detach(TabPath),

@@ -20,7 +20,7 @@ use crate::layout::{DockLayout, SideStrip};
 use crate::tab_viewer::OnCloseResponse;
 use crate::{
     AllowedSplits, DockArea, Fold, Node, OverlayType, Style, SurfaceIndex, TabDestination,
-    TabViewer,
+    TabInsert, TabViewer,
     utils::{expand_to_pixel, fade_dock_style, map_to_pixel},
 };
 use crate::{GapIndex, GapPath, NodePath, RowGap};
@@ -191,21 +191,17 @@ impl<Tab> DockArea<'_, Tab> {
             if ui.input(|i| i.pointer.primary_released())
                 && let Some(destination) = tab_dst
             {
-                // Resolved against the tree as it stands, not as it stood when the drag
-                // started: the leaf may have been edited in between, and the drop has to
-                // move the tab the hand grabbed rather than whatever now sits at its old
-                // index. `None` cannot happen — a source that stopped resolving ended the
-                // drag above — so it is an assertion, not a branch.
-                let source = carried
-                    .expect("the overlay only resolves a destination for a carried tab")
-                    .resolve(self.dock_state)
-                    .expect("a drag whose tab is gone was already cancelled");
-                // A drop that resolves to the tab's current slot changes nothing; only a
-                // move that reports a real mutation counts as a finalised event (same rule
-                // as the focus push at the end of this pass).
-                if self.dock_state.move_tab(source, destination) {
-                    self.events.push(DockEvent::LayoutCommitted);
-                }
+                // Queued, not moved: this is the one edit the pass used to make to the tree
+                // before drawing it, and the tree is read-only from here to the epilogue like
+                // everything else. What that costs, and why the request carries the drag's
+                // *identity* rather than the path it resolves to right now, is on
+                // `DockMutation::MoveTab`.
+                let source =
+                    carried.expect("the overlay only resolves a destination for a carried tab");
+                self.mutations.push(DockMutation::MoveTab {
+                    source,
+                    destination,
+                });
             }
         }
 
@@ -285,6 +281,7 @@ impl<Tab> DockArea<'_, Tab> {
             | DockMutation::SetWindowMinimized { .. }
             | DockMutation::WindowShown { .. }
             | DockMutation::TransposeCross { .. }
+            | DockMutation::MoveTab { .. }
             | DockMutation::Remove(_)
             | DockMutation::Detach(_) => None,
         });
@@ -413,7 +410,10 @@ impl<Tab> DockArea<'_, Tab> {
                         .expect("the window was drawn this frame")
                         .requests_honoured(took_expanded_height);
                 }
-                DockMutation::Remove(_) | DockMutation::Detach(_) | DockMutation::Focus(_) => (),
+                DockMutation::MoveTab { .. }
+                | DockMutation::Remove(_)
+                | DockMutation::Detach(_)
+                | DockMutation::Focus(_) => (),
             }
         }
 
@@ -503,6 +503,32 @@ impl<Tab> DockArea<'_, Tab> {
             self.events.push(DockEvent::LayoutCommitted);
         }
 
+        // The drop, after everything drawing asked for: see `DockMutation::MoveTab` for why this
+        // order and not the other one, and why the subject is re-resolved here.
+        for mutation in mutations {
+            let DockMutation::MoveTab {
+                source,
+                destination,
+            } = *mutation
+            else {
+                continue;
+            };
+            // A drag whose tab has left the tree was cancelled before the pass began — but the
+            // pass itself can also have taken it, by a forced close asked for while drawing.
+            let Some(source) = source.resolve(self.dock_state) else {
+                continue;
+            };
+            if !self.destination_is_live(destination) {
+                continue;
+            }
+            // A drop that resolves to the tab's current slot changes nothing; only a move that
+            // reports a real mutation counts as a finalised event (same rule as the focus push
+            // below).
+            if self.dock_state.move_tab(source, destination) {
+                self.events.push(DockEvent::LayoutCommitted);
+            }
+        }
+
         if let Some(focused) = new_focused {
             // `new_focused` is set unconditionally on any click within a leaf
             // body and on tab-title clicks, even when the leaf is already
@@ -514,6 +540,30 @@ impl<Tab> DockArea<'_, Tab> {
             if !already_focused {
                 self.events.push(DockEvent::LayoutCommitted);
             }
+        }
+    }
+
+    /// Whether a destination settled before this pass drew still names somewhere to drop onto.
+    ///
+    /// A destination is a *path*, and the requests applied ahead of the drop can have taken what
+    /// it names away — or, for [`TabInsert::Insert`], shortened the bar the slot was counted in.
+    /// Asked once, here, rather than left to [`DockState::move_tab`], which indexes on the
+    /// assumption that whoever called it aimed at a tree that still stands.
+    fn destination_is_live(&self, destination: TabDestination) -> bool {
+        match destination {
+            // Made by the drop itself, so there is nothing for it to outlive.
+            TabDestination::Window(_) => true,
+            TabDestination::EmptySurface(surface) => self.dock_state.is_surface_valid(surface),
+            TabDestination::Node(path, insert) => match insert {
+                TabInsert::Insert(index) => self
+                    .dock_state
+                    .leaf(path)
+                    // `<=`, not `<`: the far edge of the bar is a slot like any other, and a
+                    // removal that shortens the bar to exactly the aimed-at index leaves the
+                    // drop meaning "at the end", which is where the hand was pointing.
+                    .is_ok_and(|leaf| index.0 <= leaf.len()),
+                TabInsert::Append | TabInsert::Split(_) => self.dock_state.node(path).is_ok(),
+            },
         }
     }
 

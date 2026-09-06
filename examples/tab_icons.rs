@@ -152,6 +152,6 @@ impl eframe::App for MyApp {
             .show_leaf_collapse_buttons(true)
             .collapse_sideways(true)
             .show_inside(ui, viewer)
-            .apply(ui.ctx(), &mut self.tree, viewer);
+            .apply(ui.ctx(), &mut self.tree);
     }
 }

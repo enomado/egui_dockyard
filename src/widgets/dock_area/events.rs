@@ -76,10 +76,21 @@ impl DockEvent {
 /// "did anything change at all?" and "is there a finalised change worth
 /// persisting?".
 #[non_exhaustive]
-#[derive(Clone, Debug, Default)]
-pub struct DockAreaResponse {
+#[derive(Clone, Debug)]
+pub struct DockAreaResponse<Tab> {
     /// Events emitted during this frame, in the order they occurred.
     pub events: Vec<DockEvent>,
+
+    /// The tabs this frame actually took out of the tree, in the order they were taken.
+    ///
+    /// The dock hands them over rather than announcing them: a closed tab belongs to nobody
+    /// once its leaf has let go, and an application that keeps anything alongside a tab — a
+    /// view state keyed by it, an edit it was the editor of — has here both the notice and the
+    /// tab itself to key off. This is what a close callback used to be for, without the
+    /// callback: it reports what *happened*, so a close that was asked for and then dropped
+    /// (vetoed while settling, or aimed at a tab another request had already taken) does not
+    /// appear.
+    pub closed: Vec<Tab>,
 
     /// What the dock's hand was holding when the pass ended — one gesture, naming its subject,
     /// or `None` if nothing is being dragged.
@@ -95,7 +106,19 @@ pub struct DockAreaResponse {
     pub dragging: Option<DragInFlight>,
 }
 
-impl DockAreaResponse {
+impl<Tab> Default for DockAreaResponse<Tab> {
+    // Derived `Default` would ask `Tab: Default`, which a tab has no reason to be: the two
+    // fields are an empty list each.
+    fn default() -> Self {
+        Self {
+            events: Vec::new(),
+            closed: Vec::new(),
+            dragging: None,
+        }
+    }
+}
+
+impl<Tab> DockAreaResponse<Tab> {
     /// `true` if any layout mutation happened this frame, including
     /// in-progress separator drag. Layout state has changed visually but
     /// should generally not be persisted on this signal alone.

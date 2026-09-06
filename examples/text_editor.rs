@@ -85,6 +85,6 @@ impl eframe::App for MyApp {
         let drawn = DockArea::new(&self.tree)
             .style(Style::from_egui(ui.style().as_ref()))
             .show_inside(ui, &mut self.buffers);
-        drawn.apply(ui.ctx(), &mut self.tree, &mut self.buffers);
+        drawn.apply(ui.ctx(), &mut self.tree);
     }
 }

@@ -144,7 +144,7 @@ impl eframe::App for MyApp {
             .show_add_popup(true)
             .style(Style::from_egui(ui.style().as_ref()))
             .show_inside(ui, &mut tab_viewer)
-            .apply(ui.ctx(), &mut self.dock_state, &mut tab_viewer);
+            .apply(ui.ctx(), &mut self.dock_state);
 
         added_nodes.drain(..).for_each(|request| {
             self.dock_state.set_focused_node_and_surface(request.path);

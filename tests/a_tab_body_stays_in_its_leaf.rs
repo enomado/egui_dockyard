@@ -128,7 +128,7 @@ fn frame_with(
                 .id(id)
                 .style(style.clone())
                 .show_inside(ui, &mut Viewer)
-                .apply(ui.ctx(), state, &mut Viewer);
+                .apply(ui.ctx(), state);
         });
         // Still inside the pass: the paint lists exist until `end_pass` drains them, and draining
         // is what loses the layer each shape was painted into.

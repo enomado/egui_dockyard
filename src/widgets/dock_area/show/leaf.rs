@@ -18,7 +18,6 @@ use crate::core::fit::{
 use crate::dock_area::ids::tab_widget_id;
 use crate::dock_area::tab_removal::{ForcedRemoval, TabRemoval};
 use crate::layout::SideStrip;
-use crate::tab_viewer::OnCloseResponse;
 use crate::{
     DockArea, Fold, Style, SurfaceIndex, TabAddAlign, TabIndex, TabStyle, TabViewer,
     dock_area::{
@@ -161,10 +160,11 @@ impl<Tab> DockArea<'_, Tab> {
             .filter_map(|(tab_index, tab)| tab_viewer.force_close(tab).then_some(tab_index))
             .collect();
         for tab_index in forced {
-            self.mutations.push(DockMutation::Remove(TabRemoval::Tab(
-                (path, tab_index).into(),
-                ForcedRemoval(true),
-            )));
+            self.mutations.push(DockMutation::Remove(TabRemoval::Tab {
+                path: (path, tab_index).into(),
+                forced: ForcedRemoval(true),
+                successor: None,
+            }));
         }
     }
 
@@ -615,7 +615,6 @@ impl<Tab> DockArea<'_, Tab> {
                         let leaf = self.dock_state[path]
                             .get_leaf()
                             .expect("This node must be a leaf");
-                        let already_active = leaf.is_active(tab_index);
                         let tab = &leaf[tab_index];
 
                         tab_viewer.context_menu(ui, tab, path);
@@ -628,36 +627,26 @@ impl<Tab> DockArea<'_, Tab> {
                             ui.close();
                         }
                         if show_close_button && ui.add(close_button).clicked() {
-                            match tab_viewer.on_close(tab) {
-                                OnCloseResponse::Close => {
-                                    self.mutations.push(DockMutation::Remove(TabRemoval::Tab(
-                                        (path, tab_index).into(),
-                                        ForcedRemoval(false),
-                                    )))
-                                }
-                                OnCloseResponse::Focus => {
-                                    // Only count as a finalised event if `active` actually
-                                    // changes; both the epilogue's activation and its focus
-                                    // push are guarded the same way, so a no-op
-                                    // close-on-already-active-tab emits nothing.
-                                    if !already_active {
-                                        self.mutations
-                                            .push(DockMutation::Activate((path, tab_index).into()));
-                                    }
-                                    self.mutations.push(DockMutation::Focus(path));
-                                }
-                                OnCloseResponse::Ignore => (),
-                            }
+                            // Asked for exactly the way the close button and the middle click
+                            // ask, and answered in the same one place afterwards. It used to
+                            // consult the application here *as well*, which meant a close from
+                            // this menu asked twice for the same tab.
+                            self.mutations.push(DockMutation::Remove(TabRemoval::Tab {
+                                path: (path, tab_index).into(),
+                                forced: ForcedRemoval(false),
+                                successor: None,
+                            }));
                             ui.close();
                         }
                     });
                 }
 
                 if close_clicked {
-                    self.mutations.push(DockMutation::Remove(TabRemoval::Tab(
-                        (path, tab_index).into(),
-                        ForcedRemoval(false),
-                    )));
+                    self.mutations.push(DockMutation::Remove(TabRemoval::Tab {
+                        path: (path, tab_index).into(),
+                        forced: ForcedRemoval(false),
+                        successor: None,
+                    }));
                 }
 
                 if let Some(pos) = state.last_hover_pos {
@@ -717,10 +706,11 @@ impl<Tab> DockArea<'_, Tab> {
 
             if self.show_close_buttons && tab_viewer.is_closeable(tab) && response.middle_clicked()
             {
-                self.mutations.push(DockMutation::Remove(TabRemoval::Tab(
-                    (path, tab_index).into(),
-                    ForcedRemoval(false),
-                )));
+                self.mutations.push(DockMutation::Remove(TabRemoval::Tab {
+                    path: (path, tab_index).into(),
+                    forced: ForcedRemoval(false),
+                    successor: None,
+                }));
             }
         }
 

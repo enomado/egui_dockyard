@@ -69,7 +69,7 @@
 //!         DockArea::new(&self.dock_state)
 //!             .style(Style::from_egui(ui.style().as_ref()))
 //!             .show_inside(ui, &mut MyTabViewer)
-//!             .apply(ui.ctx(), &mut self.dock_state, &mut MyTabViewer);
+//!             .apply(ui.ctx(), &mut self.dock_state);
 //!     }
 //! }
 //!
@@ -115,7 +115,7 @@
 //! DockArea::new(&dock_state)
 //!     .style(style)
 //!     .show_inside(ui, &mut MyTabViewer)
-//!     .apply(ui.ctx(), &mut dock_state, &mut MyTabViewer);
+//!     .apply(ui.ctx(), &mut dock_state);
 //! # });
 //! # });
 //! #
@@ -291,8 +291,8 @@ pub use crate::widgets::dock_area::ids::{
     drag_hover_node, drag_in_flight, dragged_tab, tab_widget_id,
 };
 pub use crate::widgets::dock_area::{
-    AllowedSplits, DockArea, DockDraw, DockMutation, DragInFlight, DragSource, DragSubject,
-    ForcedRemoval, JunctionArms, TabRemoval, WindowEdge,
+    AllowedSplits, CloseVerdict, DockArea, DockDraw, DockMutation, DragInFlight, DragSource,
+    DragSubject, ForcedRemoval, JunctionArms, TabRemoval, WindowEdge,
 };
 pub use crate::widgets::tab_viewer::TabViewer;
 pub use crate::widgets::{dock_area, tab_viewer};

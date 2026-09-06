@@ -23,7 +23,7 @@ pub use drag_and_drop::DragSource;
 use egui::{Id, Modifiers, emath::*};
 pub use events::{DockAreaResponse, DockEvent};
 pub use state::{DragInFlight, DragSubject, JunctionArms, WindowEdge};
-pub use tab_removal::{ForcedRemoval, TabRemoval};
+pub use tab_removal::{CloseVerdict, ForcedRemoval, TabRemoval};
 
 use crate::layout::DockLayout;
 use crate::{

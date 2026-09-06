@@ -10,12 +10,12 @@ use egui::{Context, Id, Pos2, Rect, Vec2};
 
 use super::show::Geometry;
 use super::state::DragInFlight;
-use super::tab_removal::{ForcedRemoval, TabRemoval};
+use super::tab_removal::{CloseVerdict, TabRemoval};
 use super::{DockAreaResponse, DockEvent, DockMutation};
 use crate::layout::DockLayout;
-use crate::tab_viewer::OnCloseResponse;
 use crate::{
-    NodePath, RowGap, Style, SurfaceIndex, TabDestination, TabInsert, TabViewer, core::DockState,
+    Node, NodePath, RowGap, Style, SurfaceIndex, TabDestination, TabIndex, TabInsert,
+    core::DockState,
 };
 
 /// One drawn frame of a [`DockArea`](super::DockArea), before it has been put on the tree.
@@ -75,19 +75,72 @@ impl DockDraw {
         }
     }
 
+    /// Have the application answer the closes this frame asked for, before any of them is made.
+    ///
+    /// This is the whole of what a close callback used to do, moved to where the application can
+    /// still be asked: while the tree is only being read. `decide` sees every close the pass
+    /// requested, in the order it was requested, and says what becomes of it — carried out (with
+    /// or without a named successor), turned into a focus, or dropped. A frame that is never
+    /// settled closes everything it was asked to, letting the dock's focus history choose the
+    /// successor, which is what it did before an application could answer at all.
+    ///
+    /// Answering is not the same question as [`TabViewer::is_closeable`](crate::TabViewer::is_closeable):
+    /// that one is asked while the bar is drawn and decides what is *shown* (whether the tab has
+    /// a close button at all), and it cannot be asked here, where a request already exists.
+    ///
+    /// `decide` is handed the request and nothing else on purpose — the tree it addresses is the
+    /// caller's own and is untouched until [`apply`](Self::apply), so looking a tab up in it is
+    /// the caller's to do, with whatever else it needs in hand.
+    ///
+    /// ```
+    /// # use egui_dockyard::{CloseVerdict, DockDraw, TabRemoval};
+    /// # fn settle(draw: &mut DockDraw, pinned: impl Fn(egui_dockyard::TabPath) -> bool) {
+    /// draw.settle_closes(|removal| match removal {
+    ///     TabRemoval::Tab { path, .. } if pinned(path) => CloseVerdict::Focus,
+    ///     _ => CloseVerdict::Close { successor: None },
+    /// });
+    /// # }
+    /// ```
+    pub fn settle_closes(&mut self, mut decide: impl FnMut(TabRemoval) -> CloseVerdict) {
+        let asked = std::mem::take(&mut self.mutations);
+        let mut settled = Vec::with_capacity(asked.len());
+        for mutation in asked {
+            let DockMutation::Remove(removal) = mutation else {
+                settled.push(mutation);
+                continue;
+            };
+            match decide(removal) {
+                CloseVerdict::Close { successor } => {
+                    settled.push(DockMutation::Remove(removal.with_successor(successor)));
+                }
+                // Only a single tab can be landed on instead of closed; a leaf or a window has
+                // no one tab for the focus to go to, so the request is simply dropped — which
+                // is what refusing to close it means.
+                CloseVerdict::Focus => {
+                    if let TabRemoval::Tab { path, .. } = removal {
+                        settled.push(DockMutation::Activate(path));
+                        settled.push(DockMutation::Focus(path.node_path()));
+                    }
+                }
+                CloseVerdict::Ignore => (),
+            }
+        }
+        self.mutations = settled;
+    }
+
     /// Make the edits this frame asked for, and publish the geometry it measured.
     ///
     /// The order of the two is not a detail: an edit can change the shape of the tree, so the map
     /// is trimmed and stored **after** the edits, or an out-of-frame reader would find a rectangle
     /// for a node that is gone — or none for a node that has just appeared.
-    pub fn apply<Tab>(
-        mut self,
-        ctx: &Context,
-        tree: &mut DockState<Tab>,
-        tab_viewer: &mut impl TabViewer<Tab = Tab>,
-    ) -> DockAreaResponse {
+    ///
+    /// Nothing is asked of the application here: this is the one moment the tree is held mutably,
+    /// so there is nobody left to ask. Whatever the application wanted a say in was said while
+    /// drawing or in [`settle_closes`](Self::settle_closes); what it wants to *know* comes back
+    /// in the response.
+    pub fn apply<Tab>(mut self, ctx: &Context, tree: &mut DockState<Tab>) -> DockAreaResponse<Tab> {
         let mutations = std::mem::take(&mut self.mutations);
-        self.apply_mutations(&mutations, tree, tab_viewer);
+        let closed = self.apply_mutations(&mutations, tree);
 
         // Drop geometry of nodes that this pass removed (closed tabs, collapsed splits)
         // before publishing, so out-of-frame readers never see a rectangle for a node
@@ -96,6 +149,7 @@ impl DockDraw {
         std::mem::take(&mut self.layout).store(ctx, self.id);
         DockAreaResponse {
             events: self.events,
+            closed,
             dragging: self.dragging,
         }
     }
@@ -108,9 +162,9 @@ impl DockDraw {
         &mut self,
         mutations: &[DockMutation],
         tree: &mut DockState<Tab>,
-        tab_viewer: &mut impl TabViewer<Tab = Tab>,
-    ) {
-        let mut new_focused = mutations.iter().rev().find_map(|mutation| match mutation {
+    ) -> Vec<Tab> {
+        let mut closed = Vec::new();
+        let new_focused = mutations.iter().rev().find_map(|mutation| match mutation {
             DockMutation::Focus(path) => Some(*path),
             DockMutation::Activate(_)
             | DockMutation::SetLeafFold { .. }
@@ -259,64 +313,28 @@ impl DockDraw {
                 continue;
             };
             match removal {
-                TabRemoval::Tab(path, ForcedRemoval(is_forced)) => {
-                    // Who takes the focus is the application's call when it wants it; asked
-                    // only for the tab that has it, since closing any other moves nothing.
-                    // The leaf is handed over as it stands now — the removal is next.
-                    let successor = {
-                        let leaf = tree.leaf(path.node_path()).unwrap();
-                        leaf.is_active(path.tab)
-                            .then(|| tab_viewer.successor_on_close(leaf, path.tab))
-                            .flatten()
-                    };
-                    if is_forced {
-                        tree.remove_tab_choosing(path, successor);
+                TabRemoval::Tab {
+                    path, successor, ..
+                } => {
+                    // A removal that finds nothing — its tab taken by an earlier request in the
+                    // same frame — reports nothing closed and commits nothing.
+                    if let Some(tab) = tree.remove_tab_choosing(path, successor) {
+                        closed.push(tab);
                         self.events.push(DockEvent::LayoutCommitted);
-                    } else {
-                        let leaf = &mut tree.leaf_mut(path.node_path()).unwrap();
-                        match tab_viewer.on_close(&leaf[path.tab]) {
-                            OnCloseResponse::Close => {
-                                tree.remove_tab_choosing(path, successor);
-                                self.events.push(DockEvent::LayoutCommitted);
-                            }
-                            OnCloseResponse::Focus => {
-                                leaf.activate_tab_remembering(path.tab);
-                                new_focused = Some(path.node_path());
-                                self.events.push(DockEvent::LayoutCommitted);
-                            }
-                            OnCloseResponse::Ignore => {
-                                // no-op
-                            }
-                        }
                     }
                 }
                 TabRemoval::Node(path) => {
-                    let mut all_tabs_are_closable = true;
-                    for tab in tree[path].iter_tabs_mut() {
-                        if !(tab_viewer.is_closeable(tab)
-                            && matches!(tab_viewer.on_close(tab), OnCloseResponse::Close))
-                        {
-                            all_tabs_are_closable = false;
-                        }
-                    }
-                    if all_tabs_are_closable {
-                        tree.remove_leaf(path);
-                        self.events.push(DockEvent::LayoutCommitted);
-                    }
+                    // Emptied before it is unlinked, so its tabs travel out to the application
+                    // rather than being dropped inside the tree.
+                    closed.extend(drain_tabs(&mut tree[path]));
+                    tree.remove_leaf(path);
+                    self.events.push(DockEvent::LayoutCommitted);
                 }
                 TabRemoval::Window(window) => {
-                    let mut all_tabs_are_closable = true;
-                    for node in tree[SurfaceIndex::Window(window)].iter_mut() {
-                        for tab in node.iter_tabs_mut() {
-                            if !(tab_viewer.is_closeable(tab)
-                                && matches!(tab_viewer.on_close(tab), OnCloseResponse::Close))
-                            {
-                                all_tabs_are_closable = false;
-                            }
+                    if let Some((mut surface, _state)) = tree.remove_window(window) {
+                        for node in surface.iter_mut() {
+                            closed.extend(drain_tabs(node));
                         }
-                    }
-                    if all_tabs_are_closable {
-                        tree.remove_window(window);
                         self.events.push(DockEvent::LayoutCommitted);
                     }
                 }
@@ -378,6 +396,8 @@ impl DockDraw {
                 self.events.push(DockEvent::LayoutCommitted);
             }
         }
+
+        closed
     }
 
     /// Bring the geometry of `path`'s children back in step with the tree as it now stands.
@@ -455,6 +475,40 @@ impl DockDraw {
             }
         }
         self.events.push(DockEvent::LayoutCommitted);
+    }
+}
+
+/// Take every tab out of `node`, in the order it held them.
+///
+/// A leaf on its way out still owns its tabs, and dropping it would drop them with it. They are
+/// taken from the front so that the application is told about them the way it saw them.
+fn drain_tabs<Tab>(node: &mut Node<Tab>) -> Vec<Tab> {
+    let mut taken = Vec::with_capacity(node.tabs_count());
+    while let Some(tab) = node.remove_tab(TabIndex(0)) {
+        taken.push(tab);
+    }
+    taken
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drain_tabs;
+    use crate::Node;
+
+    /// A leaf on its way out hands its tabs over whole, and in the order it held them.
+    ///
+    /// Gated here rather than through a scene because no test presses the button that closes a
+    /// whole leaf: the arm in `apply_mutations` that calls this is covered by compilation only.
+    #[test]
+    fn a_drained_node_gives_up_every_tab_in_order() {
+        let mut node = Node::leaf_with(vec!["A".to_owned(), "B".to_owned(), "C".to_owned()]);
+
+        assert_eq!(drain_tabs(&mut node), ["A", "B", "C"]);
+        assert_eq!(node.tabs_count(), 0, "and keeps none of them");
+        assert!(
+            drain_tabs(&mut node).is_empty(),
+            "draining an emptied node asks for nothing more"
+        );
     }
 }
 

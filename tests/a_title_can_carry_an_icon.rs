@@ -253,7 +253,7 @@ fn frames_with(
                     .show_leaf_collapse_buttons(true)
                     .collapse_sideways(true)
                     .show_inside(ui, &mut viewer)
-                    .apply(ui.ctx(), state, &mut viewer);
+                    .apply(ui.ctx(), state);
             });
             painted = Frame {
                 names: painted_text(ui.ctx()),

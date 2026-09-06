@@ -137,7 +137,7 @@ impl Scene {
                     .id(Id::new(DOCK_ID))
                     .style(style.clone())
                     .show_inside(ui, &mut Viewer)
-                    .apply(ui.ctx(), state, &mut Viewer);
+                    .apply(ui.ctx(), state);
             });
         });
         // No GPU backend here to apply them, and `TexturesDelta` panics if dropped unapplied.

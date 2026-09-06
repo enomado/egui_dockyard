@@ -193,7 +193,7 @@ fn frames(ctx: &Context, state: &mut DockState<String>, style: &Style) -> Frame 
                     // "close button" the first version of the ✕ oracle counted.
                     .show_leaf_close_all_buttons(false)
                     .show_inside(ui, &mut Viewer)
-                    .apply(ui.ctx(), state, &mut Viewer);
+                    .apply(ui.ctx(), state);
             });
             painted = Frame {
                 names: painted_text(ui.ctx()),

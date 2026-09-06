@@ -1,7 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
 use eframe::{NativeOptions, egui};
-use egui_dockyard::tab_viewer::OnCloseResponse;
 use egui_dockyard::{DockArea, DockState, Style};
 
 fn main() -> eframe::Result<()> {
@@ -24,11 +23,6 @@ impl egui_dockyard::TabViewer for TabViewer {
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &Self::Tab) {
         ui.label(format!("Content of {tab}"));
-    }
-
-    fn on_close(&mut self, _tab: &Self::Tab) -> OnCloseResponse {
-        println!("Closed tab: {_tab}");
-        OnCloseResponse::Close
     }
 }
 
@@ -61,6 +55,6 @@ impl eframe::App for MyApp {
         DockArea::new(&self.tree)
             .style(Style::from_egui(ui.style().as_ref()))
             .show_inside(ui, &mut TabViewer {})
-            .apply(ui.ctx(), &mut self.tree, &mut TabViewer {});
+            .apply(ui.ctx(), &mut self.tree);
     }
 }

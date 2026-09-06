@@ -5,11 +5,15 @@
 //!
 //! Two rules, in order:
 //!
-//! 1. [`TabViewer::successor_on_close`], if the application answers it. Only the application
-//!    knows when the answer is not a matter of where the user has been — a tab that owns the
-//!    one being closed, a pinned tab, an order of its own.
+//! 1. the successor the application names while it settles the frame's closes
+//!    ([`DockDraw::settle_closes`]), if it names one. Only the application knows when the
+//!    answer is not a matter of where the user has been — a tab that owns the one being
+//!    closed, a pinned tab, an order of its own.
 //! 2. otherwise the leaf's **focus history**: the tab last left, then the one before that,
 //!    and the left neighbour only once the history is exhausted.
+//!
+//! The application is asked between the two halves of the frame, not from inside the draw:
+//! by the time the removal is made the tree is held mutably and there is nobody left to ask.
 //!
 //! # Why the history is a stack and why that needs a test
 //!
@@ -28,7 +32,7 @@ use egui::{
     Atoms, CentralPanel, Context, Event, Id, PointerButton, Pos2, RawInput, Rect, Ui, Vec2,
 };
 use egui_dockyard::{
-    DockArea, DockState, LeafNode, NodePath, Style, SurfaceIndex, TabId, TabIndex, TabViewer,
+    CloseVerdict, DockArea, DockState, NodePath, Style, SurfaceIndex, TabRemoval, TabViewer,
     tab_widget_id,
 };
 
@@ -50,17 +54,6 @@ impl TabViewer for Viewer {
 
     fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {
         ui.label(tab.as_str());
-    }
-
-    fn successor_on_close(
-        &mut self,
-        leaf: &LeafNode<Self::Tab>,
-        closing: TabIndex,
-    ) -> Option<TabId> {
-        let pinned = self.pinned.as_ref()?;
-        leaf.iter_tabs_indexed()
-            .find(|(index, tab)| *index != closing && *tab == pinned)
-            .and_then(|(index, _)| leaf.tab_id_at(index))
     }
 }
 
@@ -94,14 +87,35 @@ impl Sim {
 
         let state = &mut self.state;
         let viewer = &mut self.viewer;
+        let pinned = viewer.pinned.clone();
         let mut output = self.ctx.run_ui(input, |ctx| {
             CentralPanel::default().show(ctx, |ui| {
-                DockArea::new(state)
+                let mut drawn = DockArea::new(state)
                     .id(Id::new(DOCK_ID))
                     .style(Style::from_egui(ui.style().as_ref()))
                     .show_close_buttons(true)
-                    .show_inside(ui, viewer)
-                    .apply(ui.ctx(), state, viewer);
+                    .show_inside(ui, viewer);
+                // An application that insists on a landing tab says so here — between drawing
+                // and applying, which is the last moment anything can be asked. One that does
+                // not insist never settles at all, and gets the dock's history.
+                if let Some(pinned) = pinned.as_deref() {
+                    drawn.settle_closes(|removal| CloseVerdict::Close {
+                        successor: match removal {
+                            TabRemoval::Tab { path, .. } => {
+                                let leaf = state.leaf(path.node_path()).ok();
+                                leaf.and_then(|leaf| {
+                                    leaf.iter_tabs_indexed()
+                                        .find(|(index, tab)| {
+                                            *index != path.tab && tab.as_str() == pinned
+                                        })
+                                        .and_then(|(index, _)| leaf.tab_id_at(index))
+                                })
+                            }
+                            TabRemoval::Node(_) | TabRemoval::Window(_) => None,
+                        },
+                    });
+                }
+                drawn.apply(ui.ctx(), state);
             });
         });
         output.textures_delta.clear();
@@ -238,7 +252,7 @@ fn closing_an_inactive_tab_leaves_the_focus_where_it_was() {
     assert_eq!(sim.active(), "B");
 }
 
-/// The application overrules the history, and is asked only about the tab that has the focus.
+/// The application overrules the history when it names a successor.
 #[test]
 fn the_application_can_name_the_successor() {
     let mut sim = Sim::new(&["A", "B", "Pinned", "D"]);
@@ -262,10 +276,14 @@ fn the_application_can_name_the_successor() {
     assert_eq!(sim.active(), "B");
 }
 
-/// A viewer that answers is still not asked about a tab that is not active, so its answer
-/// cannot move a focus that was not going anywhere.
+/// An answer given about a tab nobody is looking at moves nothing.
+///
+/// Settling sees *every* close a frame asked for, active tab or not — the application no
+/// longer gets a callback that fires only for the interesting one. So the guarantee moved to
+/// where the removal is made: a successor is consulted only when the tab going out is the one
+/// with the focus, and an answer about any other is ignored rather than obeyed.
 #[test]
-fn the_application_is_not_asked_about_a_tab_nobody_is_looking_at() {
+fn an_answer_about_a_tab_nobody_is_looking_at_moves_nothing() {
     let mut sim = Sim::new(&["A", "B", "Pinned", "D"]);
     sim.viewer.pinned = Some("Pinned".to_owned());
 

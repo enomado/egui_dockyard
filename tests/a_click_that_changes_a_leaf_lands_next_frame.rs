@@ -79,7 +79,7 @@ impl Sim {
                     .style(Style::from_egui(ui.style().as_ref()))
                     .show_leaf_collapse_buttons(true)
                     .show_inside(ui, viewer)
-                    .apply(ui.ctx(), state, viewer);
+                    .apply(ui.ctx(), state);
             });
         });
         output.textures_delta.clear();

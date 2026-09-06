@@ -150,7 +150,7 @@ fn frame(ctx: &Context, state: &mut DockState<String>, style: &Style, events: Ve
                 .show_leaf_collapse_buttons(true)
                 .collapse_sideways(true)
                 .show_inside(ui, &mut Viewer)
-                .apply(ui.ctx(), state, &mut Viewer);
+                .apply(ui.ctx(), state);
         });
         painted = Frame {
             names: painted_text(ui.ctx()),

@@ -76,7 +76,7 @@ fn frames(ctx: &Context, state: &mut DockState<String>, style: &Style, sideways:
                     .show_leaf_collapse_buttons(true)
                     .collapse_sideways(sideways)
                     .show_inside(ui, &mut Viewer)
-                    .apply(ui.ctx(), state, &mut Viewer);
+                    .apply(ui.ctx(), state);
             });
         });
         output.textures_delta.clear();

@@ -16,14 +16,13 @@
 //! once was the thing the type system refused. The assertion afterwards is only there so that a
 //! test which stopped drawing anything could not pass quietly.
 //!
-//! # Why the reading viewer is not the one `apply` gets
+//! # One viewer, and the two halves it does not have to span
 //!
-//! [`DockDraw::apply`](egui_dockyard::DockDraw::apply) still takes a `TabViewer`, because closing
-//! a tab asks the application for permission (`on_close`, `is_closeable`) and for a successor.
-//! A viewer holding `&DockState` therefore cannot be the one handed to `apply`, which needs the
-//! tree mutably — so this file drops it first and applies with a plain one. Removing those
-//! callbacks is the next step of the track (D5); when it lands, one viewer will do both halves
-//! and this comment goes with it.
+//! [`DockDraw::apply`](egui_dockyard::DockDraw::apply) asks the application nothing: it is handed
+//! the tree mutably, and by then there is nobody left to ask. So the reading viewer is simply
+//! finished with when drawing is — it is the only viewer there is, and the frame's edits take the
+//! tree after it has let go. That is the shape an application beside its own tree needs: the two
+//! halves are separated in *time*, so neither of them needs a cell to reach the other.
 
 use egui::{
     Atoms, CentralPanel, Context, Id, Pos2, RawInput, Rect, Ui, Vec2,
@@ -55,21 +54,6 @@ impl TabViewer for Peek<'_> {
     }
 }
 
-/// What `apply` is given, since the reading viewer cannot be — see the module docs.
-struct Plain;
-
-impl TabViewer for Plain {
-    type Tab = String;
-
-    fn title(&mut self, tab: &Self::Tab) -> Atoms<'static> {
-        Atoms::new(tab.clone())
-    }
-
-    fn ui(&mut self, ui: &mut Ui, tab: &Self::Tab) {
-        ui.label(tab.as_str());
-    }
-}
-
 #[test]
 fn a_tab_body_can_read_the_tree_it_is_drawn_in() {
     let ctx = Context::default();
@@ -95,7 +79,7 @@ fn a_tab_body_can_read_the_tree_it_is_drawn_in() {
                     .show_inside(ui, &mut peek);
                 seen = peek.seen;
                 // `peek` is done with the tree; the frame's edits can have it mutably.
-                drawn.apply(ui.ctx(), &mut tree, &mut Plain);
+                drawn.apply(ui.ctx(), &mut tree);
             });
         });
         output.textures_delta.clear();

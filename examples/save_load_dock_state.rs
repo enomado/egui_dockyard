@@ -83,7 +83,7 @@ impl eframe::App for MyApp {
         DockArea::new(&self.tree)
             .style(Style::from_egui(ui.style().as_ref()))
             .show_inside(ui, &mut tab_viewer)
-            .apply(ui.ctx(), &mut self.tree, &mut tab_viewer);
+            .apply(ui.ctx(), &mut self.tree);
         if tab_viewer.modified {
             self.save_json();
         }

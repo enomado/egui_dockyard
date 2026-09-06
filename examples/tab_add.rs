@@ -65,7 +65,7 @@ impl eframe::App for MyApp {
                 style
             })
             .show_inside(ui, &mut tab_viewer)
-            .apply(ui.ctx(), &mut self.tree, &mut tab_viewer);
+            .apply(ui.ctx(), &mut self.tree);
 
         added_nodes.drain(..).for_each(|path| {
             self.tree.set_focused_node_and_surface(path);

@@ -138,7 +138,7 @@ impl Sim {
                     .id(Id::new(DOCK_ID))
                     .style(Style::from_egui(ui.style().as_ref()))
                     .show_inside(ui, &mut Viewer)
-                    .apply(ui.ctx(), state, &mut Viewer)
+                    .apply(ui.ctx(), state)
                     .dragging
                     .map(|drag| drag.subject);
             });

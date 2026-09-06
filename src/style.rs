@@ -60,7 +60,7 @@ pub enum TabAddAlign {
 /// DockArea::new(&dock_state)
 ///     .style(style)
 ///     .show_inside(ui, &mut MyTabViewer)
-///     .apply(ui.ctx(), &mut dock_state, &mut MyTabViewer);
+///     .apply(ui.ctx(), &mut dock_state);
 /// # });
 /// # });
 /// #

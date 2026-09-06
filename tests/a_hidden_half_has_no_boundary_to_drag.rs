@@ -152,7 +152,7 @@ impl Sim {
                     .show_leaf_collapse_buttons(true)
                     .collapse_sideways(true)
                     .show_inside(ui, &mut Viewer)
-                    .apply(ui.ctx(), state, &mut Viewer);
+                    .apply(ui.ctx(), state);
             });
         });
         output.textures_delta.clear();

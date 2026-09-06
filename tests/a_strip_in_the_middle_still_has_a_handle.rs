@@ -137,7 +137,7 @@ impl Sim {
                     // there is no strip to have a handle beside.
                     .collapse_sideways(true)
                     .show_inside(ui, &mut Viewer)
-                    .apply(ui.ctx(), state, &mut Viewer);
+                    .apply(ui.ctx(), state);
             });
         });
         output.textures_delta.clear();

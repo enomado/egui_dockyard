@@ -146,7 +146,7 @@ fn run_frame_painting(
                 .id(id)
                 .style(style.clone())
                 .show_inside(ui, &mut Viewer)
-                .apply(ui.ctx(), state, &mut Viewer)
+                .apply(ui.ctx(), state)
                 .events;
         });
     });
@@ -179,7 +179,7 @@ fn handle_paint(
                 .id(id)
                 .style(style.clone())
                 .show_inside(ui, &mut Viewer)
-                .apply(ui.ctx(), state, &mut Viewer);
+                .apply(ui.ctx(), state);
         });
     });
     output.textures_delta.clear();

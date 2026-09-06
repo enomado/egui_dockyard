@@ -134,7 +134,7 @@ impl Sim {
                     .style(Style::from_egui(ui.style().as_ref()))
                     .show_close_buttons(true)
                     .show_inside(ui, viewer)
-                    .apply(ui.ctx(), state, viewer);
+                    .apply(ui.ctx(), state);
             });
         });
         // Headless harness: no GPU backend to hand the delta to, and epaint panics on drop

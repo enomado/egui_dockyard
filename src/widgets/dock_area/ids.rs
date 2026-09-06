@@ -115,7 +115,7 @@ pub fn tab_widget_id(dock_area_id: Id, path: NodePath, tab: TabId) -> Id {
 /// #                 .style(Style::from_egui(ui.style().as_ref()))
 /// #                 .show_close_buttons(true)
 /// #                 .show_inside(ui, &mut Viewer)
-/// #                 .apply(ui.ctx(), state, &mut Viewer);
+/// #                 .apply(ui.ctx(), state);
 /// #         });
 /// #     });
 /// #     output.textures_delta.clear();
@@ -274,7 +274,7 @@ pub fn dragged_tab<Tab>(
 /// #                 .id(dock_id)
 /// #                 .style(Style::from_egui(ui.style().as_ref()))
 /// #                 .show_inside(ui, &mut Viewer)
-/// #                 .apply(ui.ctx(), state, &mut Viewer);
+/// #                 .apply(ui.ctx(), state);
 /// #         });
 /// #     });
 /// #     output.textures_delta.clear();

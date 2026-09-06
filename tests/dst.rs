@@ -1384,7 +1384,7 @@ impl Sim {
                     // is the arrangement the consumer this crate is written for runs.
                     .collapse_sideways(true)
                     .show_inside(ui, &mut Viewer)
-                    .apply(ui.ctx(), state, &mut Viewer);
+                    .apply(ui.ctx(), state);
                 // One per *frame* that carried a finalised event, which is the unit the contract
                 // is written in: `layout_committed()` is a per-frame bool, and it is the signal
                 // a consumer records one undo entry and one save on. A live separator drag

@@ -81,7 +81,7 @@ fn frame(
                 .id(id)
                 .style(Style::from_egui(ui.style().as_ref()))
                 .show_inside(ui, &mut Viewer)
-                .apply(ui.ctx(), state, &mut Viewer)
+                .apply(ui.ctx(), state)
                 .dragging;
         });
     });

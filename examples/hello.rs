@@ -10,7 +10,7 @@ use egui::{
 };
 use egui_dockyard::{
     AllowedSplits, DockArea, DockState, NodePath, OverlayType, Style, SurfaceIndex,
-    TabInteractionStyle, TabViewer, tab_viewer::OnCloseResponse,
+    TabInteractionStyle, TabViewer,
 };
 
 /// Adds a widget with a label next to it, can be given an extra parameter in order to show a hover text
@@ -117,11 +117,6 @@ impl TabViewer for MyContext {
 
     fn is_closeable(&self, tab: &Self::Tab) -> bool {
         ["Inspector", "Style Editor"].contains(&tab.as_str())
-    }
-
-    fn on_close(&mut self, tab: &Self::Tab) -> OnCloseResponse {
-        self.open_tabs.remove(tab);
-        OnCloseResponse::Close
     }
 }
 
@@ -622,7 +617,7 @@ impl eframe::App for MyApp {
             .secondary_button_on_modifier(self.context.secondary_button_on_modifier)
             .secondary_button_context_menu(self.context.secondary_button_context_menu)
             .show_inside(ui, &mut self.context);
-        drawn.apply(ui.ctx(), &mut self.tree, &mut self.context);
+        drawn.apply(ui.ctx(), &mut self.tree);
     }
 }
 
